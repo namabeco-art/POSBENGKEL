@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import { 
   Search, 
   User as UserIcon, 
@@ -53,7 +53,8 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
   const [showCheckout, setShowCheckout] = useState(false);
   const [showSuccessModal, setShowSuccessModal] = useState(false);
   const [lastCompletedSale, setLastCompletedSale] = useState<Sale | null>(null);
-  const [selectedCustomer, setSelectedCustomer] = useState<Customer>(customers[0] || { id: 'C1', name: 'Umum', phone: '-', address: '-', creditLimit: 0, currentDebt: 0, level: 1 });
+  const UMUM_CUSTOMER: Customer = useMemo(() => ({ id: 'UMUM', name: 'Umum', phone: '-', address: '-', creditLimit: 0, currentDebt: 0, level: 1, rewardPoints: 0 }), []);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer>(UMUM_CUSTOMER);
   const [showCustomerList, setShowCustomerList] = useState(false);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showMobileCart, setShowMobileCart] = useState(false);
@@ -77,46 +78,53 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     let timeoutId: any = null;
 
     const handleKeyDown = (e: KeyboardEvent) => {
-      const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-      // If user is actively typing in modal or qty input, ignore barcode buffer unless they hit function keys
-      if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2') return;
+      try {
+        const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+        if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2') return;
 
-      if (e.key === 'F1') {
-        e.preventDefault();
-        if (cart.length > 0 && !showCheckout) {
-          setPaymentType('TUNAI');
-          setAmountReceived(total);
-          setShowCheckout(true);
+        if (e.key === 'F1') {
+          e.preventDefault();
+          if (cart.length > 0 && !showCheckout) {
+            setPaymentType('TUNAI');
+            setAmountReceived(total);
+            setShowCheckout(true);
+          }
+          return;
         }
-      }
 
-      if (e.key === 'F2') {
-        e.preventDefault();
-        inputRef.current?.focus();
-        setShowCheckout(false);
-      }
-
-      if (e.key === 'Enter' && !showCheckout) {
-        if (barcodeString.length >= 3) {
-           e.preventDefault();
-           const itemMatch = items.find(i => i.barcode === barcodeString || i.code === barcodeString);
-           if (itemMatch) {
-             addToCart(itemMatch);
-             setSearchTerm('');
-           } else {
-             // Fallback to normal search Enter if nothing found
-           }
-           barcodeString = '';
+        if (e.key === 'F2') {
+          e.preventDefault();
+          inputRef.current?.focus();
+          setShowCheckout(false);
+          return;
         }
-      } else if (e.key.length === 1 && !showCheckout) {
-         barcodeString += e.key;
-         if (timeoutId) clearTimeout(timeoutId);
-         timeoutId = setTimeout(() => { barcodeString = ''; }, 50); // Fast typers or scanner (50ms interval)
+
+        if (e.key === 'Enter' && !showCheckout) {
+          if (barcodeString.length >= 3) {
+            e.preventDefault();
+            const itemMatch = items.find(i => i.barcode === barcodeString || i.code === barcodeString);
+            if (itemMatch) {
+              addToCart(itemMatch);
+              setSearchTerm('');
+            }
+            barcodeString = '';
+          }
+        } else if (e.key.length === 1 && !showCheckout) {
+          barcodeString += e.key;
+          if (timeoutId) clearTimeout(timeoutId);
+          timeoutId = setTimeout(() => { barcodeString = ''; }, 50);
+        }
+      } catch (err) {
+        console.error('[Barcode] handleKeyDown error:', err);
+        barcodeString = '';
       }
     };
     window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [items, cart, total, showCheckout]);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [items, cart, total, showCheckout, addToCart]);
   
   // PERFORMANCE OPTIMIZATION: Memoize heavy computations
   const categories = useMemo(() => {
@@ -206,29 +214,25 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     }
   }, [promoName, selectedPromo]);
 
-  const addToCart = (item: Item) => {
+  const addToCart = useCallback((item: Item) => {
     if (item.stock <= 0) {
       alert(`Stok ${item.name} habis!`);
       return;
     }
-    const existing = cart.find(c => c.id === item.id);
-    const price = item.memberPrices[selectedCustomer.level - 1] || item.memberPrices[0];
-
-    if (existing) {
-      if (existing.qty + 1 > item.stock) {
-        alert("Jumlah melebihi stok yang tersedia!");
-        return;
+    setCart(prevCart => {
+      const existing = prevCart.find(c => c.id === item.id);
+      const price = item.memberPrices?.[selectedCustomer.level - 1] ?? item.memberPrices?.[0] ?? item.price;
+      if (existing) {
+        if (existing.qty + 1 > item.stock) {
+          alert("Jumlah melebihi stok yang tersedia!");
+          return prevCart;
+        }
+        return prevCart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c);
+      } else {
+        return [...prevCart, { id: item.id, item, selectedPrice: price, qty: 1 }];
       }
-      setCart(cart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c));
-    } else {
-      setCart([...cart, { 
-        id: item.id, 
-        item, 
-        selectedPrice: price, 
-        qty: 1 
-      }]);
-    }
-  };
+    });
+  }, [selectedCustomer.level]);
 
   const updateQty = (id: string, delta: number) => {
     setCart(cart.map(c => {
