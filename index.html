@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Hulio Group iPOS5</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    
+    <script>
+      // Kunci konfigurasi utama yang bertindak sebagai virtual .env
+      const CONFIG_KEY = 'HGROUP_CLOUD_CONFIG';
+      
+      const envProxy = {
+        NODE_ENV: 'production',
+        browser: true
+      };
+
+      // API_KEY menggunakan getter untuk memastikan pembacaan disk real-time
+      Object.defineProperty(envProxy, 'API_KEY', {
+        get() { 
+          try {
+            const raw = localStorage.getItem(CONFIG_KEY);
+            if (!raw) return '';
+            const config = JSON.parse(raw);
+            return config.openRouterApiKey || config.geminiApiKey || ''; 
+          } catch (e) { return ''; }
+        },
+        enumerable: true,
+        configurable: false
+      });
+
+      window.process = window.process || {};
+      Object.defineProperty(window.process, 'env', {
+        value: envProxy,
+        writable: false,
+        configurable: false
+      });
+      
+      window.global = window;
+    </script>
+
+    <style>
+        body {
+          font-family: 'Plus Jakarta Sans', 'Manrope', sans-serif;
+          background: radial-gradient(circle at top right, #dbeafe 0%, #eef2ff 38%, #f8fafc 100%);
+          margin: 0;
+          -webkit-font-smoothing: antialiased;
+          -moz-osx-font-smoothing: grayscale;
+        }
+        button { font-family: 'Plus Jakarta Sans', 'Manrope', sans-serif !important; letter-spacing: -0.01em !important; }
+        .font-black { font-weight: 800 !important; }
+        #root:empty { display: none; }
+        input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+    </style>
+
+<script type="importmap">
+{
+  "imports": {
+    "react": "https://esm.sh/react@19.0.0",
+    "react-dom": "https://esm.sh/react-dom@19.0.0",
+    "react-dom/client": "https://esm.sh/react-dom@19.0.0/client",
+    "recharts": "https://esm.sh/recharts@2.15.0?external=react,react-dom",
+    "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react",
+    "react-dom/": "https://esm.sh/react-dom@^19.2.3/",
+    "react/": "https://esm.sh/react@^19.2.3/"
+  }
+}
+</script>
+</head>
+<body>
+    <div id="root"></div>
+    <script type="module">
+        import './index.js';
+    </script>
+</body>
+</html>

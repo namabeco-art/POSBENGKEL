@@ -1,0 +1,7 @@
+{
+  "name": "14-01-2025 POS HULIO",
+  "description": "Enterprise ecosystem for modern retail and wholesale, integrated with AI Business Intelligence and consultant modules.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
