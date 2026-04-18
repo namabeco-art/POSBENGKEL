@@ -28,23 +28,62 @@ const normalizeBoolean = (value?: string, defaultValue = false) => {
 const getEnvStores = (): EnvStoreConfig[] => {
   const stores: EnvStoreConfig[] = [];
   
-  // Look for VITE_STORE_n format
-  for (let i = 1; i <= 10; i++) {
-    const id = import.meta.env[`VITE_STORE_${i}_ID`];
-    const url = import.meta.env[`VITE_STORE_${i}_URL`];
-    const key = import.meta.env[`VITE_STORE_${i}_ANON_KEY`];
-    
-    if (id && url && key) {
+  // Explicitly list variables for Vite static analysis
+  const configs = [
+    {
+      id: import.meta.env.VITE_STORE_1_ID,
+      name: import.meta.env.VITE_STORE_1_NAME,
+      url: import.meta.env.VITE_STORE_1_URL,
+      key: import.meta.env.VITE_STORE_1_ANON_KEY,
+      region: import.meta.env.VITE_STORE_1_REGION,
+      bucket: import.meta.env.VITE_STORE_1_BUCKET
+    },
+    {
+      id: import.meta.env.VITE_STORE_2_ID,
+      name: import.meta.env.VITE_STORE_2_NAME,
+      url: import.meta.env.VITE_STORE_2_URL,
+      key: import.meta.env.VITE_STORE_2_ANON_KEY,
+      region: import.meta.env.VITE_STORE_2_REGION,
+      bucket: import.meta.env.VITE_STORE_2_BUCKET
+    },
+    {
+      id: import.meta.env.VITE_STORE_3_ID,
+      name: import.meta.env.VITE_STORE_3_NAME,
+      url: import.meta.env.VITE_STORE_3_URL,
+      key: import.meta.env.VITE_STORE_3_ANON_KEY,
+      region: import.meta.env.VITE_STORE_3_REGION,
+      bucket: import.meta.env.VITE_STORE_3_BUCKET
+    },
+    {
+      id: import.meta.env.VITE_STORE_4_ID,
+      name: import.meta.env.VITE_STORE_4_NAME,
+      url: import.meta.env.VITE_STORE_4_URL,
+      key: import.meta.env.VITE_STORE_4_ANON_KEY,
+      region: import.meta.env.VITE_STORE_4_REGION,
+      bucket: import.meta.env.VITE_STORE_4_BUCKET
+    },
+    {
+      id: import.meta.env.VITE_STORE_5_ID,
+      name: import.meta.env.VITE_STORE_5_NAME,
+      url: import.meta.env.VITE_STORE_5_URL,
+      key: import.meta.env.VITE_STORE_5_ANON_KEY,
+      region: import.meta.env.VITE_STORE_5_REGION,
+      bucket: import.meta.env.VITE_STORE_5_BUCKET
+    }
+  ];
+
+  configs.forEach((c, i) => {
+    if (c.id && c.url && c.key) {
       stores.push({
-        storeId: id.trim(),
-        displayName: (import.meta.env[`VITE_STORE_${i}_NAME`] || (i === 1 ? 'PUSAT' : id)).trim(),
-        region: (import.meta.env[`VITE_STORE_${i}_REGION`] || (i === 1 ? 'Pusat' : 'Cloud')).trim(),
-        supabaseUrl: url.trim(),
-        supabaseAnonKey: key.trim(),
-        supabaseBucket: (import.meta.env[`VITE_STORE_${i}_BUCKET`] || 'erp-media').trim(),
+        storeId: c.id.trim(),
+        displayName: (c.name || (i === 0 ? 'PUSAT' : c.id)).trim(),
+        region: (c.region || (i === 0 ? 'Pusat' : 'Cloud')).trim(),
+        supabaseUrl: c.url.trim(),
+        supabaseAnonKey: c.key.trim(),
+        supabaseBucket: (c.bucket || 'erp-media').trim(),
       });
     }
-  }
+  });
 
   // Fallback to legacy single store variables if not already in list
   const legacyId = import.meta.env.VITE_STORE_ID;
