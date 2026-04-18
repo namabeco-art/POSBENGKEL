@@ -59,7 +59,7 @@ const App: React.FC = () => {
     suppliers, setSuppliers, accounts, setAccounts,
     purchaseOrders, setPurchaseOrders, sales, setSales,
     returns, setReturns, inventoryLogs, inventoryMovements, setInventoryMovements,
-    auditLogs, setAuditLogs, paymentRecords, setPaymentRecords,
+    auditLogs, paymentRecords, setPaymentRecords,
     cashSessions, setCashSessions, promotions, setPromotions,
     mediaAssets, setMediaAssets, aiUndoStack, setAiUndoStack,
     branches, aiConsultantHistory, setAiConsultantHistory,
@@ -561,7 +561,7 @@ const App: React.FC = () => {
     );
     setAiUndoStack(prev => [{
       id: `UNDO-${Date.now()}`,
-      actionType: 'PRICE_UPDATE',
+      actionType: 'PRICE_UPDATE' as const,
       label: `Undo perubahan harga (${updates.length} item)`,
       createdAt: new Date().toISOString(),
       payload: { items: beforeItems },
@@ -588,7 +588,7 @@ const App: React.FC = () => {
     });
     setAiUndoStack(prev => [{
       id: `UNDO-${Date.now()}`,
-      actionType: 'PROMO_CREATE',
+      actionType: 'PROMO_CREATE' as const,
       label: `Undo pembuatan promo (${drafts.length} campaign)`,
       createdAt: new Date().toISOString(),
       payload: { promotionIds: createdIds },
@@ -610,7 +610,7 @@ const App: React.FC = () => {
     drafts.forEach(addPurchaseOrder);
     setAiUndoStack(prev => [{
       id: `UNDO-${Date.now()}`,
-      actionType: 'PO_CREATE',
+      actionType: 'PO_CREATE' as const,
       label: `Undo draft PO (${drafts.length} dokumen)`,
       createdAt: new Date().toISOString(),
       payload: { poIds: createdIds },

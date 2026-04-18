@@ -7,6 +7,7 @@ import {
   Sale,
   SaleReturn,
   User,
+  Customer,
 } from '../types';
 
 const makeId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;

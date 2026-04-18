@@ -73,59 +73,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
   const inputRef = useRef<HTMLInputElement>(null);
   const customerRef = useRef<HTMLDivElement>(null);
   
-  useEffect(() => {
-    let barcodeString = '';
-    let timeoutId: any = null;
 
-    const handleKeyDown = (e: KeyboardEvent) => {
-      try {
-        const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-        if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2') return;
-
-        if (e.key === 'F1') {
-          e.preventDefault();
-          if (cart.length > 0 && !showCheckout) {
-            setPaymentType('TUNAI');
-            setAmountReceived(total);
-            setShowCheckout(true);
-          }
-          return;
-        }
-
-        if (e.key === 'F2') {
-          e.preventDefault();
-          inputRef.current?.focus();
-          setShowCheckout(false);
-          return;
-        }
-
-        if (e.key === 'Enter' && !showCheckout) {
-          if (barcodeString.length >= 3) {
-            e.preventDefault();
-            const itemMatch = items.find(i => i.barcode === barcodeString || i.code === barcodeString);
-            if (itemMatch) {
-              addToCart(itemMatch);
-              setSearchTerm('');
-            }
-            barcodeString = '';
-          }
-        } else if (e.key.length === 1 && !showCheckout) {
-          barcodeString += e.key;
-          if (timeoutId) clearTimeout(timeoutId);
-          timeoutId = setTimeout(() => { barcodeString = ''; }, 50);
-        }
-      } catch (err) {
-        console.error('[Barcode] handleKeyDown error:', err);
-        barcodeString = '';
-      }
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('keydown', handleKeyDown);
-      if (timeoutId) clearTimeout(timeoutId);
-    };
-  }, [items, cart, total, showCheckout, addToCart]);
-  
   // PERFORMANCE OPTIMIZATION: Memoize heavy computations
   const categories = useMemo(() => {
     return ['Semua', ...Array.from(new Set<string>(items.map(i => i.category)))];
@@ -221,7 +169,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     }
     setCart(prevCart => {
       const existing = prevCart.find(c => c.id === item.id);
-      const price = item.memberPrices?.[selectedCustomer.level - 1] ?? item.memberPrices?.[0] ?? item.price;
+      const price = item.memberPrices?.[selectedCustomer.level - 1] ?? item.memberPrices?.[0] ?? item.basePrice;
       if (existing) {
         if (existing.qty + 1 > item.stock) {
           alert("Jumlah melebihi stok yang tersedia!");
@@ -233,6 +181,59 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       }
     });
   }, [selectedCustomer.level]);
+
+  useEffect(() => {
+    let barcodeString = '';
+    let timeoutId: any = null;
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      try {
+        const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+        if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2') return;
+
+        if (e.key === 'F1') {
+          e.preventDefault();
+          if (cart.length > 0 && !showCheckout) {
+            setPaymentType('TUNAI');
+            setAmountReceived(total);
+            setShowCheckout(true);
+          }
+          return;
+        }
+
+        if (e.key === 'F2') {
+          e.preventDefault();
+          inputRef.current?.focus();
+          setShowCheckout(false);
+          return;
+        }
+
+        if (e.key === 'Enter' && !showCheckout) {
+          if (barcodeString.length >= 3) {
+            e.preventDefault();
+            const itemMatch = items.find(i => i.barcode === barcodeString || i.code === barcodeString);
+            if (itemMatch) {
+              addToCart(itemMatch);
+              setSearchTerm('');
+            }
+            barcodeString = '';
+          }
+        } else if (e.key.length === 1 && !showCheckout) {
+          barcodeString += e.key;
+          if (timeoutId) clearTimeout(timeoutId);
+          timeoutId = setTimeout(() => { barcodeString = ''; }, 50);
+        }
+      } catch (err) {
+        console.error('[Barcode] handleKeyDown error:', err);
+        barcodeString = '';
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      if (timeoutId) clearTimeout(timeoutId);
+    };
+  }, [items, cart, total, showCheckout, addToCart]);
 
   const updateQty = (id: string, delta: number) => {
     setCart(cart.map(c => {
