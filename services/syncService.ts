@@ -26,6 +26,12 @@ const sanitizeSupabaseUrl = (url: string) => {
   return cleanUrl;
 };
 
+const detectProvider = (url: string): 'upstash' | 'supabase' => {
+  const cleanUrl = url.toLowerCase();
+  if (cleanUrl.includes('upstash.io')) return 'upstash';
+  return 'supabase';
+};
+
 const withLegacyAliases = (config: CloudConfig): CloudConfig => ({
   ...config,
   url: config.supabaseUrl || config.url || '',
@@ -43,6 +49,14 @@ const getSupabaseHeaders = (anonKey: string, contentType?: string) => {
   const headers: Record<string, string> = {
     apikey: anonKey,
     Authorization: `Bearer ${anonKey}`,
+  };
+  if (contentType) headers['Content-Type'] = contentType;
+  return headers;
+};
+
+const getUpstashHeaders = (token: string, contentType?: string) => {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${token}`,
   };
   if (contentType) headers['Content-Type'] = contentType;
   return headers;
@@ -70,16 +84,13 @@ export const getCloudConfig = (): CloudConfig => {
       region: runtimeConfig.region || '',
     };
 
-    // If environment configuration is present
     if (hasEnvCloudConfig()) {
-      // If we have a runtime selection, check if it matches an env store for overriding credentials
       const matchingEnv = envConfig.stores.find(s => s.storeId === localConfig.storeId);
-      
       const base = matchingEnv || firstEnvStore;
 
       return withLegacyAliases(normalizeCloudProfile({
         storeId: localConfig.storeId || base.storeId,
-        enabled: localConfig.enabled || true, // env-driven usually means enabled
+        enabled: localConfig.enabled || true,
         openRouterApiKey: getResolvedOpenRouterApiKey(localConfig.openRouterApiKey),
         aiModel: getResolvedOpenRouterModel(localConfig.aiModel),
         supabaseUrl: sanitizeSupabaseUrl(matchingEnv?.supabaseUrl || getResolvedSupabaseUrl(localConfig.supabaseUrl)),
@@ -124,7 +135,7 @@ export const getCloudConfig = (): CloudConfig => {
 
 export const hasCloudConfig = (): boolean => {
   const config = getCloudConfig();
-  return Boolean(config.enabled && config.storeId && config.supabaseUrl && config.supabaseAnonKey);
+  return Boolean(config.enabled && config.storeId && (config.supabaseUrl || config.url) && (config.supabaseAnonKey || config.token));
 };
 
 export const saveCloudConfig = (config: any) => {
@@ -188,6 +199,28 @@ export const pushConfigToCloud = async (config: CloudConfig) => {
   const anonKey = config.supabaseAnonKey || config.token || '';
   const bucket = config.supabaseBucket || 'erp-media';
   if (!baseUrl || !anonKey || !config.storeId) return null;
+
+  const provider = detectProvider(baseUrl);
+  
+  if (provider === 'upstash') {
+    const key = `pos_config:${config.storeId}`;
+    const payload = JSON.stringify({
+      openRouterApiKey: config.openRouterApiKey || '',
+      aiModel: config.aiModel || 'openrouter/auto',
+      supabaseUrl: baseUrl,
+      supabaseAnonKey: anonKey,
+      supabaseBucket: bucket,
+      updatedAt: new Date().toISOString(),
+    });
+    
+    const response = await fetch(`${baseUrl}/set/${key}`, {
+      method: 'POST',
+      headers: getUpstashHeaders(anonKey),
+      body: payload,
+    });
+    if (!response.ok) throw new Error(`UPSTASH_PUSH_CONFIG_FAILED_${response.status}`);
+    return response.json();
+  }
 
   const path = buildStorageObjectPath(config.storeId, 'config-ai.json');
   const payload = JSON.stringify({
@@ -290,9 +323,23 @@ export const smartTestConnection = async (
   finalToken: string;
 }> => {
   const url = sanitizeSupabaseUrl(inputUrl);
+  const provider = detectProvider(url);
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    if (provider === 'upstash') {
+      const response = await fetch(`${url}/get/ping`, {
+        headers: getUpstashHeaders(inputToken),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+      if (response.ok) {
+        return { success: true, message: 'Koneksi Upstash Redis berhasil.', diagCode: 'OK', finalUrl: url, finalToken: inputToken };
+      }
+      return { success: false, message: response.status === 401 ? 'Token Upstash tidak valid.' : `Upstash Error ${response.status}`, diagCode: response.status === 401 ? 'AUTH_ERROR' : 'GENERIC_ERROR', finalUrl: url, finalToken: inputToken };
+    }
 
     const response = await fetch(`${url}/auth/v1/health`, {
       headers: getSupabaseHeaders(inputToken),
@@ -363,9 +410,43 @@ export const withCloudInventoryLock = async <T>(
     return task();
   }
 
+  const provider = detectProvider(baseUrl);
   const maxRetries = options?.maxRetries ?? 20;
   const retryMs = options?.retryMs ?? 300;
   const lockTtlMs = options?.lockTtlMs ?? 15000;
+
+  if (provider === 'upstash') {
+    const lockKey = `pos_lock:${storeId}:inventory`;
+    const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
+    let acquired = false;
+
+    for (let i = 0; i < maxRetries; i += 1) {
+      // Upstash SET key value NX EX seconds
+      const response = await fetch(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
+        method: 'POST',
+        headers: getUpstashHeaders(anonKey),
+      });
+      
+      if (response.ok) {
+        const body = await response.json().catch(() => ({}));
+        if (body.result === 'OK') {
+          acquired = true;
+          break;
+        }
+      }
+      await sleep(retryMs);
+    }
+
+    if (!acquired) throw new Error('STOCK_LOCK_TIMEOUT::Sistem sedang dipakai kasir lain (Upstash).');
+
+    try {
+      return await task();
+    } finally {
+      // Delete only if we are the owner? Simple delete for now.
+      await fetch(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
+    }
+  }
+
   const lockPath = buildStorageObjectPath(storeId, 'locks/inventory.lock.json');
   const lockUrl = buildStorageObjectUrl(baseUrl, bucket, lockPath);
   const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
@@ -435,9 +516,21 @@ export const pushToCloud = async (data: any) => {
   const bucket = config.supabaseBucket || 'erp-media';
   if (!config.enabled || !baseUrl || !anonKey || !config.storeId) return null;
 
-  const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
+  const provider = detectProvider(baseUrl);
   const encodedData = secureEncode(data);
 
+  if (provider === 'upstash') {
+    const key = `pos_state:${config.storeId}`;
+    const response = await fetch(`${baseUrl}/set/${key}`, {
+      method: 'POST',
+      headers: getUpstashHeaders(anonKey),
+      body: encodedData,
+    });
+    if (!response.ok) throw new Error(`UPSTASH_PUSH_FAILED_${response.status}`);
+    return response.json();
+  }
+
+  const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
   const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
     method: 'POST',
     headers: {
@@ -458,6 +551,19 @@ export const pullFromCloud = async () => {
   const bucket = config.supabaseBucket || 'erp-media';
   if (!config.enabled || !baseUrl || !anonKey || !config.storeId) return null;
 
+  const provider = detectProvider(baseUrl);
+
+  if (provider === 'upstash') {
+    const key = `pos_state:${config.storeId}`;
+    const response = await fetch(`${baseUrl}/get/${key}`, {
+      headers: getUpstashHeaders(anonKey),
+    });
+    if (!response.ok) return null;
+    const body = await response.json();
+    if (!body?.result) return null;
+    return secureDecode(body.result);
+  }
+
   const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
   const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
     headers: getSupabaseHeaders(anonKey),
@@ -467,3 +573,4 @@ export const pullFromCloud = async () => {
   if (!encodedData) return null;
   return secureDecode(encodedData);
 };
+
