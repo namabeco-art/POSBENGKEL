@@ -1118,15 +1118,37 @@ const App: React.FC = () => {
               </div>}
 
               {isEnvLockedWorkspace && (
-                <div className="rounded-[1rem] border border-emerald-900/40 bg-emerald-950/30 px-3 py-3">
-                  <div className="flex items-center gap-3">
-                    <div className="w-9 h-9 rounded-full bg-emerald-500/15 text-emerald-300 flex items-center justify-center">
-                      <Cloud size={16} />
-                    </div>
-                    <div className="min-w-0">
-                      <div className="text-[10px] font-black uppercase tracking-[0.18em] text-emerald-200">{currentActiveDbLabel}</div>
-                      <div className="text-[8px] font-bold uppercase tracking-[0.16em] text-emerald-400 mt-1">{currentActiveRegion} • {currentActiveDbId}</div>
-                    </div>
+                <div className="space-y-4">
+                  <div className="px-1 border-b border-slate-800 pb-2 mb-2 flex items-center justify-between">
+                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-500">Workspace Terkunci (Env)</div>
+                    <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">{envConfig.stores.length} Unit Terdeteksi</div>
+                  </div>
+                  <div className="space-y-2 max-h-[300px] overflow-y-auto scrollbar-hide">
+                    {envConfig.stores.map((store, i) => {
+                      const isSelected = currentActiveDbId === store.storeId && !isLocalActive;
+                      const isPusat = i === 0;
+                      return (
+                        <button
+                          key={store.storeId}
+                          onClick={() => switchDb({ ...store, enabled: true })}
+                          className={`w-full p-3 rounded-2xl border transition-all flex items-center justify-between group ${isSelected ? 'bg-emerald-500/10 border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.1)]' : 'bg-slate-900/50 border-slate-800 hover:border-slate-600'}`}
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isSelected ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500'}`}>
+                              {isPusat ? <Database size={18} /> : <Store size={18} />}
+                            </div>
+                            <div className="text-left">
+                              <div className="flex items-center gap-2">
+                                <div className={`font-black text-[11px] uppercase truncate ${isSelected ? 'text-white' : 'text-slate-300'}`}>{store.displayName}</div>
+                                {isPusat && <span className="px-1.5 py-0.5 bg-indigo-600 text-white text-[7px] font-black uppercase rounded">PUSAT</span>}
+                              </div>
+                              <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest mt-1">{store.region} • {store.storeId}</div>
+                            </div>
+                          </div>
+                          {isSelected && <CheckCircle2 size={16} className="text-emerald-500" />}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}

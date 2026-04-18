@@ -259,14 +259,24 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
         
         <div className="lg:col-span-7 space-y-8">
-          {(usingEnvCloud || envConfig.openRouterApiKey) && (
-            <div className="bg-amber-50 rounded-[2rem] border-2 border-amber-200 p-6">
-              <div className="font-black text-amber-800 uppercase tracking-widest text-sm">Environment-Driven Config</div>
-              <p className="mt-2 text-amber-700 font-bold text-xs leading-relaxed">
-                Deployment ini bisa langsung jalan dari file `.env`. Untuk pindah server, cukup salin variabel environment lalu build ulang.
-              </p>
+          <div className="bg-amber-50 rounded-[2rem] border-2 border-amber-200 p-6">
+            <div className="flex gap-4">
+              <div className="p-3 bg-amber-100 text-amber-600 rounded-xl h-fit shadow-sm"><Database size={20}/></div>
+              <div className="min-w-0">
+                <div className="font-black text-amber-800 uppercase tracking-widest text-sm">Deployment Terkelola (Environment)</div>
+                <p className="mt-2 text-amber-700 font-bold text-xs leading-relaxed">
+                  Konfigurasi database unit/toko ditarik secara otomatis dari file `.env` server. Pengubahan manual via menu ini dinonaktifkan untuk menjaga stabilitas sistem pusat dan cabang.
+                </p>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {envConfig.stores.map((s, i) => (
+                    <span key={s.storeId} className={`px-2 py-1 rounded-lg text-[8px] font-black uppercase border ${i === 0 ? 'bg-indigo-600 border-indigo-700 text-white' : 'bg-white border-amber-300 text-amber-800'}`}>
+                      {i === 0 ? 'PUSAT: ' : ''}{s.displayName}
+                    </span>
+                  ))}
+                </div>
+              </div>
             </div>
-          )}
+          </div>
           <div className="bg-white rounded-[2.5rem] border-4 border-slate-100 overflow-hidden shadow-2xl">
              <div className="p-8 bg-slate-900 text-white flex justify-between items-center">
                 <div className="flex items-center gap-4">
@@ -277,39 +287,46 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
              </div>
              
              <div className="p-10 space-y-8">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
-                   <div className="space-y-3">
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">STORE ID</label>
-                      <input 
-                         className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
-                         placeholder="nama_toko"
-                         value={cloudConfig.storeId}
-                         disabled={!allowRuntimeSettings && usingEnvCloud}
-                         onChange={(e) => setCloudConfig({...cloudConfig, storeId: e.target.value.toLowerCase().replace(/\s+/g, '_')})}
+                {!usingEnvCloud ? (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+                       <div className="space-y-3">
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">STORE ID</label>
+                          <input 
+                             className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
+                             placeholder="nama_toko"
+                             value={cloudConfig.storeId}
+                             onChange={(e) => setCloudConfig({...cloudConfig, storeId: e.target.value.toLowerCase().replace(/\s+/g, '_')})}
+                           />
+                       </div>
+                       <div className="space-y-3">
+                          <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">SUPABASE URL</label>
+                          <input 
+                             className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
+                             placeholder="https://xxxxx.supabase.co"
+                             value={cloudConfig.supabaseUrl || cloudConfig.url || ''}
+                             onChange={(e) => setCloudConfig({...cloudConfig, supabaseUrl: e.target.value})}
+                           />
+                       </div>
+                    </div>
+                    <div className="space-y-3">
+                       <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">SUPABASE ANON KEY</label>
+                       <input 
+                          type="password"
+                          className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
+                          placeholder="eyJ..."
+                          value={cloudConfig.supabaseAnonKey || cloudConfig.token || ''}
+                          onChange={(e) => setCloudConfig({...cloudConfig, supabaseAnonKey: e.target.value})}
                        />
-                   </div>
-                   <div className="space-y-3">
-                      <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">SUPABASE URL</label>
-                      <input 
-                         className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
-                         placeholder="https://xxxxx.supabase.co"
-                         value={cloudConfig.supabaseUrl || cloudConfig.url || ''}
-                         disabled={!allowRuntimeSettings && usingEnvCloud}
-                         onChange={(e) => setCloudConfig({...cloudConfig, supabaseUrl: e.target.value})}
-                       />
-                   </div>
-                </div>
-                <div className="space-y-3">
-                   <label className="text-[10px] font-black text-slate-500 uppercase tracking-widest">SUPABASE ANON KEY</label>
-                   <input 
-                      type="password"
-                      className="w-full p-4 bg-slate-50 border-4 border-slate-100 rounded-2xl font-black text-slate-800 focus:border-blue-600 outline-none"
-                      placeholder="eyJ..."
-                      value={cloudConfig.supabaseAnonKey || cloudConfig.token || ''}
-                      disabled={!allowRuntimeSettings && usingEnvCloud}
-                      onChange={(e) => setCloudConfig({...cloudConfig, supabaseAnonKey: e.target.value})}
-                   />
-                </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="p-8 bg-slate-50 rounded-[2rem] border-4 border-dashed border-slate-100 text-center space-y-3">
+                    <Database size={32} className="mx-auto text-slate-300" />
+                    <div className="font-black text-slate-400 uppercase tracking-widest text-xs">Konfigurasi DB Dikunci</div>
+                    <p className="text-[10px] font-bold text-slate-400 uppercase leading-relaxed max-w-xs mx-auto">Database Unit sedang menggunakan kredensial server. Pengubahan hanya bisa dilakukan melalui file .env</p>
+                  </div>
+                )}
 
                 <div className="pt-8 border-t-4 border-slate-100 space-y-6">
                    <div className="flex justify-between items-center">

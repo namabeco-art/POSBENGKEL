@@ -52,6 +52,8 @@ const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 export const getCloudConfig = (): CloudConfig => {
   const envConfig = getEnvConfig();
+  const firstEnvStore = envConfig.stores[0];
+
   try {
     const saved = localStorage.getItem(STORAGE_CONFIG_KEY);
     const runtimeConfig = saved ? JSON.parse(saved) : {};
@@ -68,17 +70,23 @@ export const getCloudConfig = (): CloudConfig => {
       region: runtimeConfig.region || '',
     };
 
+    // If environment configuration is present
     if (hasEnvCloudConfig()) {
+      // If we have a runtime selection, check if it matches an env store for overriding credentials
+      const matchingEnv = envConfig.stores.find(s => s.storeId === localConfig.storeId);
+      
+      const base = matchingEnv || firstEnvStore;
+
       return withLegacyAliases(normalizeCloudProfile({
-        storeId: envConfig.storeId,
-        enabled: envConfig.cloudEnabled,
+        storeId: localConfig.storeId || base.storeId,
+        enabled: localConfig.enabled || true, // env-driven usually means enabled
         openRouterApiKey: getResolvedOpenRouterApiKey(localConfig.openRouterApiKey),
         aiModel: getResolvedOpenRouterModel(localConfig.aiModel),
-        supabaseUrl: sanitizeSupabaseUrl(getResolvedSupabaseUrl(localConfig.supabaseUrl)),
-        supabaseAnonKey: getResolvedSupabaseAnonKey(localConfig.supabaseAnonKey),
-        supabaseBucket: getResolvedSupabaseBucket(localConfig.supabaseBucket),
-        displayName: localConfig.displayName || '',
-        region: localConfig.region || '',
+        supabaseUrl: sanitizeSupabaseUrl(matchingEnv?.supabaseUrl || getResolvedSupabaseUrl(localConfig.supabaseUrl)),
+        supabaseAnonKey: matchingEnv?.supabaseAnonKey || getResolvedSupabaseAnonKey(localConfig.supabaseAnonKey),
+        supabaseBucket: matchingEnv?.supabaseBucket || getResolvedSupabaseBucket(localConfig.supabaseBucket),
+        displayName: localConfig.displayName || matchingEnv?.displayName || base.displayName,
+        region: localConfig.region || matchingEnv?.region || base.region,
       }));
     }
 
@@ -91,16 +99,25 @@ export const getCloudConfig = (): CloudConfig => {
       supabaseBucket: getResolvedSupabaseBucket(localConfig.supabaseBucket),
     }));
   } catch {
-    return withLegacyAliases(normalizeCloudProfile({
+    const base = firstEnvStore || {
       storeId: envConfig.storeId,
-      enabled: envConfig.cloudEnabled,
-      openRouterApiKey: envConfig.openRouterApiKey,
-      aiModel: envConfig.openRouterModel,
-      supabaseUrl: sanitizeSupabaseUrl(envConfig.supabaseUrl),
+      supabaseUrl: envConfig.supabaseUrl,
       supabaseAnonKey: envConfig.supabaseAnonKey,
       supabaseBucket: envConfig.supabaseBucket,
       displayName: '',
       region: '',
+    };
+
+    return withLegacyAliases(normalizeCloudProfile({
+      storeId: base.storeId,
+      enabled: envConfig.cloudEnabled || Boolean(firstEnvStore),
+      openRouterApiKey: envConfig.openRouterApiKey,
+      aiModel: envConfig.openRouterModel,
+      supabaseUrl: sanitizeSupabaseUrl(base.supabaseUrl),
+      supabaseAnonKey: base.supabaseAnonKey,
+      supabaseBucket: base.supabaseBucket,
+      displayName: base.displayName || '',
+      region: base.region || '',
     }));
   }
 };

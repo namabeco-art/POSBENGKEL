@@ -1,4 +1,5 @@
 import { getCloudConfig, getSavedDbList } from './syncService';
+import { getEnvConfig } from './appConfig';
 
 export type CloudProfile = {
   storeId: string;
@@ -13,6 +14,7 @@ export type CloudProfile = {
   aiModel?: string;
   displayName?: string;
   region?: string;
+  isFromEnv?: boolean;
 };
 
 const isLegacyCloudProfile = (profile: Partial<CloudProfile>) =>
@@ -43,20 +45,37 @@ export const normalizeCloudProfile = <T extends Partial<CloudProfile>>(profile: 
 
 export const getCloudProfiles = (): CloudProfile[] => {
   const activeConfig = getCloudConfig();
+  const envConfig = getEnvConfig();
   const merged = new Map<string, CloudProfile>();
 
+  // Use environment stores first (highest priority)
+  envConfig.stores.forEach((store, idx) => {
+    merged.set(store.storeId, {
+      ...store,
+      enabled: true,
+      isFromEnv: true,
+    });
+  });
+
+  // Then add saved DB list (only if not already overridden by env)
   getSavedDbList().forEach((profile: any) => {
     if (!profile?.storeId || !profile?.enabled) return;
+    if (merged.has(profile.storeId)) return; // Don't override env
+
     const hasSupabaseCreds = Boolean(profile.supabaseUrl || profile.url) && Boolean(profile.supabaseAnonKey || profile.token);
     if (!hasSupabaseCreds) return;
     merged.set(profile.storeId, normalizeCloudProfile(profile));
   });
 
-  if (activeConfig.enabled && activeConfig.storeId) {
+  // Ensure active config is in the list
+  if (activeConfig.enabled && activeConfig.storeId && !merged.has(activeConfig.storeId)) {
     merged.set(activeConfig.storeId, normalizeCloudProfile(activeConfig));
   }
 
-  return Array.from(merged.values()).sort((left, right) =>
-    getCloudProfileLabel(left).localeCompare(getCloudProfileLabel(right), 'id-ID'),
-  );
+  // Sort: Env first, then alpha
+  return Array.from(merged.values()).sort((left, right) => {
+    if (left.isFromEnv && !right.isFromEnv) return -1;
+    if (!left.isFromEnv && right.isFromEnv) return 1;
+    return getCloudProfileLabel(left).localeCompare(getCloudProfileLabel(right), 'id-ID');
+  });
 };
