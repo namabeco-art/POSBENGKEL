@@ -10,6 +10,9 @@ import {
 } from 'lucide-react';
 import { Item, Customer, Supplier, Account, Sale, PurchaseOrder } from '../types';
 import { printSimpleReport, exportToExcel } from '../services/printService';
+import SmartStockDashboard from '../components/SmartStockDashboard';
+import PiutangDashboard from '../components/PiutangDashboard';
+import ProfitAnalysis from '../components/ProfitAnalysis';
 
 interface ReportingProps {
   items: Item[];
@@ -22,7 +25,7 @@ interface ReportingProps {
 }
 
 const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, accounts, sales, purchaseOrders, onAnalyzeWithAI }) => {
-  const [activeReport, setActiveReport] = useState<'stok' | 'penjualan' | 'kas' | 'buku'>('stok');
+  const [activeReport, setActiveReport] = useState<'stok' | 'penjualan' | 'kas' | 'buku' | 'stok-pintar' | 'piutang' | 'profit'>('stok');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
   const [endDate, setEndDate] = useState('');
@@ -77,10 +80,13 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
   }, [customers, purchaseOrders]);
 
   const categories = [
-    { id: 'stok', label: 'Persediaan', icon: <Package size={18}/>, desc: 'Aset Barang' },
-    { id: 'penjualan', label: 'Sales & Laba', icon: <TrendingUp size={18}/>, desc: 'Pencapaian' },
+    { id: 'stok-pintar', label: 'Stok Pintar', icon: <Package size={18}/>, desc: 'Restock & Analisis' },
+    { id: 'profit', label: 'Laba Rugi', icon: <DollarSign size={18}/>, desc: 'Profit per Item' },
+    { id: 'piutang', label: 'Piutang', icon: <Users size={18}/>, desc: 'Hutang Pelanggan' },
+    { id: 'stok', label: 'Persediaan', icon: <Layers size={18}/>, desc: 'Aset Barang' },
+    { id: 'penjualan', label: 'Penjualan', icon: <TrendingUp size={18}/>, desc: 'Pencapaian' },
     { id: 'kas', label: 'Kas & Bank', icon: <Landmark size={18}/>, desc: 'Likuiditas' },
-    { id: 'buku', label: 'Buku Besar', icon: <Notebook size={18}/>, desc: 'Hutang/Piutang' }
+    { id: 'buku', label: 'Buku Besar', icon: <Notebook size={18}/>, desc: 'Jurnal' }
   ];
 
   const getFilteredData = () => {
@@ -228,7 +234,21 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
         ))}
       </div>
 
-      {/* Summary Row */}
+      {/* New Feature Components */}
+      {activeReport === 'stok-pintar' && (
+        <SmartStockDashboard items={items} sales={sales} />
+      )}
+
+      {activeReport === 'piutang' && (
+        <PiutangDashboard customers={customers} sales={sales} />
+      )}
+
+      {activeReport === 'profit' && (
+        <ProfitAnalysis items={items} sales={sales} />
+      )}
+
+      {/* Legacy Reports - Summary Row */}
+      {(activeReport === 'stok' || activeReport === 'penjualan' || activeReport === 'kas' || activeReport === 'buku') && (<>
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         {activeReport === 'stok' && (
           <>
@@ -379,6 +399,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
            </table>
         </div>
       </div>
+      </>)}
     </div>
   );
 };
