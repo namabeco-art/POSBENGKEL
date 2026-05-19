@@ -457,32 +457,38 @@ const App: React.FC = () => {
     mutator: (snapshot: AppData) => AppData,
   ) => {
     const localSnapshot = buildDataSnapshot();
-    if (!hasCloudConfig()) {
-      const nextLocal = mutator(localSnapshot);
-      applyData(nextLocal);
-      saveAppDataLocal(nextLocal);
-      return;
-    }
+    
+    // Always apply locally first — never lose a transaction
+    const nextLocal = mutator(localSnapshot);
+    applyData(nextLocal);
+    saveAppDataLocal(nextLocal);
 
-    setIsSyncing(true);
-    try {
-      await withCloudInventoryLock(async () => {
-        const latest = await pullFromCloud();
-        const baseSnapshot = (latest && typeof latest === 'object')
-          ? ({ ...localSnapshot, ...latest } as AppData)
-          : localSnapshot;
-        const nextSnapshot = mutator(baseSnapshot);
-        await pushToCloud(nextSnapshot);
-        applyData(nextSnapshot);
-        saveAppDataLocal(nextSnapshot);
-      });
-      setSyncError(false);
-      setLastSyncTime(new Date().toLocaleTimeString());
-    } catch (error: any) {
-      setSyncError(true);
-      throw error;
-    } finally {
-      setIsSyncing(false);
+    // Then try to sync to cloud (non-blocking for the cashier)
+    if (hasCloudConfig()) {
+      setIsSyncing(true);
+      try {
+        await withCloudInventoryLock(async () => {
+          // Re-read from cloud to get latest, merge, then push
+          const latest = await pullFromCloud();
+          const baseSnapshot = (latest && typeof latest === 'object')
+            ? ({ ...localSnapshot, ...latest } as AppData)
+            : localSnapshot;
+          const nextSnapshot = mutator(baseSnapshot);
+          await pushToCloud(nextSnapshot);
+          // Update local with cloud-merged version
+          applyData(nextSnapshot);
+          saveAppDataLocal(nextSnapshot);
+        });
+        setSyncError(false);
+        setLastSyncTime(new Date().toLocaleTimeString());
+      } catch (error: any) {
+        // Cloud sync failed — but transaction is already saved locally!
+        setSyncError(true);
+        console.warn('[Sync] Cloud sync failed, data saved locally:', error?.message);
+        // Don't throw — the sale is safe in localStorage
+      } finally {
+        setIsSyncing(false);
+      }
     }
   }, [applyData, buildDataSnapshot]);
 

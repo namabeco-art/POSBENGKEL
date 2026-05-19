@@ -406,14 +406,18 @@ export const withCloudInventoryLock = async <T>(
   const bucket = config.supabaseBucket || 'erp-media';
   const storeId = config.storeId || 'default';
 
+  // If cloud not configured, just run the task directly
   if (!config.enabled || !baseUrl || !anonKey) {
     return task();
   }
 
+  // For single-store bengkel setup: skip lock entirely and just run the task.
+  // The lock mechanism is only needed for multi-terminal concurrent access.
+  // If lock fails, we still proceed with the task to avoid blocking the cashier.
   const provider = detectProvider(baseUrl);
-  const maxRetries = options?.maxRetries ?? 20;
-  const retryMs = options?.retryMs ?? 300;
-  const lockTtlMs = options?.lockTtlMs ?? 15000;
+  const maxRetries = options?.maxRetries ?? 5; // Reduced from 20 to 5
+  const retryMs = options?.retryMs ?? 500;
+  const lockTtlMs = options?.lockTtlMs ?? 10000; // 10 seconds
 
   if (provider === 'upstash') {
     const lockKey = `pos_lock:${storeId}:inventory`;
@@ -421,32 +425,38 @@ export const withCloudInventoryLock = async <T>(
     let acquired = false;
 
     for (let i = 0; i < maxRetries; i += 1) {
-      // Upstash SET key value NX EX seconds
-      const response = await fetch(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
-        method: 'POST',
-        headers: getUpstashHeaders(anonKey),
-      });
-      
-      if (response.ok) {
-        const body = await response.json().catch(() => ({}));
-        if (body.result === 'OK') {
-          acquired = true;
-          break;
+      try {
+        const response = await fetch(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
+          method: 'POST',
+          headers: getUpstashHeaders(anonKey),
+        });
+        
+        if (response.ok) {
+          const body = await response.json().catch(() => ({}));
+          if (body.result === 'OK') {
+            acquired = true;
+            break;
+          }
         }
+      } catch {
+        // Network error — skip lock and proceed
+        break;
       }
       await sleep(retryMs);
     }
 
-    if (!acquired) throw new Error('STOCK_LOCK_TIMEOUT::Sistem sedang dipakai kasir lain (Upstash).');
-
+    // IMPORTANT: Even if lock not acquired, still run the task.
+    // For single-store, it's better to process the sale than to block the cashier.
     try {
       return await task();
     } finally {
-      // Delete only if we are the owner? Simple delete for now.
-      await fetch(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
+      if (acquired) {
+        await fetch(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
+      }
     }
   }
 
+  // Supabase Storage lock
   const lockPath = buildStorageObjectPath(storeId, 'locks/inventory.lock.json');
   const lockUrl = buildStorageObjectUrl(baseUrl, bucket, lockPath);
   const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
@@ -459,53 +469,51 @@ export const withCloudInventoryLock = async <T>(
       expiresAt: new Date(Date.now() + lockTtlMs).toISOString(),
     });
 
-    const createRes = await fetch(lockUrl, {
-      method: 'POST',
-      headers: {
-        ...getSupabaseHeaders(anonKey, 'application/json'),
-        'x-upsert': 'false',
-      },
-      body: payload,
-    });
+    try {
+      const createRes = await fetch(lockUrl, {
+        method: 'POST',
+        headers: {
+          ...getSupabaseHeaders(anonKey, 'application/json'),
+          'x-upsert': 'false',
+        },
+        body: payload,
+      });
 
-    if (createRes.ok) {
-      acquired = true;
-      break;
-    }
-
-    const lockDataRes = await fetch(lockUrl, {
-      headers: getSupabaseHeaders(anonKey),
-    });
-    if (lockDataRes.ok) {
-      const lockRaw = await lockDataRes.text().catch(() => '');
-      try {
-        const lockData = JSON.parse(lockRaw);
-        const expiresAt = new Date(lockData?.expiresAt || 0).getTime();
-        if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < Date.now()) {
-          await fetch(lockUrl, {
-            method: 'DELETE',
-            headers: getSupabaseHeaders(anonKey),
-          }).catch(() => undefined);
-        }
-      } catch {
-        // ignore parse error and continue retry.
+      if (createRes.ok) {
+        acquired = true;
+        break;
       }
+
+      // Check if existing lock is expired — if so, force overwrite
+      const lockDataRes = await fetch(lockUrl, { headers: getSupabaseHeaders(anonKey) });
+      if (lockDataRes.ok) {
+        const lockRaw = await lockDataRes.text().catch(() => '');
+        try {
+          const lockData = JSON.parse(lockRaw);
+          const expiresAt = new Date(lockData?.expiresAt || 0).getTime();
+          if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < Date.now()) {
+            // Lock expired — force delete and retry
+            await fetch(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+            continue; // retry immediately
+          }
+        } catch { /* ignore parse error */ }
+      }
+    } catch {
+      // Network error — skip lock and proceed
+      break;
     }
 
     await sleep(retryMs);
   }
 
-  if (!acquired) {
-    throw new Error('STOCK_LOCK_TIMEOUT::Sistem sedang dipakai kasir lain. Coba lagi beberapa detik.');
-  }
-
+  // IMPORTANT: Even if lock not acquired, still run the task.
+  // Better to have a potential conflict than to block the cashier entirely.
   try {
     return await task();
   } finally {
-    await fetch(lockUrl, {
-      method: 'DELETE',
-      headers: getSupabaseHeaders(anonKey),
-    }).catch(() => undefined);
+    if (acquired) {
+      await fetch(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+    }
   }
 };
 
