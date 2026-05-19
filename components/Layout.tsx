@@ -11,6 +11,7 @@ import { User, UserRole } from '../types';
 import FloatingAIChat from './FloatingAIChat';
 import { getCloudConfig } from '../services/syncService';
 import { canAccessTab, hasPermission } from '../services/permissions';
+import { getResolvedOpenRouterApiKey } from '../services/appConfig';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -38,6 +39,9 @@ const Layout: React.FC<LayoutProps> = ({
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isFloatingChatOpen, setIsFloatingChatOpen] = useState(false);
 
+  // Check if AI is configured (has valid API key)
+  const isAiEnabled = Boolean(getResolvedOpenRouterApiKey(getCloudConfig().openRouterApiKey)?.trim());
+
   const navigation = [
     { section: 'Menu Utama', items: [
       { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
@@ -57,10 +61,11 @@ const Layout: React.FC<LayoutProps> = ({
       { id: 'accounting', label: 'Akuntansi', icon: <Calculator size={18} /> },
       { id: 'reporting', label: 'Laporan', icon: <PieChart size={18} /> },
     ]},
-    { section: 'AI & Media', items: [
+    // AI section only shows if API key is configured
+    ...(isAiEnabled ? [{ section: 'AI & Media', items: [
       { id: 'ai-consultant', label: 'AI Consultant', icon: <Sparkles size={18} />, special: true },
       { id: 'media-vault', label: 'Media', icon: <FileText size={18} /> },
-    ]},
+    ]}] : []),
     { section: 'Sistem', items: [
       { id: 'user-management', label: 'User', icon: <ShieldCheck size={18} /> },
       { id: 'settings', label: 'Pengaturan', icon: <SettingsIcon size={18} /> },
@@ -245,8 +250,8 @@ const Layout: React.FC<LayoutProps> = ({
         </div>
       </main>
 
-      {/* Floating AI Chat */}
-      {hasPermission(currentUser, 'ai.use') && (
+      {/* Floating AI Chat — only if AI is configured */}
+      {isAiEnabled && hasPermission(currentUser, 'ai.use') && (
         <div className="fixed bottom-4 right-4 z-[100] flex flex-col items-end gap-3">
           {isFloatingChatOpen && (
             <div className="w-[88vw] md:w-[380px] h-[420px] md:h-[480px] bg-white rounded-2xl shadow-soft-lg border border-slate-200 overflow-hidden flex flex-col animate-slideUp">
