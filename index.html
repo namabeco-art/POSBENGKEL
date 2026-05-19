@@ -45,11 +45,18 @@
           margin: 0;
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
-          color: #1e293b;
+          color: #334155;
+          font-size: 14px;
+          line-height: 1.6;
+          letter-spacing: -0.01em;
         }
         #root:empty { display: none; }
         input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
+        /* Override aggressive uppercase/tracking from old code */
+        .tracking-widest { letter-spacing: 0.05em !important; }
+        .tracking-wider { letter-spacing: 0.02em !important; }
+        .font-black { font-weight: 700 !important; }
     </style>
 
 <!-- Import map removed: Vite handles bundling from node_modules. 

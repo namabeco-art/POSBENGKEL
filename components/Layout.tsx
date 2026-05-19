@@ -80,7 +80,7 @@ const Layout: React.FC<LayoutProps> = ({
   const SyncBadge = () => {
     const config = getCloudConfig();
     if (!config.enabled) return <span className="text-xs text-slate-400 flex items-center gap-1"><CloudOff size={12}/> Lokal</span>;
-    if (syncError) return <span className="text-xs text-red-500 flex items-center gap-1"><AlertCircle size={12}/> Error</span>;
+    if (syncError) return <span className="text-xs text-amber-500 flex items-center gap-1"><AlertCircle size={12}/> Offline</span>;
     if (isSyncing) return <span className="text-xs text-blue-500 flex items-center gap-1"><RefreshCw size={12} className="animate-spin"/> Sync...</span>;
     return <span className="text-xs text-emerald-600 flex items-center gap-1"><CheckCircle2 size={12}/> Online</span>;
   };
