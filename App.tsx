@@ -1188,7 +1188,7 @@ const App: React.FC = () => {
         setActiveTab(getAccessibleTabs(currentUser)[0] || 'dashboard');
         return null;
       }
-      return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); handleManualRefresh(true); }} onExportBackup={exportBackup} onImportBackup={importBackup} />;
+      return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} />;
     }
 
     if (!canAccessTab(currentUser, activeTab)) {
