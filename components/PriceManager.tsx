@@ -47,9 +47,11 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
   const [bulkMode, setBulkMode] = useState<'percent' | 'fixed'>('percent');
   const [bulkDirection, setBulkDirection] = useState<'up' | 'down'>('up');
   const [bulkValue, setBulkValue] = useState<number>(0);
-  const [bulkFilter, setBulkFilter] = useState<'all' | 'category' | 'brand'>('all');
+  const [bulkFilter, setBulkFilter] = useState<'all' | 'category' | 'brand' | 'selected'>('all');
   const [bulkFilterValue, setBulkFilterValue] = useState('');
   const [bulkApplyToMember, setBulkApplyToMember] = useState(true);
+  const [selectedItemIds, setSelectedItemIds] = useState<Set<string>>(new Set());
+  const [itemSearchTerm, setItemSearchTerm] = useState('');
 
   // Margin state
   const [margins, setMargins] = useState<Record<string, number>>(() => {
@@ -77,8 +79,38 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
     if (bulkFilter === 'all') return items;
     if (bulkFilter === 'category') return items.filter(i => i.category === bulkFilterValue);
     if (bulkFilter === 'brand') return items.filter(i => i.brand === bulkFilterValue);
+    if (bulkFilter === 'selected') return items.filter(i => selectedItemIds.has(i.id));
     return items;
   };
+
+  const filteredItemList = useMemo(() => {
+    if (!itemSearchTerm.trim()) return items;
+    const term = itemSearchTerm.toLowerCase();
+    return items.filter(i => 
+      i.name.toLowerCase().includes(term) || 
+      i.code.toLowerCase().includes(term) || 
+      i.barcode.includes(term) ||
+      i.category.toLowerCase().includes(term)
+    );
+  }, [items, itemSearchTerm]);
+
+  const toggleItemSelection = (id: string) => {
+    setSelectedItemIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const selectAllFiltered = () => {
+    setSelectedItemIds(prev => {
+      const next = new Set(prev);
+      filteredItemList.forEach(i => next.add(i.id));
+      return next;
+    });
+  };
+
+  const deselectAll = () => setSelectedItemIds(new Set());
 
   // === BULK PRICE UPDATE ===
   const generateBulkPreview = () => {
@@ -279,12 +311,63 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
                   <button onClick={() => setBulkFilter('all')} className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${bulkFilter === 'all' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Semua ({items.length})</button>
                   <button onClick={() => setBulkFilter('category')} className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${bulkFilter === 'category' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Per Kategori</button>
                   <button onClick={() => setBulkFilter('brand')} className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${bulkFilter === 'brand' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Per Merk</button>
+                  <button onClick={() => setBulkFilter('selected')} className={`px-3 py-2 rounded-lg text-xs font-medium transition-all ${bulkFilter === 'selected' ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-600'}`}>Pilih Item ({selectedItemIds.size})</button>
                 </div>
-                {bulkFilter !== 'all' && (
+                {bulkFilter === 'category' && (
                   <select className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500" value={bulkFilterValue} onChange={e => setBulkFilterValue(e.target.value)}>
-                    <option value="">-- Pilih {bulkFilter === 'category' ? 'Kategori' : 'Merk'} --</option>
-                    {(bulkFilter === 'category' ? categories : brands).map(v => <option key={v} value={v}>{v}</option>)}
+                    <option value="">-- Pilih Kategori --</option>
+                    {categories.map(v => <option key={v} value={v}>{v}</option>)}
                   </select>
+                )}
+                {bulkFilter === 'brand' && (
+                  <select className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-500" value={bulkFilterValue} onChange={e => setBulkFilterValue(e.target.value)}>
+                    <option value="">-- Pilih Merk --</option>
+                    {brands.map(v => <option key={v} value={v}>{v}</option>)}
+                  </select>
+                )}
+                {bulkFilter === 'selected' && (
+                  <div className="border border-slate-200 rounded-xl overflow-hidden">
+                    {/* Search */}
+                    <div className="p-2 border-b border-slate-100 bg-slate-50">
+                      <div className="relative">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={14} />
+                        <input
+                          type="text"
+                          className="w-full pl-9 pr-3 py-2 bg-white border border-slate-200 rounded-lg text-sm outline-none focus:border-indigo-400 placeholder:text-slate-300"
+                          placeholder="Cari nama / kode barang..."
+                          value={itemSearchTerm}
+                          onChange={e => setItemSearchTerm(e.target.value)}
+                        />
+                      </div>
+                      <div className="flex items-center justify-between mt-2 px-1">
+                        <span className="text-[11px] text-slate-400">{selectedItemIds.size} item dipilih</span>
+                        <div className="flex gap-2">
+                          <button type="button" onClick={selectAllFiltered} className="text-[11px] text-indigo-600 font-medium hover:underline">Pilih semua</button>
+                          <button type="button" onClick={deselectAll} className="text-[11px] text-slate-400 font-medium hover:underline">Reset</button>
+                        </div>
+                      </div>
+                    </div>
+                    {/* Item list with checkboxes */}
+                    <div className="max-h-48 overflow-y-auto">
+                      {filteredItemList.map(item => (
+                        <label key={item.id} className="flex items-center gap-3 px-3 py-2.5 hover:bg-indigo-50 cursor-pointer border-b border-slate-50 last:border-0 transition-colors">
+                          <input
+                            type="checkbox"
+                            checked={selectedItemIds.has(item.id)}
+                            onChange={() => toggleItemSelection(item.id)}
+                            className="w-4 h-4 rounded border-slate-300 text-indigo-600 focus:ring-indigo-500 shrink-0"
+                          />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-sm text-slate-800 truncate">{item.name}</p>
+                            <p className="text-[11px] text-slate-400">{item.code} • {item.category} • Rp {item.basePrice.toLocaleString()}</p>
+                          </div>
+                        </label>
+                      ))}
+                      {filteredItemList.length === 0 && (
+                        <p className="text-center py-4 text-sm text-slate-400">Tidak ditemukan</p>
+                      )}
+                    </div>
+                  </div>
                 )}
               </div>
 
@@ -318,7 +401,7 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
                 <span className="text-sm text-slate-700">Terapkan juga ke harga member (Level 1-4)</span>
               </label>
 
-              <button onClick={generateBulkPreview} disabled={bulkValue <= 0 || (bulkFilter !== 'all' && !bulkFilterValue)} className="w-full py-3.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+              <button onClick={generateBulkPreview} disabled={bulkValue <= 0 || (bulkFilter === 'category' && !bulkFilterValue) || (bulkFilter === 'brand' && !bulkFilterValue) || (bulkFilter === 'selected' && selectedItemIds.size === 0)} className="w-full py-3.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-all disabled:opacity-40 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 <ArrowRight size={18}/> Preview Perubahan ({getFilteredItems().length} item)
               </button>
             </div>
