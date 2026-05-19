@@ -62,7 +62,7 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
   });
 
   // Import state
-  const [importData, setImportData] = useState<{ code: string; newPrice: number; name?: string }[]>([]);
+  const [importData, setImportData] = useState<{ code: string; newBasePrice?: number; newLv1?: number; newLv2?: number; newLv3?: number; newLv4?: number; name?: string }[]>([]);
   const [importErrors, setImportErrors] = useState<string[]>([]);
 
   // Price history (from localStorage)
@@ -171,6 +171,12 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
   };
 
   // === CSV IMPORT ===
+  const parsePrice = (val: string): number | undefined => {
+    if (!val || !val.trim()) return undefined; // empty = keep old
+    const num = parseInt(val.replace(/[^0-9]/g, ''));
+    return (isNaN(num) || num <= 0) ? undefined : num;
+  };
+
   const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -180,23 +186,35 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
       const text = event.target?.result as string;
       const lines = text.split('\n').filter(l => l.trim());
       const errors: string[] = [];
-      const data: { code: string; newPrice: number; name?: string }[] = [];
+      const data: { code: string; newBasePrice?: number; newLv1?: number; newLv2?: number; newLv3?: number; newLv4?: number; name?: string }[] = [];
 
       // Skip header if present
-      const startIdx = lines[0]?.toLowerCase().includes('code') || lines[0]?.toLowerCase().includes('kode') ? 1 : 0;
+      const firstLine = lines[0]?.toLowerCase() || '';
+      const startIdx = (firstLine.includes('code') || firstLine.includes('kode') || firstLine.includes('harga')) ? 1 : 0;
 
       for (let i = startIdx; i < lines.length; i++) {
         const cols = lines[i].split(/[,;\t]/).map(c => c.trim().replace(/"/g, ''));
-        if (cols.length < 2) { errors.push(`Baris ${i + 1}: format tidak valid`); continue; }
+        if (cols.length < 2) { errors.push(`Baris ${i + 1}: minimal 2 kolom (kode + harga)`); continue; }
 
-        const code = cols[0];
-        const price = parseInt(cols[1].replace(/[^0-9]/g, ''));
-        if (!code || isNaN(price) || price <= 0) { errors.push(`Baris ${i + 1}: harga tidak valid (${cols[1]})`); continue; }
+        const code = cols[0]?.trim();
+        if (!code) { errors.push(`Baris ${i + 1}: kode barang kosong`); continue; }
 
         const matchedItem = items.find(item => item.code === code || item.barcode === code);
         if (!matchedItem) { errors.push(`Baris ${i + 1}: kode "${code}" tidak ditemukan`); continue; }
 
-        data.push({ code, newPrice: price, name: matchedItem.name });
+        const newBasePrice = parsePrice(cols[1] || '');
+        const newLv1 = parsePrice(cols[2] || '');
+        const newLv2 = parsePrice(cols[3] || '');
+        const newLv3 = parsePrice(cols[4] || '');
+        const newLv4 = parsePrice(cols[5] || '');
+
+        // At least one price must be provided
+        if (!newBasePrice && !newLv1 && !newLv2 && !newLv3 && !newLv4) {
+          errors.push(`Baris ${i + 1}: tidak ada harga yang valid`);
+          continue;
+        }
+
+        data.push({ code, newBasePrice, newLv1, newLv2, newLv3, newLv4, name: matchedItem.name });
       }
 
       setImportData(data);
@@ -211,13 +229,23 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
       const item = items.find(i => i.code === row.code || i.barcode === row.code);
       if (!item) return null;
 
-      // Recalculate member prices proportionally
-      const ratio = row.newPrice / item.basePrice;
-      const newMemberPrices = item.memberPrices.map(mp => Math.round(mp * ratio));
+      // Rule: undefined = keep old value
+      const newBasePrice = row.newBasePrice ?? item.basePrice;
+      const newMemberPrices = [
+        row.newLv1 ?? item.memberPrices[0],
+        row.newLv2 ?? item.memberPrices[1],
+        row.newLv3 ?? item.memberPrices[2],
+        row.newLv4 ?? item.memberPrices[3],
+      ];
+
+      // Skip if nothing actually changed
+      if (newBasePrice === item.basePrice && JSON.stringify(newMemberPrices) === JSON.stringify(item.memberPrices)) {
+        return null;
+      }
 
       return {
         itemId: item.id, itemName: item.name, itemCode: item.code, category: item.category,
-        oldBasePrice: item.basePrice, newBasePrice: row.newPrice,
+        oldBasePrice: item.basePrice, newBasePrice,
         oldMemberPrices: item.memberPrices, newMemberPrices,
       };
     }).filter(Boolean) as PriceChange[];
@@ -251,8 +279,11 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
 
   // === EXPORT TEMPLATE ===
   const exportPriceTemplate = () => {
-    const header = 'Kode,Harga Beli,Nama Barang,Kategori\n';
-    const rows = items.map(i => `${i.code},${i.basePrice},"${i.name}","${i.category}"`).join('\n');
+    const header = 'Kode,Harga Beli,Harga Lv1,Harga Lv2,Harga Lv3,Harga Lv4,Nama Barang,Kategori\n';
+    const rows = items.map(i => {
+      const [lv1, lv2, lv3, lv4] = i.memberPrices;
+      return `${i.code},${i.basePrice},${lv1 || ''},${lv2 || ''},${lv3 || ''},${lv4 || ''},"${i.name}","${i.category}"`;
+    }).join('\n');
     const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -449,7 +480,8 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
             <div className="space-y-5 animate-fadeIn">
               <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-2">
                 <p className="text-sm text-blue-700 font-medium">Import harga dari file CSV/Excel</p>
-                <p className="text-xs text-blue-600">Format: <code className="bg-blue-100 px-1 rounded">Kode Barang, Harga Baru</code> (pisah dengan koma, titik koma, atau tab)</p>
+                <p className="text-xs text-blue-600">Format: <code className="bg-blue-100 px-1 rounded">Kode, Harga Beli, Lv1, Lv2, Lv3, Lv4</code></p>
+                <p className="text-xs text-blue-500 mt-1">💡 Kolom yang dikosongkan = harga tidak berubah (tetap pakai harga lama). Minimal isi kode + 1 harga.</p>
               </div>
 
               <div className="flex gap-3">
@@ -467,14 +499,32 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, onUpdateItemsBulk, o
                   <div className="flex items-center justify-between">
                     <p className="text-sm font-medium text-emerald-700 flex items-center gap-2"><CheckCircle2 size={16}/> {importData.length} item berhasil dibaca</p>
                   </div>
-                  <div className="max-h-48 overflow-y-auto border border-slate-200 rounded-xl">
-                    <table className="w-full text-xs">
-                      <thead className="bg-slate-50 sticky top-0"><tr><th className="p-2 text-left text-slate-500">Kode</th><th className="p-2 text-left text-slate-500">Nama</th><th className="p-2 text-right text-slate-500">Harga Baru</th></tr></thead>
+                  <div className="max-h-48 overflow-x-auto overflow-y-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-xs min-w-[500px]">
+                      <thead className="bg-slate-50 sticky top-0">
+                        <tr>
+                          <th className="p-2 text-left text-slate-500">Kode</th>
+                          <th className="p-2 text-left text-slate-500">Nama</th>
+                          <th className="p-2 text-right text-slate-500">Beli</th>
+                          <th className="p-2 text-right text-slate-500">Lv1</th>
+                          <th className="p-2 text-right text-slate-500">Lv2</th>
+                          <th className="p-2 text-right text-slate-500">Lv3</th>
+                          <th className="p-2 text-right text-slate-500">Lv4</th>
+                        </tr>
+                      </thead>
                       <tbody>
                         {importData.slice(0, 20).map((row, i) => (
-                          <tr key={i} className="border-t border-slate-100"><td className="p-2 font-mono text-slate-700">{row.code}</td><td className="p-2 text-slate-600 truncate max-w-[150px]">{row.name}</td><td className="p-2 text-right font-semibold text-slate-800">Rp {row.newPrice.toLocaleString()}</td></tr>
+                          <tr key={i} className="border-t border-slate-100">
+                            <td className="p-2 font-mono text-slate-700">{row.code}</td>
+                            <td className="p-2 text-slate-600 truncate max-w-[120px]">{row.name}</td>
+                            <td className="p-2 text-right font-semibold text-slate-800">{row.newBasePrice ? `Rp ${row.newBasePrice.toLocaleString()}` : <span className="text-slate-300">—</span>}</td>
+                            <td className="p-2 text-right">{row.newLv1 ? `${row.newLv1.toLocaleString()}` : <span className="text-slate-300">—</span>}</td>
+                            <td className="p-2 text-right">{row.newLv2 ? `${row.newLv2.toLocaleString()}` : <span className="text-slate-300">—</span>}</td>
+                            <td className="p-2 text-right">{row.newLv3 ? `${row.newLv3.toLocaleString()}` : <span className="text-slate-300">—</span>}</td>
+                            <td className="p-2 text-right">{row.newLv4 ? `${row.newLv4.toLocaleString()}` : <span className="text-slate-300">—</span>}</td>
+                          </tr>
                         ))}
-                        {importData.length > 20 && <tr><td colSpan={3} className="p-2 text-center text-slate-400">...dan {importData.length - 20} lainnya</td></tr>}
+                        {importData.length > 20 && <tr><td colSpan={7} className="p-2 text-center text-slate-400">...dan {importData.length - 20} lainnya</td></tr>}
                       </tbody>
                     </table>
                   </div>
