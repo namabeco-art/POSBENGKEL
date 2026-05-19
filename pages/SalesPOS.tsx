@@ -333,16 +333,16 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
 
   const CartContent = (isMobile: boolean) => (
     <div className={`flex flex-col h-full ${isMobile ? 'bg-white' : ''}`}>
-       <div className="p-3 md:p-4 border-b border-slate-100 bg-slate-50/50 relative z-40 shrink-0">
+       <div className="p-3 md:p-4 border-b border-slate-100 bg-white shrink-0">
           <div className="flex items-center justify-between mb-3">
-             <h3 className="font-bold text-slate-800 uppercase tracking-tight text-xs">TRANSAKSI BARU</h3>
+             <h3 className="font-semibold text-slate-800 text-sm">Keranjang</h3>
              <div className="flex items-center gap-2">
-                <span className="text-[10px] font-bold bg-slate-900 text-white px-3 py-1 rounded-full">{cart.length} ITEMS</span>
+                <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2.5 py-1 rounded-full">{cart.length} item</span>
                 {isMobile && (
                   <button 
                     type="button" 
                     onClick={() => setShowMobileCart(false)} 
-                    className="p-2 bg-slate-100 rounded-xl text-slate-400 active:scale-90 transition-all border border-slate-200"
+                    className="p-2 bg-slate-100 rounded-lg text-slate-500 active:scale-90 transition-all"
                     aria-label="Close Cart"
                   >
                     <X size={20}/>
@@ -351,65 +351,51 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
              </div>
           </div>
           
+          {/* Customer selector - larger touch target */}
           <div className="relative" ref={customerRef}>
              <button 
                 type="button"
                 onClick={() => setShowCustomerList(!showCustomerList)}
-                className="w-full flex items-center gap-2 md:gap-3 p-2.5 md:p-3 bg-white rounded-2xl border-2 border-slate-200 shadow-sm hover:border-blue-600 hover:bg-blue-50 transition-all text-left group active:scale-[0.98]"
+                className="w-full flex items-center gap-3 p-3 bg-slate-50 rounded-xl border border-slate-200 hover:border-indigo-400 transition-all text-left group active:scale-[0.98]"
              >
-                <div className="p-1.5 bg-slate-100 text-slate-500 rounded-xl group-hover:bg-blue-600 group-hover:text-white transition-colors">
-                    <UserIcon size={16} className="md:w-5 md:h-5" />
+                <div className="w-9 h-9 bg-indigo-100 text-indigo-600 rounded-lg flex items-center justify-center shrink-0">
+                    <UserIcon size={18} />
                 </div>
-                <div className="flex-1 flex flex-col overflow-hidden">
-                   <label className="text-[7px] md:text-[8px] font-bold text-slate-400 uppercase tracking-wider mb-0.5 group-hover:text-blue-500 leading-none">PELANGGAN</label>
-                   <div className="flex items-center justify-between">
-                      <span className="text-[11px] md:text-sm font-bold text-slate-900 truncate leading-none">{selectedCustomer.name}</span>
-                      <ChevronDown size={14} className={`text-slate-400 group-hover:text-blue-600 transition-transform ${showCustomerList ? 'rotate-180' : ''}`} />
-                   </div>
+                <div className="flex-1 min-w-0">
+                   <p className="text-[11px] text-slate-400 font-medium leading-none">Pelanggan</p>
+                   <p className="text-sm font-semibold text-slate-800 truncate mt-0.5">{selectedCustomer.name}</p>
                 </div>
-                <div className="px-1.5 py-0.5 bg-blue-600 text-white rounded-lg flex items-center gap-1 shrink-0">
-                   <Award size={10} className="md:w-3 md:h-3"/>
-                   <span className="font-bold text-[9px] md:text-[10px]">L-{selectedCustomer.level}</span>
+                <div className="px-2 py-1 bg-indigo-600 text-white rounded-md flex items-center gap-1 shrink-0">
+                   <Award size={12}/>
+                   <span className="font-semibold text-[11px]">Lv.{selectedCustomer.level}</span>
                 </div>
+                <ChevronDown size={16} className={`text-slate-400 transition-transform ${showCustomerList ? 'rotate-180' : ''}`} />
              </button>
 
              {showCustomerList && (
-               <div className="absolute top-full left-0 right-0 mt-2 bg-white border-2 border-blue-600 rounded-[1.5rem] shadow-2xl z-[150] overflow-hidden animate-in slide-in-from-top-2 fade-in duration-300 pointer-events-auto">
+               <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-slate-200 rounded-xl shadow-lg z-[150] overflow-hidden animate-fadeIn">
                   <div className="p-3 border-b border-slate-100 bg-slate-50 flex items-center justify-between">
-                     <span className="text-[9px] font-bold text-slate-600 uppercase tracking-widest">PILIH PELANGGAN</span>
-                     <button 
-                        type="button" 
-                        onClick={() => setShowCustomerList(false)} 
-                        className="p-1.5 bg-white rounded-lg text-slate-400 hover:text-red-500 active:scale-90 transition-all border border-slate-200"
-                        aria-label="Close List"
-                      >
-                        <X size={16}/>
-                      </button>
+                     <span className="text-xs font-medium text-slate-500">Pilih Pelanggan</span>
+                     <button type="button" onClick={() => setShowCustomerList(false)} className="p-1 text-slate-400 hover:text-slate-600"><X size={16}/></button>
                   </div>
-                  <div className="max-h-[250px] overflow-y-auto scrollbar-hide py-1">
+                  <div className="max-h-[250px] overflow-y-auto">
                      {customers.map(cust => (
                        <button 
                          key={cust.id}
                          type="button"
-                         onMouseDown={(e) => e.stopPropagation()}
-                         onClick={(e) => { 
-                           e.preventDefault();
-                           e.stopPropagation();
-                           setSelectedCustomer(cust); 
-                           setShowCustomerList(false); 
-                         }}
-                         className={`w-full flex items-center justify-between p-3 px-4 hover:bg-blue-600 hover:text-white transition-all group/item border-b border-slate-50 last:border-0 active:bg-blue-700 cursor-pointer ${selectedCustomer.id === cust.id ? 'bg-blue-50' : 'bg-white'}`}
+                         onClick={(e) => { e.preventDefault(); e.stopPropagation(); setSelectedCustomer(cust); setShowCustomerList(false); }}
+                         className={`w-full flex items-center justify-between p-3 px-4 hover:bg-indigo-50 transition-all border-b border-slate-50 last:border-0 active:bg-indigo-100 ${selectedCustomer.id === cust.id ? 'bg-indigo-50' : ''}`}
                        >
-                          <div className="flex items-center gap-3 pointer-events-none">
-                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all ${selectedCustomer.id === cust.id ? 'bg-blue-600 text-white shadow-lg' : 'bg-slate-100 text-slate-400 group-hover/item:bg-white/20 group-hover/item:text-white'}`}>
-                                <UserCheck size={16} />
+                          <div className="flex items-center gap-3">
+                             <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${selectedCustomer.id === cust.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+                                <UserCheck size={14} />
                              </div>
                              <div className="text-left">
-                                <div className="font-bold text-slate-800 text-[11px] uppercase leading-none group-hover/item:text-white">{cust.name}</div>
-                                <div className="text-[9px] font-semibold text-slate-400 mt-1 group-hover/item:text-blue-100">{cust.phone}</div>
+                                <p className="font-medium text-slate-800 text-sm">{cust.name}</p>
+                                <p className="text-xs text-slate-400 mt-0.5">{cust.phone}</p>
                              </div>
                           </div>
-                          <span className={`px-2 py-0.5 rounded-lg text-[8px] font-bold uppercase transition-colors pointer-events-none ${selectedCustomer.id === cust.id ? 'bg-blue-600 text-white' : 'bg-slate-100 text-slate-600 group-hover/item:bg-white/20 group-hover/item:text-white'}`}>LVL {cust.level}</span>
+                          <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600">Lv.{cust.level}</span>
                        </button>
                      ))}
                   </div>
@@ -418,43 +404,42 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
           </div>
        </div>
 
-       <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-3 scrollbar-hide bg-white relative z-10 min-h-0">
+       <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-2 scrollbar-thin bg-white relative z-10 min-h-0">
          {cart.length === 0 ? (
-           <div className="h-full flex flex-col items-center justify-center text-slate-200">
-             <div className="w-14 h-14 md:w-16 md:h-16 bg-slate-50 rounded-full flex items-center justify-center mb-3">
-                <ShoppingCart size={24} className="opacity-20" />
-             </div>
-             <p className="font-bold uppercase tracking-widest text-[9px] opacity-30">Belum ada item</p>
+           <div className="h-full flex flex-col items-center justify-center text-slate-300">
+             <ShoppingCart size={32} className="mb-2 opacity-30" />
+             <p className="text-sm text-slate-400">Belum ada item</p>
            </div>
          ) : (
            cart.map(c => (
-             <div key={c.id} className="flex gap-3 p-3 bg-white border border-slate-200 rounded-[1.5rem] transition-all hover:border-blue-300 group relative">
-                <div className="w-10 h-10 md:w-12 md:h-12 bg-slate-50 rounded-xl overflow-hidden flex-shrink-0 border border-slate-100 shadow-sm">
-                   <img src={c.item.imageUrl} className="w-full h-full object-cover" />
-                </div>
-                <div className="flex-1 min-w-0 flex flex-col justify-between">
+             <div key={c.id} className="flex gap-3 p-3 bg-white border border-slate-100 rounded-xl transition-all hover:border-indigo-200">
+                {c.item.imageUrl && (
+                  <div className="w-12 h-12 md:w-14 md:h-14 bg-slate-100 rounded-lg overflow-hidden flex-shrink-0">
+                     <img src={c.item.imageUrl} className="w-full h-full object-cover" alt={c.item.name} />
+                  </div>
+                )}
+                <div className="flex-1 min-w-0">
                    <div className="flex justify-between items-start gap-2">
                       <div className="min-w-0 flex-1">
-                        <div className="font-bold text-slate-800 text-[10px] md:text-[11px] truncate uppercase tracking-tight leading-none">{c.item.name}</div>
-                        <div className="text-[8px] font-bold text-slate-400 uppercase tracking-tighter mt-1">{c.item.brand}</div>
+                        <p className="font-medium text-slate-800 text-sm truncate leading-tight">{c.item.name}</p>
+                        <p className="text-xs text-slate-400 mt-0.5">{c.item.brand}</p>
                       </div>
-                      <button type="button" onClick={() => setCart(cart.filter(x => x.id !== c.id))} className="p-1 text-slate-300 hover:text-red-500 transition-all active:scale-90"><X size={14}/></button>
+                      <button type="button" onClick={() => setCart(cart.filter(x => x.id !== c.id))} className="p-1.5 text-slate-300 hover:text-red-500 transition-all active:scale-90 rounded-md hover:bg-red-50"><Trash2 size={14}/></button>
                    </div>
                    <div className="flex items-center justify-between mt-2">
-                      <div className="flex items-center bg-slate-50 border border-slate-300 rounded-lg overflow-hidden">
-                         <button type="button" onClick={() => updateQty(c.id, -1)} className="p-1 px-2 hover:bg-slate-200 text-slate-700 font-bold active:bg-slate-300 text-[10px]"><Minus size={12}/></button>
+                      {/* Qty controls - large touch targets */}
+                      <div className="flex items-center bg-slate-50 border border-slate-200 rounded-lg overflow-hidden">
+                         <button type="button" onClick={() => updateQty(c.id, -1)} className="w-9 h-9 flex items-center justify-center hover:bg-slate-200 text-slate-600 active:bg-slate-300"><Minus size={14}/></button>
                          <input 
                             type="number"
-                            className="w-8 md:w-10 bg-white text-center font-bold text-blue-700 text-[10px] py-1 outline-none appearance-none"
+                            className="w-10 bg-white text-center font-semibold text-indigo-700 text-sm py-1 outline-none appearance-none border-x border-slate-200"
                             value={c.qty}
                             onChange={(e) => setManualQty(c.id, e.target.value)}
                             onBlur={() => handleBlurQty(c.id, c.qty)}
                          />
-                         <button type="button" onClick={() => updateQty(c.id, 1)} className="p-1 px-2 hover:bg-slate-200 text-slate-700 font-bold active:bg-slate-300 text-[10px]"><Plus size={12}/></button>
+                         <button type="button" onClick={() => updateQty(c.id, 1)} className="w-9 h-9 flex items-center justify-center hover:bg-slate-200 text-slate-600 active:bg-slate-300"><Plus size={14}/></button>
                       </div>
-                      <div className="text-right">
-                         <div className="font-bold text-slate-900 text-xs tracking-tighter">Rp {(c.qty * c.selectedPrice).toLocaleString()}</div>
-                      </div>
+                      <p className="font-semibold text-slate-900 text-sm">Rp {(c.qty * c.selectedPrice).toLocaleString()}</p>
                    </div>
                 </div>
              </div>
@@ -462,78 +447,87 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
          )}
        </div>
 
-       <div className="p-4 md:p-5 bg-slate-900 text-white rounded-t-[2rem] shadow-2xl space-y-3 md:space-y-4 relative z-30 shrink-0">
-             <div className="space-y-1">
-             <div className="flex justify-between items-center opacity-40 text-[8px] md:text-[10px] uppercase font-bold tracking-widest">
+       {/* Bottom total + pay button */}
+       <div className="p-4 bg-slate-900 text-white rounded-t-2xl shadow-2xl space-y-3 shrink-0 safe-area-bottom">
+          <div className="space-y-1.5">
+             <div className="flex justify-between items-center text-xs text-slate-400">
                 <span>Subtotal</span>
                 <span>Rp {subtotal.toLocaleString()}</span>
-              </div>
+             </div>
              {(promoDiscount + manualDiscount) > 0 && (
-               <div className="flex justify-between items-center opacity-70 text-[8px] md:text-[10px] uppercase font-bold tracking-widest text-emerald-300">
+               <div className="flex justify-between items-center text-xs text-emerald-400">
                  <span>Diskon</span>
                  <span>- Rp {(promoDiscount + manualDiscount).toLocaleString()}</span>
                </div>
              )}
-             <div className="pt-2 md:pt-3 border-t border-white/10 flex justify-between items-end">
-                <div className="flex flex-col">
-                   <span className="text-[8px] md:text-[9px] font-bold text-blue-400 uppercase tracking-widest mb-0.5 leading-none">Grand Total</span>
-                   <span className="text-lg md:text-2xl font-bold tracking-tighter text-white">Rp {total.toLocaleString()}</span>
+             <div className="pt-2 border-t border-white/10 flex justify-between items-end">
+                <div>
+                   <p className="text-[11px] text-indigo-300 font-medium">Total</p>
+                   <p className="text-2xl font-bold tracking-tight">Rp {total.toLocaleString()}</p>
                 </div>
              </div>
           </div>
           <button 
             type="button"
             disabled={cart.length === 0} 
-            onClick={() => {
-              setPaymentType('TUNAI');
-              setAmountReceived(total);
-              setShowCheckout(true);
-            }} 
-            className="w-full py-3.5 md:py-4 bg-blue-600 hover:bg-blue-700 disabled:bg-slate-800 disabled:text-slate-700 text-white font-bold text-sm md:text-base rounded-xl shadow-xl transition-all flex items-center justify-center gap-2 active:scale-95 border-b-4 border-blue-800"
+            onClick={() => { setPaymentType('TUNAI'); setAmountReceived(total); setShowCheckout(true); }} 
+            className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 disabled:text-slate-500 text-white font-semibold text-base rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 active:scale-[0.97]"
           >
-            <Banknote size={20} /> BAYAR
+            <Banknote size={20} /> Bayar
           </button>
        </div>
     </div>
   );
 
   return (
-    <div className="flex flex-col h-full bg-slate-100 text-slate-900 font-sans overflow-hidden">
-      <header className="h-auto md:h-14 bg-white border-b border-slate-200 flex flex-col md:row items-center gap-4 p-4 md:px-6 shadow-sm z-50 shrink-0">
-        <div className="w-full flex-1 flex items-center gap-2 md:gap-3">
+    <div className="flex flex-col h-full bg-slate-50 text-slate-900 overflow-hidden">
+      {/* Search Header - optimized for mobile touch */}
+      <header className="bg-white border-b border-slate-200 p-3 md:p-4 shrink-0 z-50 safe-area-top">
+        <div className="flex items-center gap-2">
            <div className="relative flex-1">
-             <Search className="absolute left-3 md:left-4 top-1/2 -translate-y-1/2 text-slate-500 md:w-[20px] md:h-[20px]" size={16} />
+             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={18} />
              <input 
                ref={inputRef}
                type="text"
-               placeholder="Cari barang / barcode..."
-               className="w-full bg-slate-50 border-2 md:border-2 border-slate-200 md:border-slate-300 rounded-xl md:rounded-xl pl-10 md:pl-12 pr-4 py-3 md:py-2 focus:border-blue-600 focus:bg-white outline-none text-sm md:text-sm font-bold text-slate-900 transition-all shadow-sm placeholder:text-slate-400"
+               placeholder="Cari barang / scan barcode..."
+               className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-10 pr-4 py-3 focus:border-indigo-500 focus:bg-white outline-none text-sm text-slate-800 transition-all placeholder:text-slate-400"
                value={searchTerm}
                onChange={(e) => setSearchTerm(e.target.value)}
              />
            </div>
-           <div className="relative hidden sm:block">
-              <select 
-                className="pl-3 md:pl-4 pr-6 md:pr-8 py-2 md:py-2 bg-white border-2 border-slate-200 md:border-slate-300 rounded-xl md:rounded-xl text-[10px] md:text-xs font-bold text-slate-700 outline-none focus:border-blue-500 appearance-none cursor-pointer shadow-sm"
-                value={selectedCategory}
-                onChange={(e) => setSelectedCategory(e.target.value)}
-              >
-                {categories.map((cat: string) => <option key={cat} value={cat}>{cat.toUpperCase()}</option>)}
-              </select>
-              <ChevronDown size={14} className="absolute right-2 md:right-3 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none" />
+           <select 
+             className="hidden sm:block px-3 py-3 bg-white border border-slate-200 rounded-xl text-xs font-medium text-slate-700 outline-none focus:border-indigo-500 appearance-none cursor-pointer min-w-[100px]"
+             value={selectedCategory}
+             onChange={(e) => setSelectedCategory(e.target.value)}
+           >
+             {categories.map((cat: string) => <option key={cat} value={cat}>{cat}</option>)}
+           </select>
+           <div className="flex bg-slate-100 p-1 rounded-lg border border-slate-200 shrink-0">
+              <button type="button" onClick={() => setViewMode('grid')} className={`p-2 rounded-md transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}><LayoutGrid size={16}/></button>
+              <button type="button" onClick={() => setViewMode('list')} className={`p-2 rounded-md transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}><List size={16}/></button>
            </div>
-           <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200 shadow-inner shrink-0">
-              <button type="button" onClick={() => setViewMode('grid')} className={`p-2 rounded-lg transition-all active:scale-90 ${viewMode === 'grid' ? 'bg-white shadow-sm text-blue-600 border border-slate-200' : 'text-slate-400 hover:text-slate-600'}`}><LayoutGrid size={18}/></button>
-              <button type="button" onClick={() => setViewMode('list')} className={`p-2 rounded-lg transition-all active:scale-90 ${viewMode === 'list' ? 'bg-white shadow-sm text-blue-600 border border-slate-200' : 'text-slate-400 hover:text-slate-600'}`}><List size={18}/></button>
-           </div>
+           {/* Mobile cart button - large touch target */}
            <button 
             type="button"
             onClick={() => setShowMobileCart(true)}
-            className="md:hidden relative p-3 bg-blue-600 text-white rounded-xl shadow-lg active:scale-90 transition-all border-b-2 border-blue-800"
+            className="md:hidden relative p-3 bg-indigo-600 text-white rounded-xl shadow-md active:scale-95 transition-all"
           >
             <ShoppingCart size={20} />
-            {cart.length > 0 && <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[9px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white">{cart.length}</span>}
+            {cart.length > 0 && <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[10px] font-bold w-5 h-5 rounded-full flex items-center justify-center border-2 border-white shadow-sm">{cart.length}</span>}
           </button>
+        </div>
+        {/* Mobile category pills - scrollable */}
+        <div className="flex sm:hidden gap-2 mt-2 overflow-x-auto scrollbar-hide pb-1">
+          {categories.map((cat: string) => (
+            <button
+              key={cat}
+              type="button"
+              onClick={() => setSelectedCategory(cat)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-medium whitespace-nowrap transition-all ${selectedCategory === cat ? 'bg-indigo-600 text-white' : 'bg-white border border-slate-200 text-slate-600'}`}
+            >
+              {cat}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -629,8 +623,8 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       </div>
 
       {showMobileCart && (
-        <div className="fixed inset-0 bg-slate-950/50 backdrop-blur-md z-[100] md:hidden animate-in fade-in duration-300" onClick={() => setShowMobileCart(false)}>
-           <div className="absolute right-0 top-0 bottom-0 w-[85%] bg-white shadow-2xl animate-in slide-in-from-right duration-300" onClick={e => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[100] md:hidden animate-fadeIn" onClick={() => setShowMobileCart(false)}>
+           <div className="absolute inset-0 bg-white flex flex-col animate-slideUp" onClick={e => e.stopPropagation()}>
               {CartContent(true)}
            </div>
         </div>

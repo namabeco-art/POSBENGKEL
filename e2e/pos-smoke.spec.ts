@@ -53,16 +53,19 @@ test('admin can access protected modules and operate cashier shift', async ({ pa
   await expect(page.getByRole('button', { name: 'Pengaturan API' })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Manajemen User' })).toBeVisible();
 
-  const openingCashInput = page.getByPlaceholder('Modal awal');
+  await page.getByRole('button', { name: /buka shift kasir/i }).click();
+  await expect(page.getByRole('heading', { name: /mulai shift kasir/i })).toBeVisible();
+
+  const openingCashInput = page.getByLabel(/saldo modal awal/i).or(page.locator('input[placeholder="0"]').first());
   await openingCashInput.fill('150000');
-  await page.getByRole('button', { name: 'Buka Shift' }).click();
+  await page.getByRole('button', { name: /mulai shift baru/i }).click();
 
   await expect(page.getByText(/Shift aktif sejak/i)).toBeVisible();
   await expect(page.getByText(/Modal awal Rp/i)).toBeVisible();
-  await expect(page.getByPlaceholder('Kas akhir')).toBeVisible();
+  await expect(page.getByRole('button', { name: /tutup shift/i })).toBeVisible();
 
   await page.getByRole('button', { name: 'Pembelian' }).click();
-  await expect(page.getByPlaceholder(/Cari nomor faktur atau supplier/i)).toBeVisible();
+  await expect(page.getByPlaceholder(/cari nomor faktur atau supplier/i)).toBeVisible();
 
   await page.getByRole('button', { name: 'Pengaturan API' }).click();
   await expect(page.getByText(/Pengaturan API & Cloud/i)).toBeVisible();
@@ -102,7 +105,7 @@ test('kasir can login, complete sale, and open linked return flow without admin 
   await page.getByRole('button', { name: 'PENJUALAN BARU' }).click();
 
   await page.getByRole('button', { name: 'Daftar Penjualan' }).click();
-  await expect(page.getByText('Umum / Retail')).toBeVisible();
+  await expect(page.getByText(/Umum( \/ Retail)?/i)).toBeVisible();
 
   const invoiceNumber = await page.locator('tbody tr button').first().textContent();
   await page.locator('tbody tr').first().getByRole('button').last().click();

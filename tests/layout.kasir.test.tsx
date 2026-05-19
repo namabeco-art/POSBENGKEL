@@ -52,11 +52,11 @@ describe('Layout for kasir', () => {
     );
 
     expect(screen.getAllByText('Dashboard').length).toBeGreaterThan(0);
-    expect(screen.getByText('Point of Sale (Kasir)')).toBeInTheDocument();
-    expect(screen.getByText('Daftar Penjualan')).toBeInTheDocument();
-    expect(screen.getByText('Retur Penjualan')).toBeInTheDocument();
-    expect(screen.queryByText('Pengaturan API')).not.toBeInTheDocument();
-    expect(screen.queryByText('Manajemen User')).not.toBeInTheDocument();
+    expect(screen.getByText('Kasir')).toBeInTheDocument();
+    expect(screen.getByText('Penjualan')).toBeInTheDocument();
+    expect(screen.getByText('Retur')).toBeInTheDocument();
+    expect(screen.queryByText('Pengaturan')).not.toBeInTheDocument();
+    expect(screen.queryByText('User')).not.toBeInTheDocument();
     expect(screen.queryByText('Pembelian')).not.toBeInTheDocument();
   });
 });

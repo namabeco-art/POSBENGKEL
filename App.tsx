@@ -1,19 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
 import Layout from './components/Layout';
-import Dashboard from './pages/Dashboard';
-import MasterData from './pages/MasterData';
-import SalesPOS from './pages/SalesPOS';
-import SalesList from './pages/SalesList';
-import Accounting from './pages/Accounting';
-import Purchasing from './pages/Purchasing';
-import Inventory from './pages/Inventory';
-import UserManagement from './UserManagement';
-import Reporting from './pages/Reporting';
-import Returns from './pages/Returns';
-import AIConsultant from './pages/AIConsultant';
-import Settings from './pages/Settings';
-import ERPControlTower from './pages/ERPControlTower';
-import MediaVault from './pages/MediaVault';
 import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashSession, Customer, InventoryMovement, Item, MediaAsset, PaymentRecord, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, Supplier, User, UserRole, Account } from './types';
 import { mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, mockBranches, mockPromotions } from './store';
 import { ShieldCheck, User as UserIcon, Key, Clock, AlertCircle, Info, CloudLightning, RefreshCw, Loader2, Link2, CheckCircle2, X, Plus, Store, ChevronRight, Globe, Lock, Trash2, Settings2, Database, HardDrive, Server, QrCode, Terminal, Activity, ChevronDown, Search, Cloud, Monitor, MapPin, ShieldEllipsis } from 'lucide-react';
@@ -23,8 +9,23 @@ import { hashPassword, sanitizeUserSession, verifyPassword } from './services/au
 import { canAccessTab, getAccessibleTabs, hasPermission } from './services/permissions';
 import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem } from './services/posOperations';
 import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from './services/cloudProfiles';
-import { hasEnvCloudConfig } from './services/appConfig';
+import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
+
+const Dashboard = lazy(() => import('./pages/Dashboard'));
+const MasterData = lazy(() => import('./pages/MasterData'));
+const SalesPOS = lazy(() => import('./pages/SalesPOS'));
+const SalesList = lazy(() => import('./pages/SalesList'));
+const Accounting = lazy(() => import('./pages/Accounting'));
+const Purchasing = lazy(() => import('./pages/Purchasing'));
+const Inventory = lazy(() => import('./pages/Inventory'));
+const UserManagement = lazy(() => import('./UserManagement'));
+const Reporting = lazy(() => import('./pages/Reporting'));
+const Returns = lazy(() => import('./pages/Returns'));
+const AIConsultant = lazy(() => import('./pages/AIConsultant'));
+const Settings = lazy(() => import('./pages/Settings'));
+const ERPControlTower = lazy(() => import('./pages/ERPControlTower'));
+const MediaVault = lazy(() => import('./pages/MediaVault'));
 
 type UserDraft = {
   id: string;
@@ -37,6 +38,16 @@ type UserDraft = {
   isActive?: boolean;
   sessionPolicy?: User['sessionPolicy'];
 };
+
+const PageLoadingFallback: React.FC = () => (
+  <div className="h-full flex flex-col items-center justify-center p-10 text-center space-y-4 animate-in fade-in duration-300">
+    <div className="w-16 h-16 rounded-full border-4 border-slate-200 border-t-slate-900 animate-spin" />
+    <div>
+      <h2 className="text-lg font-black text-slate-900 uppercase tracking-widest">Memuat Modul</h2>
+      <p className="mt-2 text-[11px] font-bold text-slate-400 uppercase tracking-[0.18em]">Menyiapkan halaman aktif...</p>
+    </div>
+  </div>
+);
 
 const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState('dashboard');
@@ -165,24 +176,36 @@ const App: React.FC = () => {
   }, []);
 
   // AUTO-SAVE LOGIC (PERSISTENCE)
+  // Subscribe to ALL store changes to ensure persistence
   useEffect(() => {
     if (!isDataLoaded) return;
-    const dataToSave = buildDataSnapshot();
-    
-    // 1. Instant Local Persistence
-    saveAppDataLocal(dataToSave);
 
-    // 2. Debounced Cloud Persistence
-    if (hasCloudConfig()) {
-      const timer = setTimeout(() => {
-        pushToCloud(dataToSave).then(() => {
-          setLastSyncTime(new Date().toLocaleTimeString());
-          setSyncError(false);
-        }).catch(() => setSyncError(true));
-      }, 2000);
-      return () => clearTimeout(timer);
-    }
+    // Use Zustand subscribe to detect any state change
+    const unsubscribe = useAppStore.subscribe(() => {
+      const dataToSave = buildDataSnapshot();
+      saveAppDataLocal(dataToSave);
+    });
+
+    // Also save immediately on mount
+    saveAppDataLocal(buildDataSnapshot());
+
+    return () => unsubscribe();
   }, [buildDataSnapshot, isDataLoaded]);
+
+  // DEBOUNCED CLOUD SYNC (separate from local persistence)
+  useEffect(() => {
+    if (!isDataLoaded || !hasCloudConfig()) return;
+
+    const timer = setTimeout(() => {
+      const dataToSave = buildDataSnapshot();
+      pushToCloud(dataToSave).then(() => {
+        setLastSyncTime(new Date().toLocaleTimeString());
+        setSyncError(false);
+      }).catch(() => setSyncError(true));
+    }, 3000);
+
+    return () => clearTimeout(timer);
+  }, [users, items, customers, suppliers, accounts, purchaseOrders, sales, returns, inventoryMovements, auditLogs, cashSessions, paymentRecords, promotions, mediaAssets, buildDataSnapshot, isDataLoaded]);
 
   // INITIAL LOAD
   useEffect(() => {
@@ -1062,401 +1085,94 @@ const App: React.FC = () => {
   };
 
   if (!currentUser) {
-    const activeCloudConfig = getCloudConfig();
-    const isSetupView = loginView === 'setup';
-    const currentActiveDbId = activeCloudConfig.storeId;
-    const currentActiveDbLabel = getCloudProfileLabel(activeCloudConfig);
-    const currentActiveRegion = getCloudProfileRegion(activeCloudConfig);
-    const isLocalActive = !activeCloudConfig.enabled;
-    const isEnvLockedWorkspace = hasEnvCloudConfig();
-    const filteredProfiles = savedDbs.filter(db => {
-      const keyword = cloudSearchTerm.toLowerCase();
-      return (
-        getCloudProfileLabel(db).toLowerCase().includes(keyword) ||
-        getCloudProfileRegion(db).toLowerCase().includes(keyword) ||
-        db.storeId.toLowerCase().includes(keyword)
-      );
-    });
-
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-100 flex flex-col items-center justify-start md:justify-center p-3 md:p-6 font-sans overflow-y-auto scrollbar-hide">
-        <div className={`w-full ${isSetupView ? 'max-w-6xl grid grid-cols-1 lg:grid-cols-12' : 'max-w-2xl'} gap-4 md:gap-6 items-start py-4`}>
-           {isSetupView && <div className="lg:col-span-4 space-y-3">
-              <button
-                onClick={() => setLoginView('auth')}
-                className="px-4 py-2.5 rounded-full border border-slate-200 bg-white text-slate-600 hover:border-indigo-400 hover:text-indigo-700 transition-all text-[10px] font-black uppercase tracking-[0.16em]"
-              >
-                Kembali ke Login
-              </button>
-              <div className="px-1 mb-2">
-                 <div className="flex items-center gap-3 mb-2">
-                    <div className="p-2 bg-white rounded-lg text-indigo-600 shadow-md border border-indigo-100"><Monitor size={16}/></div>
-                    <h2 className="text-slate-700 font-black text-[10px] uppercase tracking-[0.2em]">{isEnvLockedWorkspace ? 'WORKSPACE TERKUNCI' : 'AKSES SISTEM'}</h2>
-                 </div>
-                 <p className="text-slate-500 font-bold text-[10px] tracking-wide leading-relaxed">{isEnvLockedWorkspace ? `Deployment ini langsung terhubung ke workspace ${currentActiveDbLabel}.` : 'Pilih mode kerja lalu tentukan workspace operasional'}</p>
+      <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-sky-50 flex items-center justify-center p-4">
+        <div className="w-full max-w-sm animate-fadeIn">
+          {/* Card */}
+          <div className="bg-white rounded-3xl shadow-soft-lg border border-slate-100/80 overflow-hidden">
+            {/* Top accent */}
+            <div className="h-1.5 bg-gradient-to-r from-indigo-500 via-purple-500 to-pink-500" />
+            
+            {/* Header */}
+            <div className="pt-10 pb-6 px-8 text-center">
+              <div className="w-16 h-16 bg-gradient-to-br from-indigo-500 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-indigo-200/50 rotate-3 hover:rotate-0 transition-transform duration-300">
+                <span className="text-white font-bold text-2xl -rotate-3">H</span>
               </div>
+              <h1 className="text-2xl font-bold text-slate-900 tracking-tight">Selamat Datang</h1>
+              <p className="text-slate-400 text-sm mt-1.5">Masuk ke POS Hulio</p>
+            </div>
 
-              {!isEnvLockedWorkspace && <div className="flex flex-wrap gap-2">
+            {/* Form */}
+            <div className="px-8 pb-8">
+              <form onSubmit={handleLogin} className="space-y-4">
+                <div>
+                  <label htmlFor="login-user" className="text-xs font-medium text-slate-500 mb-1.5 block">Username</label>
+                  <input
+                    id="login-user"
+                    type="text"
+                    required
+                    autoFocus
+                    autoComplete="username"
+                    className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-xl text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all"
+                    placeholder="Ketik username..."
+                    value={loginUsername}
+                    onChange={e => setLoginUsername(e.target.value)}
+                  />
+                </div>
+
+                <div>
+                  <label htmlFor="login-pass" className="text-xs font-medium text-slate-500 mb-1.5 block">Password</label>
+                  <input
+                    id="login-pass"
+                    type="password"
+                    required
+                    autoComplete="current-password"
+                    className="w-full px-4 py-3 bg-slate-50/80 border border-slate-200 rounded-xl text-sm text-slate-800 placeholder:text-slate-300 focus:border-indigo-400 focus:ring-4 focus:ring-indigo-50 focus:bg-white outline-none transition-all"
+                    placeholder="Ketik password..."
+                    value={loginPassword}
+                    onChange={e => setLoginPassword(e.target.value)}
+                  />
+                </div>
+
+                {loginError && (
+                  <div className="p-3 bg-red-50 text-red-600 rounded-xl text-sm flex items-center gap-2 animate-fadeIn" role="alert">
+                    <AlertCircle size={16} className="shrink-0" />
+                    <span>{loginError}</span>
+                  </div>
+                )}
+
                 <button
-                  onClick={() => {
-                    setLoginAccessMode('cloud');
-                    setShowCloudSelector(current => !current);
-                  }}
-                  className={`px-4 py-2.5 rounded-full border transition-all text-left flex items-center gap-2.5 group ${loginAccessMode === 'cloud' ? 'bg-white border-emerald-300 shadow-md text-emerald-700' : 'bg-white/80 border-slate-200 text-slate-500 hover:border-indigo-300'}`}
+                  type="submit"
+                  className="w-full py-3.5 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-xl font-semibold text-sm shadow-md shadow-indigo-200/50 active:scale-[0.97] transition-all mt-2"
                 >
-                  <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-all group-hover:scale-110 ${loginAccessMode === 'cloud' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
-                    <Cloud size={14} />
-                  </div>
-                  <div className="min-w-0">
-                    <div className="font-black text-[10px] uppercase tracking-[0.18em] truncate leading-none">Cloud Workspace</div>
-                    <div className="hidden">
-                      {loginAccessMode === 'cloud' && !isLocalActive ? `${currentActiveDbLabel} • ${currentActiveRegion}` : 'Pilih lokasi cabang'}
-                    </div>
-                  </div>
-                  <ChevronDown size={16} className={`transition-transform duration-300 ${showCloudSelector ? 'rotate-180' : ''}`} />
+                  Masuk →
                 </button>
-              </div>}
+              </form>
 
-              {isEnvLockedWorkspace && (
-                <div className="space-y-4">
-                  <div className="px-1 border-b border-slate-800 pb-2 mb-2 flex items-center justify-between">
-                    <div className="text-[10px] font-black uppercase tracking-[0.2em] text-emerald-500">Workspace Terkunci (Env)</div>
-                    <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest">{envConfig.stores.length} Unit Terdeteksi</div>
-                  </div>
-                  <div className="space-y-2 max-h-[300px] overflow-y-auto scrollbar-hide">
-                    {envConfig.stores.map((store, i) => {
-                      const isSelected = currentActiveDbId === store.storeId && !isLocalActive;
-                      const isPusat = i === 0;
-                      return (
-                        <button
-                          key={store.storeId}
-                          onClick={() => switchDb({ ...store, enabled: true })}
-                          className={`w-full p-3 rounded-2xl border transition-all flex items-center justify-between group ${isSelected ? 'bg-emerald-500/10 border-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.1)]' : 'bg-slate-900/50 border-slate-800 hover:border-slate-600'}`}
-                        >
-                          <div className="flex items-center gap-3">
-                            <div className={`w-10 h-10 rounded-xl flex items-center justify-center transition-all ${isSelected ? 'bg-emerald-500 text-white' : 'bg-slate-800 text-slate-500'}`}>
-                              {isPusat ? <Database size={18} /> : <Store size={18} />}
-                            </div>
-                            <div className="text-left">
-                              <div className="flex items-center gap-2">
-                                <div className={`font-black text-[11px] uppercase truncate ${isSelected ? 'text-white' : 'text-slate-300'}`}>{store.displayName}</div>
-                                {isPusat && <span className="px-1.5 py-0.5 bg-indigo-600 text-white text-[7px] font-black uppercase rounded">PUSAT</span>}
-                              </div>
-                              <div className="text-[8px] font-bold text-slate-500 uppercase tracking-widest mt-1">{store.region} • {store.storeId}</div>
-                            </div>
-                          </div>
-                          {isSelected && <CheckCircle2 size={16} className="text-emerald-500" />}
-                        </button>
-                      );
-                    })}
-                  </div>
+              {/* Hint */}
+              <div className="mt-6 flex items-center gap-3 p-3 bg-gradient-to-r from-slate-50 to-indigo-50/30 rounded-xl">
+                <div className="w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center shrink-0">
+                  <Key size={14} className="text-indigo-600" />
                 </div>
-              )}
+                <p className="text-xs text-slate-500 leading-relaxed">
+                  Default login: <span className="font-semibold text-slate-700">admin</span> / <span className="font-semibold text-slate-700">123</span>
+                </p>
+              </div>
+            </div>
+          </div>
 
-              {!isEnvLockedWorkspace && loginAccessMode === 'cloud' && (
-                <div className="rounded-[1rem] border border-slate-800 bg-slate-900/70 px-3 py-2">
-                  <div className="text-[8px] font-bold uppercase tracking-[0.18em] text-slate-500">
-                    {!isLocalActive ? `${currentActiveDbLabel} • ${currentActiveRegion}` : 'Pilih lokasi cabang'}
-                  </div>
-                </div>
-              )}
-
-              {!isEnvLockedWorkspace && loginAccessMode === 'cloud' && showCloudSelector && (
-                <div className="bg-slate-900 border border-slate-800 rounded-[1.1rem] shadow-xl overflow-hidden animate-in slide-in-from-top-2 duration-300">
-                  <div className="p-2.5 border-b border-slate-800 bg-slate-950/50">
-                    <div className="relative">
-                      <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-600" size={14} />
-                      <input
-                        autoFocus
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-9 pr-4 py-2 text-[10px] font-bold text-white outline-none focus:border-emerald-500 placeholder:text-slate-600"
-                        placeholder="Cari lokasi, region, atau workspace..."
-                        value={cloudSearchTerm}
-                        onChange={e => setCloudSearchTerm(e.target.value)}
-                      />
-                    </div>
-                  </div>
-                  <div className="max-h-[230px] overflow-y-auto scrollbar-hide py-1.5">
-                    {filteredProfiles.length === 0 ? (
-                      <div className="px-4 py-6 text-center">
-                        <p className="text-[10px] font-bold text-slate-600 uppercase tracking-widest">Belum ada workspace cloud tersimpan</p>
-                      </div>
-                    ) : (
-                      filteredProfiles.map((db, idx) => {
-                        const isSelected = currentActiveDbId === db.storeId && !isLocalActive;
-                        return (
-                          <button
-                            key={idx}
-                            onClick={() => switchDb(db)}
-                            className="w-full px-4 py-3 flex items-center justify-between hover:bg-slate-800 transition-colors group"
-                          >
-                            <div className="flex items-center gap-3 min-w-0">
-                              <div className={`w-9 h-9 rounded-xl flex items-center justify-center transition-all ${isSelected ? 'bg-emerald-600 text-white shadow-lg' : 'bg-slate-800 text-slate-500 group-hover:bg-slate-700'}`}>
-                                <MapPin size={14} />
-                              </div>
-                              <div className="text-left min-w-0">
-                                <div className="font-black text-[11px] text-slate-200 uppercase truncate leading-none">{getCloudProfileLabel(db)}</div>
-                                <div className="text-[8px] font-bold text-slate-500 uppercase tracking-[0.2em] mt-1">{getCloudProfileRegion(db)} • {db.storeId}</div>
-                              </div>
-                            </div>
-                            {isSelected && <CheckCircle2 size={14} className="text-emerald-500" />}
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-
-		              {!isEnvLockedWorkspace && <button
-                onClick={openAdminSetup}
-                className="px-4 py-2.5 rounded-full border border-dashed border-slate-300 bg-white/80 text-slate-600 hover:border-indigo-500 hover:text-indigo-700 transition-all flex items-center gap-2.5 group w-fit"
-              >
-                <div className="w-8 h-8 rounded-full flex items-center justify-center bg-slate-100 text-slate-500 group-hover:bg-indigo-600 group-hover:text-white transition-all">
-                  <ShieldEllipsis size={14} />
-                </div>
-                <div className="min-w-0">
-                  <div className="font-black text-[10px] uppercase tracking-[0.18em] leading-none">Setup Admin</div>
-                </div>
-                <Plus size={14} />
-              </button>
-              }
-           </div>}
-
-		           <div className={`${isSetupView ? 'lg:col-span-8' : ''} bg-white rounded-[2.2rem] shadow-2xl overflow-hidden animate-in fade-in slide-in-from-right-8 duration-700 border border-indigo-100 flex flex-col h-auto`}>
-		              <div className="p-6 md:p-8 bg-gradient-to-r from-indigo-600 via-blue-600 to-cyan-500 text-white relative overflow-hidden">
-		                 <div className="absolute top-0 right-0 p-4 opacity-20"><Database size={140} /></div>
-                 <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
-                   <div className="flex items-center gap-4">
-	                      <div className="w-14 h-14 bg-white/20 backdrop-blur-xl rounded-[1.2rem] flex items-center justify-center border border-white/30 shadow-2xl"><span className="text-white font-black text-3xl italic">H</span></div>
-                      <div className="h-10 w-px bg-white/10 hidden md:block"></div>
-	                      <div className="flex flex-col">
-	                        <span className="text-[10px] font-black uppercase tracking-[0.35em] text-cyan-100">Hulio Group V5</span>
-	                        <span className="text-xl md:text-2xl font-black tracking-tighter uppercase leading-none mt-1">Authentication</span>
-	                      </div>
-	                   </div>
-	                   <div className="flex flex-col items-start md:items-end">
-                      {!isSetupView && !isEnvLockedWorkspace && (
-                        <button
-                          type="button"
-                          onClick={() => setLoginView('setup')}
-                          className="px-4 py-2 rounded-xl bg-white/20 hover:bg-white/30 border border-white/30 text-white text-[10px] font-black uppercase tracking-[0.16em] transition-all"
-                        >
-                          Pengaturan Koneksi
-                        </button>
-                      )}
-                      {isSetupView && (
-	                      <div className={`flex items-center gap-2.5 px-3 py-1.5 rounded-xl border backdrop-blur-md transition-all ${isLocalActive ? 'bg-white/15 border-white/20' : 'bg-emerald-400/20 border-emerald-200/40'}`}>
-	                         {isLocalActive ? <HardDrive size={14} className="text-white"/> : <Store size={14} className="text-emerald-100"/>}
-	                         <span className="text-[10px] font-black text-white uppercase tracking-widest">{isLocalActive ? 'Local DB' : currentActiveDbLabel}</span>
-	                         {!isLocalActive && isSyncing && <RefreshCw size={10} className="animate-spin text-emerald-400"/>}
-	                      </div>
-                      )}
-	                      <span className="text-[7px] font-bold text-slate-500 uppercase tracking-[0.18em] mt-2 ml-1 md:ml-0">{isLocalActive ? 'Sistem Siap Digunakan' : `${currentActiveRegion} Workspace`}</span>
-	                   </div>
-	                 </div>
-	              </div>
-
-	              <div className="p-6 md:p-8 space-y-6">
-                {isSetupView && (
-		                 <div className={`rounded-[1.4rem] border px-4 py-3 flex items-start gap-3 ${isLocalActive ? 'bg-blue-50 border-blue-100 text-blue-700' : 'bg-emerald-50 border-emerald-100 text-emerald-700'}`}>
-	                    {isLocalActive ? <HardDrive size={16} className="shrink-0 mt-0.5" /> : <MapPin size={16} className="shrink-0 mt-0.5" />}
-	                    <div>
-                      <div className="font-black text-[10px] uppercase tracking-[0.2em]">{isLocalActive ? 'Mode Lokal Aktif' : `Workspace ${currentActiveDbLabel}`}</div>
-                      <p className="mt-1.5 text-[10px] font-bold uppercase tracking-[0.14em] leading-relaxed">
-                        {isLocalActive ? 'Cocok untuk toko tunggal, koneksi putus, atau perangkat kasir cadangan.' : `Terhubung ke region ${currentActiveRegion}. User cukup login tanpa perlu memasukkan URL server.`}
-	                      </p>
-	                    </div>
-	                 </div>
-                )}
-	                 <form onSubmit={handleLogin} className="space-y-5">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                       <div className="space-y-2">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Identitas Login</label>
-                          <div className="relative group">
-                             <UserIcon className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-indigo-600 transition-colors" size={18} />
-                             <input type="text" required autoFocus className="w-full pl-12 pr-4 py-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.2rem] focus:border-indigo-600 focus:bg-white outline-none font-black text-slate-800 transition-all shadow-inner text-sm" placeholder="ID AKUN" value={loginUsername} onChange={e => setLoginUsername(e.target.value)} />
-                          </div>
-                       </div>
-                       <div className="space-y-2">
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Kata Sandi</label>
-                          <div className="relative group">
-                             <Lock className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-300 group-focus-within:text-indigo-600 transition-colors" size={18} />
-                             <input type="password" required className="w-full pl-14 pr-4 py-5 bg-slate-50 border-4 border-slate-100 rounded-[2rem] focus:border-indigo-600 focus:bg-white outline-none font-black text-slate-800 transition-all shadow-inner text-sm" placeholder="••••••••" value={loginPassword} onChange={e => setLoginPassword(e.target.value)} />
-                          </div>
-                       </div>
-                    </div>
-                    {loginError && (<div className="p-3.5 bg-red-50 text-red-600 rounded-[1.2rem] border border-red-100 font-black uppercase text-[10px] flex items-center gap-3"><AlertCircle size={16}/> {loginError}</div>)}
-	                    <button type="submit" className="w-full py-4 bg-gradient-to-r from-blue-600 via-indigo-600 to-cyan-500 text-white rounded-[1.35rem] font-black text-sm uppercase tracking-[0.2em] shadow-xl shadow-indigo-200/70 hover:brightness-105 active:scale-[0.98] transition-all flex items-center justify-center gap-3">Masuk Dashboard <ChevronRight size={18}/></button>
-                 </form>
-                {isSetupView && (
-	                 <div className="flex items-center gap-3 px-1">
-	                    <div className="flex-1 h-px bg-slate-100"></div>
-	                    <div className="flex items-center gap-2"><ShieldCheck size={12} className="text-slate-300"/><span className="text-[8px] font-black text-slate-300 uppercase tracking-[0.16em]">Encrypted Session Active</span></div>
-	                    <div className="flex-1 h-px bg-slate-100"></div>
-	                 </div>
-                )}
-                {isSetupView && (
-	                 <div className="flex items-center justify-between gap-3 border border-slate-100 rounded-[1.1rem] px-3 py-2 bg-slate-50/80">
-	                    <div className="min-w-0">
-	                      <div className="text-[9px] font-black text-slate-500 uppercase tracking-[0.18em]">Mode Lokal</div>
-                      <div className="text-[8px] font-bold text-slate-400 uppercase tracking-[0.14em] mt-1">Gunakan hanya saat offline atau perangkat cadangan</div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLoginAccessMode('local');
-                        setShowCloudSelector(false);
-                        switchDb({ enabled: false, storeId: 'local_offline', displayName: 'Local Workspace', region: 'Offline' });
-                      }}
-                      className={`shrink-0 inline-flex items-center gap-2 rounded-full border px-2.5 py-1.5 transition-all ${isLocalActive ? 'border-indigo-300 bg-indigo-50 text-indigo-700' : 'border-slate-200 bg-white text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}
-                    >
-                      <span className={`w-3.5 h-3.5 rounded-[4px] border flex items-center justify-center ${isLocalActive ? 'border-indigo-500 bg-indigo-500 text-white' : 'border-slate-300 bg-white text-transparent'}`}>
-                        <CheckCircle2 size={10} />
-                      </span>
-	                      <span className="text-[9px] font-black uppercase tracking-[0.16em]">{isLocalActive ? 'Aktif' : 'Pakai Lokal'}</span>
-	                    </button>
-	                 </div>
-                )}
-	              </div>
-	           </div>
+          {/* Footer */}
+          <div className="text-center mt-5 space-y-1">
+            <p className="text-xs text-slate-400">
+              {hasCloudConfig() ? '☁️ Cloud Sync Aktif' : '💾 Data tersimpan lokal'}
+            </p>
+            <p className="text-[11px] text-slate-300">POS Hulio v5</p>
+          </div>
         </div>
-
-        {showAdminUnlock && (
-          <div className="fixed inset-0 bg-slate-950/90 backdrop-blur-xl z-[190] flex items-center justify-center p-4">
-             <div className="bg-white w-full max-w-md rounded-[2rem] p-6 shadow-2xl border-8 border-slate-100 relative overflow-hidden">
-                <button onClick={closeAdminSetup} className="absolute top-5 right-5 p-3 bg-slate-50 rounded-full text-slate-400 hover:bg-red-500 hover:text-white transition-all shadow-sm z-50"><X size={18}/></button>
-                <div className="flex flex-col items-center text-center mb-6">
-                   <div className="w-14 h-14 bg-slate-100 text-slate-700 rounded-[1.2rem] flex items-center justify-center mb-4 shadow-inner"><ShieldEllipsis size={26}/></div>
-                   <h3 className="text-2xl font-black text-slate-900 uppercase tracking-tighter">Verifikasi Admin</h3>
-                   <p className="mt-2 text-[10px] font-bold text-slate-500 uppercase tracking-[0.16em]">Setup server dan recovery hanya untuk akun admin</p>
-                </div>
-                <form onSubmit={handleAdminUnlock} className="space-y-4">
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Username Admin</label>
-                    <input
-                      type="text"
-                      className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner"
-                      placeholder="admin"
-                      value={adminUnlockUsername}
-                      onChange={e => setAdminUnlockUsername(e.target.value)}
-                    />
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Password Admin</label>
-                    <input
-                      type="password"
-                      className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner"
-                      placeholder="Password admin"
-                      value={adminUnlockPassword}
-                      onChange={e => setAdminUnlockPassword(e.target.value)}
-                    />
-                  </div>
-                  {adminUnlockError && (
-                    <div className="p-3 bg-red-50 text-red-600 rounded-[1rem] border border-red-100 font-black uppercase text-[10px] flex items-center gap-2.5">
-                      <AlertCircle size={14} /> {adminUnlockError}
-                    </div>
-                  )}
-                  <button type="submit" className="w-full py-4 bg-slate-950 text-white font-black rounded-[1.35rem] uppercase tracking-[0.18em] text-sm hover:bg-slate-900 shadow-xl border-b-4 border-slate-900 active:scale-95 transition-all">
-                    Buka Setup Admin
-                  </button>
-                </form>
-             </div>
-          </div>
-        )}
-
-        {showAddDb && (
-          <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-2xl z-[200] flex items-center justify-center p-4">
-             <div className="bg-white w-full max-w-lg rounded-[2.4rem] p-6 md:p-8 shadow-2xl animate-in zoom-in-95 duration-500 border-8 border-slate-100 relative overflow-hidden">
-                <button onClick={closeAdminSetup} className="absolute top-5 right-5 p-3 bg-slate-50 rounded-full text-slate-400 hover:bg-red-500 hover:text-white transition-all shadow-sm z-50"><X size={18}/></button>
-                <div className="flex flex-col items-center text-center mb-6">
-                   <div className="w-14 h-14 bg-indigo-100 text-indigo-600 rounded-[1.2rem] flex items-center justify-center mb-4 shadow-inner"><CloudLightning size={28}/></div>
-                   <h3 className="text-2xl font-black text-slate-900 uppercase tracking-tighter">Setup Cloud</h3>
-                   <div className="flex mt-5 bg-slate-100 p-1.5 rounded-[1.1rem] border border-slate-200 w-full">
-                      <button onClick={() => setAddDbMode('code')} className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase tracking-[0.18em] transition-all flex items-center justify-center gap-2 ${addDbMode === 'code' ? 'bg-white text-indigo-600 shadow-md' : 'text-slate-400'}`}><QrCode size={16}/> Kode</button>
-                      <button onClick={() => setAddDbMode('manual')} className={`flex-1 py-3 rounded-xl font-black text-[10px] uppercase tracking-[0.18em] transition-all flex items-center justify-center gap-2 ${addDbMode === 'manual' ? 'bg-white text-indigo-600 shadow-md' : 'text-slate-400'}`}><Terminal size={16}/> Manual</button>
-                   </div>
-                </div>
-                {addDbMode === 'code' ? (
-                  <form onSubmit={handleAddActivationCode} className="space-y-5 animate-in slide-in-from-left duration-500">
-                    <div className="space-y-2">
-                       <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Input Kode Aktivasi</label>
-                       <textarea rows={5} className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-[1.2rem] font-mono text-[11px] text-slate-800 focus:border-indigo-600 outline-none shadow-inner resize-none break-all" placeholder="Paste kode aktivasi base64..." value={activationCodeInput} onChange={e => setActivationCodeInput(e.target.value)} />
-                       <div className="p-3 bg-blue-50/50 rounded-[1.1rem] border border-blue-100 flex items-start gap-3"><Info size={14} className="text-blue-500 shrink-0 mt-0.5"/><p className="text-[10px] font-bold text-blue-600 uppercase leading-relaxed">Hubungi admin IT untuk mendapatkan kode akses workspace.</p></div>
-                    </div>
-                    <button type="submit" className="w-full py-4 bg-indigo-600 text-white font-black rounded-[1.35rem] uppercase tracking-[0.18em] text-sm hover:bg-indigo-700 shadow-xl border-b-4 border-indigo-900 active:scale-95 transition-all">Aktivasi Node</button>
-                  </form>
-                ) : (
-                  <form onSubmit={handleAddManualDb} className="space-y-4 animate-in slide-in-from-right duration-500">
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Nama Lokasi</label><input className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="Bekasi Barat" value={newDbForm.displayName} onChange={e => setNewDbForm({...newDbForm, displayName: e.target.value})} /></div>
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Region / Cluster</label><input className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="Bekasi / Sumatra / Pusat" value={newDbForm.region} onChange={e => setNewDbForm({...newDbForm, region: e.target.value})} /></div>
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Workspace ID</label><input className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="toko_pusat" value={newDbForm.storeId} onChange={e => setNewDbForm({...newDbForm, storeId: e.target.value.toLowerCase().replace(/\s+/g, '_')})} /></div>
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Supabase URL</label><input className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="https://xxxxx.supabase.co" value={newDbForm.supabaseUrl} onChange={e => setNewDbForm({...newDbForm, supabaseUrl: e.target.value})} /></div>
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Supabase Anon Key</label><input type="password" className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="eyJ..." value={newDbForm.supabaseAnonKey} onChange={e => setNewDbForm({...newDbForm, supabaseAnonKey: e.target.value})} /></div>
-                    <div className="space-y-1.5"><label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.18em] ml-1.5">Supabase Bucket</label><input className="w-full p-3.5 bg-slate-50 border-2 border-slate-100 rounded-[1.1rem] font-black text-xs text-slate-800 focus:border-indigo-600 outline-none shadow-inner" placeholder="erp-media" value={newDbForm.supabaseBucket} onChange={e => setNewDbForm({...newDbForm, supabaseBucket: e.target.value})} /></div>
-                    <button type="submit" className="w-full py-4 bg-indigo-600 text-white font-black rounded-[1.35rem] uppercase tracking-[0.18em] text-sm hover:bg-indigo-700 shadow-xl border-b-4 border-indigo-900 active:scale-95 transition-all mt-2">Hubungkan Manual</button>
-                  </form>
-                )}
-                <div className="mt-5 rounded-[1.1rem] border border-slate-200 bg-slate-50 px-4 py-3">
-                  <button
-                    type="button"
-                    onClick={() => setShowRecoveryPanel(current => !current)}
-                    className="w-full flex items-center justify-between gap-3 text-left"
-                  >
-                    <div className="min-w-0">
-                      <div className="text-[10px] font-black text-slate-700 uppercase tracking-[0.18em]">Recovery Lanjutan</div>
-                      <p className="mt-1 text-[10px] font-bold text-slate-500 leading-relaxed">
-                        Buka hanya jika benar-benar perlu reset user workspace aktif.
-                      </p>
-                    </div>
-                    <ChevronDown size={16} className={`shrink-0 text-slate-400 transition-transform ${showRecoveryPanel ? 'rotate-180' : ''}`} />
-                  </button>
-                  {showRecoveryPanel && (
-                    <div className="mt-4 rounded-[1rem] border border-amber-200 bg-amber-50 px-4 py-4 space-y-3">
-                      <div className="flex items-start gap-3">
-                        <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[10px] font-black text-amber-700 uppercase tracking-[0.18em]">Zona Berisiko</div>
-                          <p className="mt-1 text-[10px] font-bold text-amber-600 leading-relaxed">
-                            Tindakan ini akan mengganti user workspace aktif menjadi default `admin / 123`, `kasir / 123`, dan `gudang / 123`.
-                          </p>
-                        </div>
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-amber-700 uppercase tracking-[0.18em]">Ketik Workspace ID Aktif</label>
-                        <input
-                          type="text"
-                          className="w-full p-3 bg-white border border-amber-200 rounded-[0.9rem] font-black text-[11px] text-slate-800 outline-none focus:border-amber-400"
-                          placeholder={getCloudConfig().storeId || 'local_offline'}
-                          value={recoveryWorkspaceInput}
-                          onChange={e => setRecoveryWorkspaceInput(e.target.value)}
-                        />
-                      </div>
-                      <div className="space-y-1.5">
-                        <label className="text-[10px] font-black text-amber-700 uppercase tracking-[0.18em]">Ketik Frasa Konfirmasi</label>
-                        <input
-                          type="text"
-                          className="w-full p-3 bg-white border border-amber-200 rounded-[0.9rem] font-black text-[11px] text-slate-800 outline-none focus:border-amber-400"
-                          placeholder="RESET USERS"
-                          value={recoveryPhraseInput}
-                          onChange={e => setRecoveryPhraseInput(e.target.value)}
-                        />
-                      </div>
-                      <button
-                        type="button"
-                        onClick={handleResetWorkspaceUsers}
-                        className="w-full py-3 rounded-[1rem] border border-amber-200 bg-white text-amber-700 font-black text-[10px] uppercase tracking-[0.18em] hover:bg-amber-100 transition-all"
-                      >
-                        Jalankan Reset User Workspace
-                      </button>
-                    </div>
-                  )}
-                </div>
-             </div>
-          </div>
-        )}
       </div>
     );
   }
+
 
   const renderContent = () => {
     if (!currentUser) return null;
@@ -1538,7 +1254,9 @@ const App: React.FC = () => {
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={sales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError}>
-      {renderContent()}
+      <Suspense fallback={<PageLoadingFallback />}>
+        {renderContent()}
+      </Suspense>
     </Layout>
   );
 };

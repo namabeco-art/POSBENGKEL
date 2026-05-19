@@ -1,8 +1,9 @@
 import { create } from 'zustand';
+import { useShallow } from 'zustand/shallow';
 import { 
   AppData, User, Item, Customer, Supplier, Account, PurchaseOrder, 
   Sale, SaleReturn, InventoryMovement, AuditLog, CashSession, PaymentRecord, PromotionCampaign, 
-  MediaAsset, AIUndoEntry, Branch 
+  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage
 } from './types';
 import { 
   mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, 
@@ -20,7 +21,7 @@ export interface AppState extends AppData {
   purchaseOrders: PurchaseOrder[];
   sales: Sale[];
   returns: SaleReturn[];
-  inventoryLogs: any[];
+  inventoryLogs: InventoryLog[];
   inventoryMovements: InventoryMovement[];
   auditLogs: AuditLog[];
   cashSessions: CashSession[];
@@ -29,8 +30,8 @@ export interface AppState extends AppData {
   mediaAssets: MediaAsset[];
   aiUndoStack: AIUndoEntry[];
   branches: Branch[];
-  aiConsultantHistory: any[];
-  floatingChatHistory: any[];
+  aiConsultantHistory: ChatMessage[];
+  floatingChatHistory: ChatMessage[];
 
   // Config fields
   openRouterApiKey?: string;
@@ -57,8 +58,8 @@ export interface AppState extends AppData {
   setAiUndoStack: (stack: AIUndoEntry[] | ((prev: AIUndoEntry[]) => AIUndoEntry[])) => void;
   setPromotions: (promos: PromotionCampaign[] | ((prev: PromotionCampaign[]) => PromotionCampaign[])) => void;
   setMediaAssets: (assets: MediaAsset[] | ((prev: MediaAsset[]) => MediaAsset[])) => void;
-  setAiConsultantHistory: (history: any[] | ((prev: any[]) => any[])) => void;
-  setFloatingChatHistory: (history: any[] | ((prev: any[]) => any[])) => void;
+  setAiConsultantHistory: (history: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
+  setFloatingChatHistory: (history: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -111,9 +112,22 @@ export const useAppStore = create<AppState>((set, get) => ({
     };
   }),
 
-  appendAuditLog: (log) => set((state) => ({
-    auditLogs: [log, ...state.auditLogs].slice(0, 500)
-  })),
+  appendAuditLog: (log) => set((state) => {
+    const newLogs = [log, ...state.auditLogs];
+    // Archive older logs to localStorage before trimming
+    if (newLogs.length > 2000) {
+      try {
+        const archiveKey = 'HGROUP_AUDIT_ARCHIVE';
+        const existing = JSON.parse(localStorage.getItem(archiveKey) || '[]');
+        const toArchive = newLogs.slice(2000);
+        const archived = [...toArchive, ...existing].slice(0, 10000);
+        localStorage.setItem(archiveKey, JSON.stringify(archived));
+      } catch {
+        // localStorage full — silently skip archival
+      }
+    }
+    return { auditLogs: newLogs.slice(0, 2000) };
+  }),
 
   // Basic Setters with generic functional update support
   setUsers: (updater) => set((state) => ({ users: typeof updater === 'function' ? updater(state.users) : updater })),
@@ -132,4 +146,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   setMediaAssets: (updater) => set((state) => ({ mediaAssets: typeof updater === 'function' ? updater(state.mediaAssets) : updater })),
   setAiConsultantHistory: (updater) => set((state) => ({ aiConsultantHistory: typeof updater === 'function' ? updater(state.aiConsultantHistory) : updater })),
   setFloatingChatHistory: (updater) => set((state) => ({ floatingChatHistory: typeof updater === 'function' ? updater(state.floatingChatHistory) : updater })),
+}));
+
+
+// ============================================================
+// SELECTOR HOOKS — Use these instead of destructuring the entire store.
+// Each selector only triggers re-render when its specific slice changes.
+// ============================================================
+
+/** Select multiple state slices with shallow comparison to prevent unnecessary re-renders */
+export const useAppStoreShallow = <T>(selector: (state: AppState) => T): T =>
+  useAppStore(useShallow(selector));
+
+/** Common selectors for frequently accessed data */
+export const useItems = () => useAppStore(state => state.items);
+export const useUsers = () => useAppStore(state => state.users);
+export const useCustomers = () => useAppStore(state => state.customers);
+export const useSuppliers = () => useAppStore(state => state.suppliers);
+export const useSales = () => useAppStore(state => state.sales);
+export const useReturns = () => useAppStore(state => state.returns);
+export const usePurchaseOrders = () => useAppStore(state => state.purchaseOrders);
+export const useInventoryMovements = () => useAppStore(state => state.inventoryMovements);
+export const useAuditLogs = () => useAppStore(state => state.auditLogs);
+export const useCashSessions = () => useAppStore(state => state.cashSessions);
+export const usePaymentRecords = () => useAppStore(state => state.paymentRecords);
+export const usePromotions = () => useAppStore(state => state.promotions);
+export const useMediaAssets = () => useAppStore(state => state.mediaAssets);
+export const useAccounts = () => useAppStore(state => state.accounts);
+export const useBranches = () => useAppStore(state => state.branches);
+export const useAiUndoStack = () => useAppStore(state => state.aiUndoStack);
+export const useAiConsultantHistory = () => useAppStore(state => state.aiConsultantHistory);
+export const useFloatingChatHistory = () => useAppStore(state => state.floatingChatHistory);
+
+/** Action-only selectors (never cause re-renders from data changes) */
+export const useAppActions = () => useAppStoreShallow(state => ({
+  applyData: state.applyData,
+  appendAuditLog: state.appendAuditLog,
+  setUsers: state.setUsers,
+  setItems: state.setItems,
+  setCustomers: state.setCustomers,
+  setSuppliers: state.setSuppliers,
+  setPurchaseOrders: state.setPurchaseOrders,
+  setSales: state.setSales,
+  setReturns: state.setReturns,
+  setInventoryMovements: state.setInventoryMovements,
+  setCashSessions: state.setCashSessions,
+  setPaymentRecords: state.setPaymentRecords,
+  setAccounts: state.setAccounts,
+  setAiUndoStack: state.setAiUndoStack,
+  setPromotions: state.setPromotions,
+  setMediaAssets: state.setMediaAssets,
+  setAiConsultantHistory: state.setAiConsultantHistory,
+  setFloatingChatHistory: state.setFloatingChatHistory,
 }));

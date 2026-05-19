@@ -1,102 +1,79 @@
-# POS Hulio
+# POS Hulio — Sistem Kasir Bengkel & Retail
 
-POS retail berbasis React + Vite dengan mode `local` atau `cloud`.
+Aplikasi kasir (Point of Sale) untuk bengkel, toko sparepart, dan retail kecil-menengah.
+Bisa dipakai langsung tanpa internet (mode lokal) atau disinkronkan antar perangkat.
 
-## Tujuan Setup
+## Fitur Utama
 
-Aplikasi ini sekarang mendukung 2 pola deployment:
+- **Kasir (POS)** — Input penjualan cepat, scan barcode, cetak struk
+- **Stok Barang** — Kelola sparepart/produk, stok otomatis berkurang saat jual
+- **Pelanggan** — Data pelanggan, hutang, level member
+- **Pembelian** — Catat pembelian dari supplier, terima barang
+- **Laporan** — Penjualan harian, stok menipis, laba rugi sederhana
+- **Multi User** — Admin, Kasir, Gudang — masing-masing punya akses berbeda
+- **AI Consultant** — Tanya AI soal bisnis (opsional, perlu API key)
+- **Offline First** — Data tersimpan di browser, tetap jalan tanpa internet
 
-1. `Environment-driven deployment`
-   Cocok untuk server, VPS, Vercel, atau host lain.
-   Semua database dan API diisi lewat file `.env`.
+## Cara Pakai (5 Menit)
 
-2. `Runtime settings deployment`
-Cocok untuk demo atau instalasi cepat.
-Konfigurasi database dan OpenRouter bisa diisi dari halaman Settings.
+### 1. Install
 
-## Quick Start
-
-1. Install dependency:
-   `npm install`
-2. Salin file env:
-   `Copy-Item .env.example .env.local`
-3. Isi variabel yang dibutuhkan.
-4. Jalankan:
-   `npm run dev`
-
-## Environment Variables
-
-Gunakan variabel berikut:
-
-```env
-VITE_OPENROUTER_API_KEY=
-VITE_OPENROUTER_MODEL=openrouter/auto
-VITE_CLOUD_ENABLED=false
-VITE_UPSTASH_URL=
-VITE_UPSTASH_TOKEN=
-VITE_STORE_ID=demo_store
-VITE_ALLOW_RUNTIME_SETTINGS=true
+```bash
+npm install
 ```
 
-Penjelasan:
+### 2. Jalankan
 
-- `VITE_OPENROUTER_API_KEY`: API key untuk fitur AI via OpenRouter.
-- `VITE_OPENROUTER_MODEL`: model routing OpenRouter, default `openrouter/auto`.
-- `VITE_CLOUD_ENABLED`: `true` jika ingin sinkronisasi cloud aktif.
-- `VITE_UPSTASH_URL`: endpoint REST Upstash Redis.
-- `VITE_UPSTASH_TOKEN`: token REST Upstash.
-- `VITE_STORE_ID`: identitas store/workspace.
-- `VITE_ALLOW_RUNTIME_SETTINGS`: `false` jika konfigurasi ingin dikunci dari UI dan hanya boleh diatur lewat env.
-
-## Mode Deployment
-
-### 1. Local only
-
-Gunakan:
-
-```env
-VITE_CLOUD_ENABLED=false
-VITE_OPENROUTER_API_KEY=your_openrouter_key
-VITE_OPENROUTER_MODEL=openrouter/auto
+```bash
+npm run dev
 ```
 
-### 2. Cloud with env config
+Buka browser ke `http://localhost:3000`
 
-Gunakan:
+### 3. Login Default
 
-```env
-VITE_CLOUD_ENABLED=true
-VITE_UPSTASH_URL=https://your-upstash-url
-VITE_UPSTASH_TOKEN=your-token
-VITE_STORE_ID=toko_pusat
-VITE_OPENROUTER_API_KEY=your_openrouter_key
-VITE_OPENROUTER_MODEL=openrouter/auto
-VITE_ALLOW_RUNTIME_SETTINGS=false
+| Username | Password | Akses |
+|----------|----------|-------|
+| admin    | 123      | Semua fitur |
+| kasir    | 123      | Kasir + lihat penjualan |
+| gudang   | 123      | Stok + terima barang |
+
+> ⚠️ Segera ganti password default setelah login pertama kali!
+
+## Konfigurasi (Opsional)
+
+Jika ingin fitur tambahan, salin `.env.example` → `.env.local`:
+
+```bash
+copy .env.example .env.local
 ```
 
-Mode ini paling cocok untuk production karena deploy baru cukup copy `.env` lalu build ulang.
+### Fitur AI (Opsional)
+1. Daftar di [openrouter.ai](https://openrouter.ai/settings/keys) (gratis)
+2. Isi `VITE_OPENROUTER_API_KEY` di `.env.local`
+3. Restart `npm run dev`
 
-## Build Production
+### Sinkron Antar Perangkat (Opsional)
+Jika punya 2+ komputer/tablet yang perlu data sama:
+1. Buat project gratis di [supabase.com](https://supabase.com)
+2. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY`
+3. Set `VITE_CLOUD_ENABLED=true`
+
+## Build untuk Production
 
 ```bash
 npm run build
-npm run preview
 ```
 
-Folder hasil build ada di `dist/`.
+Hasil build ada di folder `dist/`. Tinggal upload ke hosting apapun (Vercel, Netlify, VPS, dll).
 
-## Deploy ke Server Lain
+## Tips Penggunaan
 
-Checklist cepat:
+- **Pertama kali**: Masukkan data barang dulu di menu Master Data
+- **Barcode**: Bisa pakai scanner USB, langsung ketik di kolom pencarian kasir
+- **Backup**: Rutin export backup dari menu Pengaturan → Export Backup
+- **Cetak Struk**: Support printer thermal via USB (ESC/POS) atau print biasa
 
-1. Copy source code.
-2. Jalankan `npm install`.
-3. Copy `.env.example` menjadi `.env.local` atau isi env di platform deployment.
-4. Jalankan `npm run build`.
-5. Serve folder `dist`.
+## Teknologi
 
-## Catatan Operasional
-
-- Jika env cloud aktif, aplikasi akan memakai konfigurasi dari environment sebagai sumber utama.
-- Jika `VITE_ALLOW_RUNTIME_SETTINGS=false`, pengaturan database/API dari UI akan dikunci agar konsisten antar server.
-- Untuk production jangka panjang, tetap disarankan memindahkan akses database dan API key ke backend/proxy, bukan langsung dari browser.
+React + Vite + Tailwind CSS + Zustand. Tidak perlu database server — semua tersimpan di browser (IndexedDB/localStorage).

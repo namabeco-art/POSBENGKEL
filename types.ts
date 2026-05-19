@@ -342,6 +342,26 @@ export interface MediaAsset {
   useAsKnowledge?: boolean;
 }
 
+export interface InventoryLog {
+  id: string;
+  itemId: string;
+  itemName: string;
+  previousStock: number;
+  actualStock: number;
+  notes: string;
+  operatorName: string;
+  operatorId?: string;
+  createdAt: string;
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant' | 'system';
+  content: string;
+  timestamp: string;
+  actions?: any[];
+}
+
 export interface AppData {
   users: User[];
   items: Item[];
@@ -351,7 +371,7 @@ export interface AppData {
   purchaseOrders: PurchaseOrder[];
   sales: Sale[];
   returns: SaleReturn[];
-  inventoryLogs: any[];
+  inventoryLogs: InventoryLog[];
   inventoryMovements: InventoryMovement[];
   auditLogs: AuditLog[];
   cashSessions: CashSession[];
@@ -360,8 +380,8 @@ export interface AppData {
   mediaAssets?: MediaAsset[];
   aiUndoStack?: AIUndoEntry[];
   branches: Branch[];
-  aiConsultantHistory: any[];
-  floatingChatHistory: any[];
+  aiConsultantHistory: ChatMessage[];
+  floatingChatHistory: ChatMessage[];
   openRouterApiKey?: string;
   aiModel?: string;
   supabaseUrl?: string;

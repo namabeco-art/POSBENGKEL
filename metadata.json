@@ -1,6 +1,6 @@
 {
-  "name": "14-01-2025 POS HULIO",
-  "description": "Enterprise ecosystem for modern retail and wholesale, integrated with AI Business Intelligence and consultant modules.",
+  "name": "POS Hulio - Kasir Bengkel & Retail",
+  "description": "Sistem kasir (POS) untuk bengkel, toko sparepart, dan retail. Offline-first, mudah dipakai.",
   "requestFramePermissions": [
     "camera"
   ]

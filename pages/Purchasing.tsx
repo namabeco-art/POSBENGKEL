@@ -468,11 +468,11 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
                          <div className="bg-white/10 p-2 md:p-4 rounded-xl md:rounded-2xl border border-white/10 shadow-sm">
                             <label className="text-[7px] md:text-[8px] font-black text-slate-400 uppercase tracking-widest block mb-1">Termin (HARI)</label>
-                            <input type="number" className="w-full bg-transparent font-black text-white outline-none text-xs md:text-base" value={termOfPayment} onChange={e => setTermOfPayment(parseInt(e.target.value) || 0)}/>
+                            <input type="number" min="0" className="w-full bg-white/20 rounded-lg px-2 py-1 font-black text-white outline-none text-xs md:text-base placeholder:text-white/40 focus:bg-white/30 transition-all" placeholder="0" value={termOfPayment || ''} onChange={e => setTermOfPayment(parseInt(e.target.value) || 0)}/>
                          </div>
                          <div className="bg-white/10 p-2 md:p-4 rounded-xl md:rounded-2xl border border-emerald-500/20 shadow-sm">
                             <label className="text-[7px] md:text-[8px] font-black text-emerald-400 uppercase tracking-widest block mb-1">Diskon (%)</label>
-                            <input type="number" max="100" className="w-full bg-transparent font-black text-emerald-100 outline-none text-xs md:text-base" value={discountPercent} onChange={e => setDiscountPercent(Math.min(100, parseInt(e.target.value) || 0))}/>
+                            <input type="number" min="0" max="100" className="w-full bg-white/20 rounded-lg px-2 py-1 font-black text-emerald-100 outline-none text-xs md:text-base placeholder:text-emerald-300/40 focus:bg-white/30 transition-all" placeholder="0" value={discountPercent || ''} onChange={e => setDiscountPercent(Math.min(100, parseInt(e.target.value) || 0))}/>
                          </div>
                          <div className="hidden md:block bg-white/10 p-4 rounded-2xl border border-white/10">
                             <label className="text-[8px] font-black text-slate-400 uppercase tracking-widest block mb-1">Subtotal</label>

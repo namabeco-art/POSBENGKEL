@@ -224,8 +224,8 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
                              <input required type="text" className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-bold text-slate-800 transition-all shadow-inner" placeholder="kasir1" value={formData.username} onChange={e => setFormData({...formData, username: e.target.value.toLowerCase().trim()})} />
                            </div>
                            <div className="space-y-2">
-                             <label className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-1">Password</label>
-                             <input required type="password" className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-bold text-slate-800 transition-all shadow-inner" placeholder="••••••••" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
+                             <label className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-1">{editingId ? 'Password Baru (kosongkan jika tidak diubah)' : 'Password'}</label>
+                             <input type="password" className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-bold text-slate-800 transition-all shadow-inner" placeholder={editingId ? '(tidak diubah)' : '••••••••'} value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
                            </div>
                         </div>
                         <div className="space-y-2">

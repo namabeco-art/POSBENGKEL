@@ -12,10 +12,12 @@ import {
   ChevronRight,
   CheckSquare,
   Square,
-  Wand2
+  Wand2,
+  TrendingUp
 } from 'lucide-react';
 import { Item, Customer, Supplier, BundleComponent } from '../types';
 import { hasCloudConfig } from '../services/syncService';
+import PriceManager from '../components/PriceManager';
 
 interface MasterDataProps {
   type: 'items' | 'contacts' | 'warehouses';
@@ -56,6 +58,7 @@ const MasterData: React.FC<MasterDataProps> = ({
   // Bulk Selection State
   const [selectedItemIds, setSelectedItemIds] = useState<string[]>([]);
   const [isBulkEditModalOpen, setIsBulkEditModalOpen] = useState(false);
+  const [isPriceManagerOpen, setIsPriceManagerOpen] = useState(false);
   const [bulkEditForm, setBulkEditForm] = useState({
     category: '',
     brand: '',
@@ -457,9 +460,14 @@ const MasterData: React.FC<MasterDataProps> = ({
             </button>
           )}
         </div>
-        <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-6 py-3.5 bg-blue-700 text-white rounded-2xl font-bold hover:bg-blue-800 shadow-xl transition-all active:scale-95 uppercase tracking-tight">
-          <Plus size={20} /> <span className="hidden sm:inline">TAMBAH BARANG BARU</span><span className="sm:hidden">TAMBAH BARANG</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={() => setIsPriceManagerOpen(true)} className="flex items-center gap-2 px-4 py-3.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-2xl font-bold hover:bg-amber-100 transition-all active:scale-95 text-xs uppercase tracking-tight">
+            <TrendingUp size={18} /> <span className="hidden sm:inline">Kelola Harga</span><span className="sm:hidden">Harga</span>
+          </button>
+          <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-6 py-3.5 bg-blue-700 text-white rounded-2xl font-bold hover:bg-blue-800 shadow-xl transition-all active:scale-95 uppercase tracking-tight">
+            <Plus size={20} /> <span className="hidden sm:inline">TAMBAH BARANG BARU</span><span className="sm:hidden">TAMBAH BARANG</span>
+          </button>
+        </div>
       </div>
 
       <div className="bg-white p-6 rounded-[2rem] border border-slate-200 shadow-md space-y-5">
@@ -927,6 +935,15 @@ const MasterData: React.FC<MasterDataProps> = ({
               )}
            </div>
         </div>
+      )}
+
+      {/* Price Manager Modal */}
+      {isPriceManagerOpen && type === 'items' && onUpdateItemsBulk && (
+        <PriceManager
+          items={items}
+          onUpdateItemsBulk={onUpdateItemsBulk}
+          onClose={() => setIsPriceManagerOpen(false)}
+        />
       )}
     </div>
   );
