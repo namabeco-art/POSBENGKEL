@@ -1204,7 +1204,7 @@ const App: React.FC = () => {
       case 'returns': return <Returns sales={sales} returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
       case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} currentUser={currentUser} />;
       case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} />;
-      case 'accounting': return <Accounting accounts={accounts} />;
+      case 'accounting': return <Accounting accounts={accounts} sales={sales} cashSessions={cashSessions} />;
       case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={sales} purchaseOrders={purchaseOrders} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
       case 'media-vault': return (
         <MediaVault

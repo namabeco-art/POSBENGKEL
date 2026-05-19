@@ -1,132 +1,159 @@
-
-import React, { useState } from 'react';
-import { Account } from '../types';
-import { Calculator, BookOpen, Receipt, ArrowUpRight, ArrowDownLeft, Plus, X, Landmark } from 'lucide-react';
+import React, { useState, useMemo } from 'react';
+import { Account, Sale, CashSession } from '../types';
+import { Calculator, BookOpen, Receipt, ArrowUpRight, ArrowDownLeft, Plus, X, Landmark, Wallet, FileText, DollarSign } from 'lucide-react';
+import KasHarian from '../components/KasHarian';
+import LaporanPajak from '../components/LaporanPajak';
 
 interface AccountingProps {
   accounts: Account[];
+  sales?: Sale[];
+  cashSessions?: CashSession[];
 }
 
-const Accounting: React.FC<AccountingProps> = ({ accounts }) => {
+const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessions = [] }) => {
+  const [activeTab, setActiveTab] = useState<'coa' | 'kas-harian' | 'pajak'>('coa');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [journals, setJournals] = useState([
     { id: 1, date: '14 Nov 2024', desc: 'Biaya Listrik Kantor', amount: 450000, type: 'EXPENSE' },
     { id: 2, date: '14 Nov 2024', desc: 'Setoran Bank BCA', amount: 15000000, type: 'ASSET' }
   ]);
-
   const [newEntry, setNewEntry] = useState({ desc: '', amount: 0, account: '6-1100' });
+
+  // Calculate today's cash sales for KasHarian
+  const todayCashData = useMemo(() => {
+    const today = new Date().toLocaleDateString('id-ID');
+    const todaySales = sales.filter(s => s.date.startsWith(today) && s.paymentType === 'TUNAI');
+    const salesCashToday = todaySales.reduce((sum, s) => sum + s.total, 0);
+    const openSession = cashSessions.find(cs => cs.status === 'OPEN');
+    const openingCash = openSession?.openingCash || 0;
+    return { openingCash, salesCashToday };
+  }, [sales, cashSessions]);
 
   const handleAddJournal = (e: React.FormEvent) => {
     e.preventDefault();
-    setJournals([{
-      id: Date.now(),
-      date: new Date().toLocaleDateString('id-ID'),
-      desc: newEntry.desc,
-      amount: newEntry.amount,
-      type: 'EXPENSE'
-    }, ...journals]);
+    setJournals([{ id: Date.now(), date: new Date().toLocaleDateString('id-ID'), desc: newEntry.desc, amount: newEntry.amount, type: 'EXPENSE' }, ...journals]);
     setIsModalOpen(false);
     setNewEntry({ desc: '', amount: 0, account: '6-1100' });
   };
 
+  const totalSaldo = accounts.filter(a => a.type === 'ASSET').reduce((sum, a) => sum + a.balance, 0);
+
+  const tabs = [
+    { id: 'coa', label: 'Buku Besar', icon: <BookOpen size={16}/> },
+    { id: 'kas-harian', label: 'Kas Harian', icon: <Wallet size={16}/> },
+    { id: 'pajak', label: 'Pajak UMKM', icon: <FileText size={16}/> },
+  ];
+
   return (
-    <div className="space-y-8">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
-        <div className="bg-blue-600 p-8 rounded-[2rem] text-white shadow-2xl shadow-blue-500/20">
-          <div className="flex justify-between items-start mb-6">
-            <div className="p-3 bg-white/20 rounded-2xl"><Landmark size={24} /></div>
-            <span className="text-[10px] font-black bg-white/20 px-3 py-1 rounded-full uppercase">SINKRON</span>
+    <div className="space-y-6">
+      {/* Header with summary */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-gradient-to-br from-indigo-600 to-indigo-700 p-6 rounded-2xl text-white shadow-lg">
+          <div className="flex items-center gap-2 mb-3"><Landmark size={18} className="text-indigo-200"/><span className="text-xs font-medium text-indigo-200">Total Saldo</span></div>
+          <p className="text-2xl font-bold">Rp {totalSaldo.toLocaleString()}</p>
+        </div>
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
+          <div className="flex items-center gap-2 mb-3"><ArrowDownLeft size={18} className="text-emerald-500"/><span className="text-xs font-medium text-slate-500">Pendapatan (MTD)</span></div>
+          <p className="text-2xl font-bold text-slate-800">Rp {sales.filter(s => { try { const p = s.date.split(' ')[0].split('/'); return +p[1] === new Date().getMonth() + 1; } catch { return false; } }).reduce((sum, s) => sum + s.total, 0).toLocaleString()}</p>
+        </div>
+        <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center cursor-pointer hover:border-indigo-300 transition-all group" onClick={() => setIsModalOpen(true)}>
+          <div className="text-center">
+            <Plus size={24} className="mx-auto text-indigo-400 group-hover:scale-110 transition-transform mb-2" />
+            <p className="text-sm font-semibold text-slate-700">Jurnal Baru</p>
           </div>
-          <div className="text-blue-100 text-xs font-black uppercase tracking-widest mb-1">Total Saldo Kas & Bank</div>
-          <div className="text-4xl font-black tracking-tighter">Rp 52.500.000</div>
-        </div>
-
-        <div className="bg-white p-8 rounded-[2rem] border-2 border-slate-300 shadow-sm">
-          <div className="p-3 bg-emerald-50 text-emerald-600 rounded-2xl w-fit mb-6"><ArrowDownLeft size={24} /></div>
-          <div className="text-slate-400 text-xs font-black uppercase tracking-widest mb-1">Pendapatan Bersih (MTD)</div>
-          <div className="text-4xl font-black text-slate-800 tracking-tighter">Rp 12.840.000</div>
-        </div>
-
-        <div className="bg-white p-8 rounded-[2rem] border-2 border-slate-300 shadow-sm flex flex-col justify-center items-center text-center cursor-pointer hover:border-blue-500 group transition-all" onClick={() => setIsModalOpen(true)}>
-           <div className="p-4 bg-blue-50 text-blue-600 rounded-3xl group-hover:scale-110 transition-transform mb-4">
-              <Plus size={32} />
-           </div>
-           <div className="font-black text-slate-800 uppercase tracking-tighter">BUAT JURNAL BARU</div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-4">
-          <div className="flex items-center justify-between px-2">
-            <h3 className="text-xl font-black text-slate-800 tracking-tight flex items-center gap-2">
-              <BookOpen size={24} className="text-blue-600" /> DAFTAR PERKIRAAN (COA)
-            </h3>
-          </div>
-          <div className="bg-white rounded-[2rem] border-2 border-slate-300 shadow-sm overflow-hidden">
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 border-b border-slate-200 text-left">
-                <tr>
-                  <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Kode Akun</th>
-                  <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest">Nama Perkiraan</th>
-                  <th className="px-8 py-5 text-[10px] font-black text-slate-400 uppercase tracking-widest text-right">Saldo Akhir</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {accounts.map((acc) => (
-                  <tr key={acc.code} className="hover:bg-slate-50 transition-colors">
-                    <td className="px-8 py-4 font-mono font-bold text-blue-600">{acc.code}</td>
-                    <td className="px-8 py-4 font-bold text-slate-800">{acc.name}</td>
-                    <td className="px-8 py-4 text-right font-black text-slate-700">Rp {acc.balance.toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+      {/* Tabs */}
+      <div className="flex gap-2 border-b border-slate-200 pb-0">
+        {tabs.map(tab => (
+          <button
+            key={tab.id}
+            onClick={() => setActiveTab(tab.id as any)}
+            className={`flex items-center gap-2 px-4 py-2.5 text-sm font-medium border-b-2 -mb-px transition-all ${activeTab === tab.id ? 'border-indigo-600 text-indigo-600' : 'border-transparent text-slate-400 hover:text-slate-600'}`}
+          >
+            {tab.icon} {tab.label}
+          </button>
+        ))}
+      </div>
 
-        <div className="space-y-4">
-           <h3 className="text-xl font-black text-slate-800 tracking-tight flex items-center gap-2 px-2">
-              <Receipt size={24} className="text-purple-600" /> JURNAL UMUM
-           </h3>
-           <div className="bg-white rounded-[2rem] border-2 border-slate-300 shadow-sm p-6 space-y-4">
-              {journals.map(j => (
-                <div key={j.id} className="p-4 rounded-2xl bg-slate-50 border-2 border-slate-300 flex justify-between items-center group cursor-pointer hover:bg-white hover:shadow-lg transition-all">
+      {/* Tab Content */}
+      {activeTab === 'coa' && (
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+          <div className="lg:col-span-2">
+            <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 border-b border-slate-200">
+                  <tr>
+                    <th className="px-5 py-3 text-left text-xs font-medium text-slate-500">Kode</th>
+                    <th className="px-5 py-3 text-left text-xs font-medium text-slate-500">Nama Akun</th>
+                    <th className="px-5 py-3 text-left text-xs font-medium text-slate-500">Tipe</th>
+                    <th className="px-5 py-3 text-right text-xs font-medium text-slate-500">Saldo</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {accounts.map(acc => (
+                    <tr key={acc.code} className="hover:bg-slate-50 transition-colors">
+                      <td className="px-5 py-3 font-mono text-indigo-600 font-medium">{acc.code}</td>
+                      <td className="px-5 py-3 font-medium text-slate-800">{acc.name}</td>
+                      <td className="px-5 py-3"><span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${acc.type === 'ASSET' ? 'bg-blue-100 text-blue-700' : acc.type === 'INCOME' ? 'bg-emerald-100 text-emerald-700' : acc.type === 'EXPENSE' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600'}`}>{acc.type}</span></td>
+                      <td className="px-5 py-3 text-right font-semibold text-slate-800">Rp {acc.balance.toLocaleString()}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div>
+            <h4 className="text-sm font-semibold text-slate-700 mb-3 flex items-center gap-2"><Receipt size={16} className="text-indigo-500"/> Jurnal Terakhir</h4>
+            <div className="space-y-2">
+              {journals.slice(0, 8).map(j => (
+                <div key={j.id} className="p-3 bg-white border border-slate-200 rounded-xl flex justify-between items-center hover:border-slate-300 transition-all">
                   <div>
-                    <div className="text-[10px] font-black text-slate-400 uppercase mb-1">{j.date}</div>
-                    <div className="font-bold text-slate-800 leading-tight">{j.desc}</div>
+                    <p className="text-xs text-slate-400">{j.date}</p>
+                    <p className="text-sm font-medium text-slate-800">{j.desc}</p>
                   </div>
-                  <div className="font-black text-blue-600 text-sm">Rp {j.amount.toLocaleString()}</div>
+                  <p className="text-sm font-semibold text-slate-700">Rp {j.amount.toLocaleString()}</p>
                 </div>
               ))}
-           </div>
+            </div>
+          </div>
         </div>
-      </div>
+      )}
 
+      {activeTab === 'kas-harian' && (
+        <KasHarian openingCash={todayCashData.openingCash} salesCashToday={todayCashData.salesCashToday} />
+      )}
+
+      {activeTab === 'pajak' && (
+        <LaporanPajak sales={sales} />
+      )}
+
+      {/* Journal Entry Modal */}
       {isModalOpen && (
-        <div className="fixed inset-0 bg-slate-900/50 backdrop-blur-sm z-[110] flex items-center justify-center p-4">
-           <form onSubmit={handleAddJournal} className="bg-white w-full max-w-lg rounded-[2.5rem] p-10 shadow-2xl animate-in zoom-in duration-300 border-4 border-slate-200">
-              <div className="flex justify-between items-center mb-8">
-                 <h3 className="text-3xl font-black text-slate-800 tracking-tighter uppercase">INPUT JURNAL UMUM</h3>
-                 <button type="button" onClick={() => setIsModalOpen(false)} className="p-2 bg-slate-100 rounded-full border-2 border-slate-300 hover:bg-red-500 hover:text-white transition-all"><X/></button>
-              </div>
-              <div className="space-y-6">
-                 <div>
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">Pilih Akun</label>
-                    <select className="w-full bg-slate-50 border-2 border-slate-400 rounded-2xl p-4 font-bold focus:border-blue-600 outline-none" value={newEntry.account} onChange={e => setNewEntry({...newEntry, account: e.target.value})}>
-                       {accounts.map(acc => <option key={acc.code} value={acc.code}>{acc.code} - {acc.name}</option>)}
-                    </select>
-                 </div>
-                 <div>
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">Keterangan Transaksi</label>
-                    <input required className="w-full bg-slate-50 border-2 border-slate-400 rounded-2xl p-4 font-bold text-slate-700 focus:border-blue-600 outline-none" value={newEntry.desc} onChange={e => setNewEntry({...newEntry, desc: e.target.value})} />
-                 </div>
-                 <div>
-                    <label className="text-xs font-black text-slate-400 uppercase tracking-widest block mb-2">Nilai Nominal (Rp)</label>
-                    <input type="number" required className="w-full bg-slate-50 border-2 border-slate-400 rounded-2xl p-4 font-black text-blue-600 text-2xl focus:border-blue-600 outline-none" value={newEntry.amount} onChange={e => setNewEntry({...newEntry, amount: parseInt(e.target.value) || 0})} />
-                 </div>
-              </div>
-              <button type="submit" className="w-full mt-10 py-5 bg-blue-600 text-white font-black text-xl rounded-2xl shadow-xl hover:bg-blue-700 border-b-4 border-blue-800 transition-all active:scale-95">POSTING KE BUKU BESAR</button>
-           </form>
+        <div className="fixed inset-0 bg-black/30 backdrop-blur-sm z-[200] flex items-end sm:items-center justify-center p-0 sm:p-4">
+          <form onSubmit={handleAddJournal} className="bg-white w-full sm:max-w-md sm:rounded-2xl rounded-t-2xl p-6 shadow-2xl space-y-4 animate-slideUp">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-lg font-bold text-slate-900">Jurnal Baru</h3>
+              <button type="button" onClick={() => setIsModalOpen(false)} className="p-2 text-slate-400 hover:text-slate-600 rounded-lg"><X size={20}/></button>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-500">Akun</label>
+              <select className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium outline-none focus:border-indigo-400" value={newEntry.account} onChange={e => setNewEntry({...newEntry, account: e.target.value})}>
+                {accounts.map(acc => <option key={acc.code} value={acc.code}>{acc.code} - {acc.name}</option>)}
+              </select>
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-500">Keterangan</label>
+              <input required className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm outline-none focus:border-indigo-400" placeholder="Bayar listrik, beli ATK, dll" value={newEntry.desc} onChange={e => setNewEntry({...newEntry, desc: e.target.value})} />
+            </div>
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-slate-500">Nominal (Rp)</label>
+              <input type="number" required min="1" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-lg font-semibold outline-none focus:border-indigo-400" value={newEntry.amount || ''} onChange={e => setNewEntry({...newEntry, amount: parseInt(e.target.value) || 0})} />
+            </div>
+            <button type="submit" className="w-full py-3.5 bg-indigo-600 text-white font-semibold rounded-xl hover:bg-indigo-700 transition-all">Posting</button>
+          </form>
         </div>
       )}
     </div>
