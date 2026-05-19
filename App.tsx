@@ -192,7 +192,7 @@ const App: React.FC = () => {
     return () => unsubscribe();
   }, [buildDataSnapshot, isDataLoaded]);
 
-  // DEBOUNCED CLOUD SYNC (separate from local persistence)
+  // DEBOUNCED CLOUD PUSH (after local changes)
   useEffect(() => {
     if (!isDataLoaded || !hasCloudConfig()) return;
 
@@ -206,6 +206,26 @@ const App: React.FC = () => {
 
     return () => clearTimeout(timer);
   }, [users, items, customers, suppliers, accounts, purchaseOrders, sales, returns, inventoryMovements, auditLogs, cashSessions, paymentRecords, promotions, mediaAssets, buildDataSnapshot, isDataLoaded]);
+
+  // AUTO-PULL FROM CLOUD (every 30 seconds for multi-device sync)
+  useEffect(() => {
+    if (!isDataLoaded || !hasCloudConfig()) return;
+
+    const interval = setInterval(async () => {
+      try {
+        const cloudData = await pullFromCloud();
+        if (cloudData && typeof cloudData === 'object') {
+          applyData(cloudData);
+          setLastSyncTime(new Date().toLocaleTimeString());
+          setSyncError(false);
+        }
+      } catch {
+        // Silent fail — don't disrupt the user
+      }
+    }, 30000); // Every 30 seconds
+
+    return () => clearInterval(interval);
+  }, [isDataLoaded, applyData]);
 
   // INITIAL LOAD
   useEffect(() => {

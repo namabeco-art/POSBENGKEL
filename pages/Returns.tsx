@@ -287,74 +287,59 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
           )}
         </div>
       ) : (
-        <div className="space-y-6 animate-in fade-in duration-500">
-          <div className="flex flex-col md:flex-row gap-4 items-center justify-between">
-            <div className="relative flex-1 w-full">
-               <Search className="absolute left-6 top-1/2 -translate-y-1/2 text-slate-400" size={24} />
-               <input 
-                 type="text" 
-                 placeholder="Cari No. Retur atau Faktur Asal..."
-                 className="w-full pl-16 pr-6 py-4 md:py-5 bg-white border-4 md:border-[5px] border-blue-400 rounded-[1.5rem] md:rounded-[2rem] outline-none focus:border-blue-700 font-black text-slate-800 transition-all text-xs md:text-sm placeholder:text-blue-200 shadow-xl"
-                 value={logSearch}
-                 onChange={e => setLogSearch(e.target.value)}
-               />
-            </div>
+        <div className="space-y-4 animate-in fade-in duration-500">
+          <div className="relative">
+             <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" size={16} />
+             <input 
+               type="text" 
+               placeholder="Cari no. retur, faktur, atau pelanggan..."
+               className="w-full pl-10 pr-4 py-2.5 bg-white border border-slate-200 rounded-lg outline-none focus:border-indigo-400 text-sm"
+               value={logSearch}
+               onChange={e => setLogSearch(e.target.value)}
+             />
           </div>
 
-          <div className="bg-white rounded-[2rem] md:rounded-[3rem] border-4 border-slate-200 shadow-2xl overflow-hidden">
-            <div className="p-6 md:p-8 bg-slate-50 border-b-4 border-slate-100 flex justify-between items-center">
-               <div className="flex items-center gap-3 md:gap-4">
-                  <div className="p-2.5 md:p-3 bg-blue-600 text-white rounded-xl md:rounded-2xl shadow-lg"><ClipboardList size={20}/></div>
-                  <div className="min-w-0">
-                     <h4 className="font-black text-slate-800 uppercase tracking-tighter text-sm md:text-lg">Log Riwayat Retur</h4>
-                     <p className="text-[8px] md:text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Audit Trail Barang Masuk</p>
-                  </div>
-               </div>
-               <div className="hidden sm:block px-5 py-2.5 bg-blue-100 text-blue-700 rounded-2xl text-[10px] font-black uppercase tracking-widest shadow-inner">
-                 {returns.length} Data
-               </div>
-            </div>
-
-            <div className="overflow-x-auto scrollbar-hide">
-              <table className="w-full text-xs">
-                <thead className="bg-slate-50 border-b-2 border-slate-200 text-left">
+          <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-50 border-b border-slate-200">
                   <tr>
-                    <th className="px-6 md:px-10 py-5 md:py-6 font-black text-slate-500 uppercase tracking-widest border-r border-slate-100">No. Retur</th>
-                    <th className="hidden lg:table-cell px-10 py-6 font-black text-slate-500 uppercase tracking-widest border-r border-slate-100">Info Transaksi</th>
-                    <th className="px-6 md:px-10 py-4 md:py-6 font-black text-slate-500 uppercase tracking-widest border-r border-slate-100">Pelanggan</th>
-                    <th className="px-6 md:px-10 py-4 md:py-6 font-black text-slate-500 uppercase tracking-widest border-r border-slate-100 text-right">Nilai</th>
-                    <th className="px-6 md:px-10 py-4 md:py-6 font-black text-slate-500 uppercase tracking-widest text-center">Aksi</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500">No. Retur</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500 hidden sm:table-cell">Faktur Asal</th>
+                    <th className="px-4 py-3 text-left text-xs font-medium text-slate-500">Pelanggan</th>
+                    <th className="px-4 py-3 text-right text-xs font-medium text-slate-500">Nilai</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-500">Status</th>
+                    <th className="px-4 py-3 text-center text-xs font-medium text-slate-500">Aksi</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 font-bold">
+                <tbody className="divide-y divide-slate-100">
                   {filteredReturns.map(ret => (
                     <tr key={ret.id} className="hover:bg-slate-50 transition-colors">
-                      <td className="px-6 md:px-10 py-4 md:py-5">
-                         <div className="text-orange-600 font-black text-xs md:text-sm tracking-tighter">{ret.returnNo}</div>
-                         <div className="text-[8px] md:text-[9px] text-slate-400 font-black uppercase mt-1 tracking-widest flex items-center gap-1"><Clock size={10}/> {ret.date.split(' ')[0]}</div>
+                      <td className="px-4 py-3">
+                         <p className="font-medium text-slate-800 text-sm">{ret.returnNo}</p>
+                         <p className="text-xs text-slate-400">{ret.date?.split(' ')[0]}</p>
                       </td>
-                      <td className="hidden lg:table-cell px-10 py-5">
-                         <div className="text-blue-700 font-black text-[10px]">{ret.originalInvoiceNo}</div>
+                      <td className="px-4 py-3 hidden sm:table-cell">
+                         <span className="text-xs text-indigo-600 font-medium">{ret.originalInvoiceNo}</span>
                       </td>
-                      <td className="px-6 md:px-10 py-4 md:py-5">
-                         <div className="text-slate-900 uppercase font-black text-[10px] md:text-xs truncate max-w-[80px] md:max-w-none">{ret.customerName}</div>
+                      <td className="px-4 py-3">
+                         <span className="text-sm text-slate-700">{ret.customerName}</span>
                       </td>
-                      <td className="px-6 md:px-10 py-4 md:py-5 text-right font-black text-red-600 text-xs md:text-sm tracking-tighter">
+                      <td className="px-4 py-3 text-right font-semibold text-red-600">
                          Rp {ret.totalReturn.toLocaleString()}
                       </td>
-                      <td className="px-6 md:px-10 py-4 md:py-5 text-center">
-                         <div className="flex justify-center gap-2">
-                           <button 
-                             onClick={() => setViewingReturnDetail(ret)}
-                             className="p-2 md:p-3 bg-white border-2 border-slate-200 text-slate-400 hover:text-blue-600 hover:border-blue-200 rounded-xl md:rounded-2xl transition-all shadow-sm"
-                           >
-                              <FileText size={16}/>
+                      <td className="px-4 py-3 text-center">
+                         <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${ret.status === 'APPROVED' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+                           {ret.status === 'APPROVED' ? 'Selesai' : 'Pending'}
+                         </span>
+                      </td>
+                      <td className="px-4 py-3 text-center">
+                         <div className="flex justify-center gap-1">
+                           <button onClick={() => setViewingReturnDetail(ret)} className="p-1.5 text-slate-400 hover:text-indigo-600 rounded-md hover:bg-indigo-50 transition-all">
+                              <FileText size={15}/>
                            </button>
                            {ret.status === 'PENDING' && onApproveReturn && (
-                             <button
-                               onClick={() => onApproveReturn(ret.id)}
-                               className="px-3 py-2 bg-emerald-600 text-white rounded-xl text-[9px] font-black uppercase tracking-widest"
-                             >
+                             <button onClick={() => onApproveReturn(ret.id)} className="px-2 py-1 bg-emerald-600 text-white rounded-md text-[10px] font-medium hover:bg-emerald-700">
                                Approve
                              </button>
                            )}
@@ -362,6 +347,9 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
                       </td>
                     </tr>
                   ))}
+                  {filteredReturns.length === 0 && (
+                    <tr><td colSpan={6} className="py-12 text-center text-slate-400 text-sm">Belum ada riwayat retur</td></tr>
+                  )}
                 </tbody>
               </table>
             </div>

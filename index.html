@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>POS Hulio - Kasir Bengkel</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&display=swap" rel="stylesheet">
     
     <script>
       // Kunci konfigurasi utama yang bertindak sebagai virtual .env
@@ -40,23 +40,22 @@
 
     <style>
         body {
-          font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-          background: #f8fafc;
+          font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+          background: #f9fafb;
           margin: 0;
           -webkit-font-smoothing: antialiased;
           -moz-osx-font-smoothing: grayscale;
-          color: #334155;
+          color: #374151;
           font-size: 14px;
           line-height: 1.6;
-          letter-spacing: -0.01em;
         }
         #root:empty { display: none; }
         input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
         input[type=number] { -moz-appearance: textfield; }
-        /* Override aggressive uppercase/tracking from old code */
-        .tracking-widest { letter-spacing: 0.05em !important; }
-        .tracking-wider { letter-spacing: 0.02em !important; }
+        /* Tone down aggressive old styles */
         .font-black { font-weight: 700 !important; }
+        .tracking-widest { letter-spacing: 0.04em !important; }
+        .uppercase { text-transform: none !important; }
     </style>
 
 <!-- Import map removed: Vite handles bundling from node_modules. 
