@@ -24,9 +24,14 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
   const [isSaving, setIsSaving] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [showTutorial, setShowTutorial] = useState<'none' | 'ai' | 'cloud' | 'deploy'>('none');
+  const [logs, setLogs] = useState<{ time: string; msg: string; type: 'info' | 'ok' | 'err' }[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const envConfig = getEnvConfig();
   const allowRuntimeSettings = isRuntimeSettingsAllowed();
+
+  const addLog = (msg: string, type: 'info' | 'ok' | 'err' = 'info') => {
+    setLogs(prev => [{ time: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' }), msg, type }, ...prev].slice(0, 20));
+  };
 
   // Auto-detect status on load
   const hasAiKey = Boolean(getResolvedOpenRouterApiKey(cloudConfig.openRouterApiKey)?.trim());
@@ -38,7 +43,11 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
   const isEnvManaged = hasEnvCloudConfig();
 
   useEffect(() => {
+    addLog('Halaman pengaturan dimuat', 'info');
+    if (hasAiKey) addLog('API Key OpenRouter terdeteksi', 'ok');
+    if (isEnvManaged) addLog('Konfigurasi dari .env server aktif', 'ok');
     if (hasCloudDb && cloudConfig.enabled) {
+      addLog('Menguji koneksi cloud...', 'info');
       handleTestCloud();
     }
   }, []);
@@ -46,35 +55,52 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
   const handleTestAI = async () => {
     const resolvedApiKey = getResolvedOpenRouterApiKey(cloudConfig.openRouterApiKey).trim();
     const resolvedModel = getResolvedOpenRouterModel(cloudConfig.aiModel);
-    if (!resolvedApiKey || resolvedApiKey.length < 10) { setAiStatus('error'); return; }
+    if (!resolvedApiKey || resolvedApiKey.length < 10) { setAiStatus('error'); addLog('API Key kosong atau terlalu pendek', 'err'); return; }
     setAiStatus('testing');
+    addLog(`Tes OpenRouter (model: ${resolvedModel})...`, 'info');
     try {
       const persistedDraft = { ...getCloudConfig(), ...cloudConfig, openRouterApiKey: resolvedApiKey, aiModel: resolvedModel };
       saveCloudConfig(persistedDraft);
       if (onCloudConfigChange) onCloudConfigChange();
       await requestOpenRouterReply({ apiKey: resolvedApiKey, userMessage: 'Balas hanya: OK', systemPrompt: 'Connectivity check.', primaryModel: resolvedModel, appName: 'POSHULIO' });
       setAiStatus('connected');
-    } catch { setAiStatus('error'); }
+      addLog('OpenRouter terhubung — AI siap dipakai', 'ok');
+    } catch (e: any) {
+      setAiStatus('error');
+      addLog(`OpenRouter gagal: ${e?.message?.slice(0, 60) || 'Unknown error'}`, 'err');
+    }
   };
 
   const handleTestCloud = async () => {
     const url = (cloudConfig.supabaseUrl || cloudConfig.url || '').trim();
     const key = (cloudConfig.supabaseAnonKey || cloudConfig.token || '').trim();
-    if (!url || !key) { setCloudStatus('error'); return; }
+    if (!url || !key) { setCloudStatus('error'); addLog('URL atau Key Supabase kosong', 'err'); return; }
     setCloudStatus('testing');
+    addLog(`Tes koneksi ke ${url.slice(0, 30)}...`, 'info');
     const result = await smartTestConnection(url, key);
-    setCloudStatus(result.success ? 'connected' : 'error');
+    if (result.success) {
+      setCloudStatus('connected');
+      addLog('Supabase terhubung — cloud sync aktif', 'ok');
+    } else {
+      setCloudStatus('error');
+      addLog(`Supabase gagal: ${result.message}`, 'err');
+    }
   };
 
   const handleSave = async () => {
     setIsSaving(true);
+    addLog('Menyimpan pengaturan...', 'info');
     try {
       const finalConfig = { ...cloudConfig, supabaseUrl: cloudConfig.supabaseUrl || cloudConfig.url || '', supabaseAnonKey: cloudConfig.supabaseAnonKey || cloudConfig.token || '', supabaseBucket: cloudConfig.supabaseBucket || 'erp-media', enabled: hasCloudDb };
       saveCloudConfig(finalConfig);
       if (hasCloudDb) await pushConfigToCloud(finalConfig).catch(() => {});
       if (onCloudConfigChange) onCloudConfigChange();
+      addLog('Pengaturan berhasil disimpan', 'ok');
       alert('Pengaturan berhasil disimpan!');
-    } catch { alert('Gagal menyimpan. Coba lagi.'); }
+    } catch {
+      addLog('Gagal menyimpan pengaturan', 'err');
+      alert('Gagal menyimpan. Coba lagi.');
+    }
     finally { setIsSaving(false); }
   };
 
@@ -344,6 +370,26 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
           }} />
         </div>
       </div>
+
+      {/* Diagnostic Log */}
+      {logs.length > 0 && (
+        <div className="bg-slate-900 rounded-xl border border-slate-800 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-800 flex items-center justify-between">
+            <span className="text-xs font-medium text-slate-400">Log Diagnostik</span>
+            <button onClick={() => setLogs([])} className="text-[10px] text-slate-500 hover:text-slate-300">Clear</button>
+          </div>
+          <div className="max-h-48 overflow-y-auto p-3 space-y-1.5">
+            {logs.map((log, i) => (
+              <div key={i} className="flex items-start gap-2 text-xs">
+                <span className="text-slate-600 font-mono shrink-0">{log.time}</span>
+                <span className={`${log.type === 'ok' ? 'text-emerald-400' : log.type === 'err' ? 'text-red-400' : 'text-slate-400'}`}>
+                  {log.type === 'ok' ? '✓' : log.type === 'err' ? '✗' : '→'} {log.msg}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Footer info */}
       <div className="text-center py-4">

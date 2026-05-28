@@ -144,32 +144,25 @@ const App: React.FC = () => {
     setIsSyncing(true);
     setSyncError(false);
     try {
+      isApplyingFromCloud.current = true;
       const cloudData = await pullFromCloud();
-      if (cloudData) {
-        applyData(cloudData);
-        saveAppDataLocal(cloudData);
-        if (currentUser) {
-          appendAuditLog({
-            id: `AUD-${Date.now()}`,
-            action: 'SYNC_PULL',
-            actorId: currentUser.id,
-            actorName: currentUser.name,
-            entityType: 'SYNC',
-            details: `Sinkronisasi cloud berhasil untuk workspace ${config.storeId}.`,
-            createdAt: new Date().toISOString(),
-          });
-        }
+      if (cloudData && typeof cloudData === 'object') {
+        const localData = buildDataSnapshot();
+        const merged = mergeAppData(localData, cloudData);
+        applyData(merged);
+        saveAppDataLocal(merged as AppData);
       }
-
       setLastSyncTime(new Date().toLocaleTimeString());
+      setSyncError(false);
       if (showFeedback) alert("Database berhasil diperbarui dari Cloud!");
     } catch (e) { 
       setSyncError(true);
       if (showFeedback) alert("Gagal sinkronisasi Cloud. Periksa koneksi atau kredensial."); 
     } finally {
       setIsSyncing(false);
+      setTimeout(() => { isApplyingFromCloud.current = false; }, 1500);
     }
-  }, [appendAuditLog, applyData, currentUser]);
+  }, [applyData, buildDataSnapshot]);
 
   const handleLogout = useCallback(() => {
     setCurrentUser(null);
@@ -180,41 +173,42 @@ const App: React.FC = () => {
   // Flag to prevent push/pull infinite loop
   const isApplyingFromCloud = React.useRef(false);
   const lastPushTime = React.useRef(0);
+  const pushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // AUTO-SAVE LOGIC (PERSISTENCE) — only save to localStorage
   useEffect(() => {
     if (!isDataLoaded) return;
 
     const unsubscribe = useAppStore.subscribe(() => {
-      if (isApplyingFromCloud.current) return; // Don't save during cloud pull
-      const dataToSave = buildDataSnapshot();
-      saveAppDataLocal(dataToSave);
+      if (isApplyingFromCloud.current) return;
+      saveAppDataLocal(buildDataSnapshot());
+
+      // Schedule a cloud push if cloud is active
+      if (hasCloudConfig()) {
+        if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+        pushTimerRef.current = setTimeout(() => {
+          const now = Date.now();
+          if (now - lastPushTime.current < 5000) return;
+          if (isApplyingFromCloud.current) return;
+          lastPushTime.current = now;
+
+          pushToCloud(buildDataSnapshot()).then(() => {
+            setLastSyncTime(new Date().toLocaleTimeString());
+            setSyncError(false);
+          }).catch(() => {
+            // Only set error if it's a real failure, not a transient one
+            setSyncError(true);
+          });
+        }, 4000);
+      }
     });
 
     saveAppDataLocal(buildDataSnapshot());
-    return () => unsubscribe();
+    return () => {
+      unsubscribe();
+      if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+    };
   }, [buildDataSnapshot, isDataLoaded]);
-
-  // DEBOUNCED CLOUD PUSH — only after LOCAL changes, not after cloud pull
-  useEffect(() => {
-    if (!isDataLoaded || !hasCloudConfig()) return;
-    if (isApplyingFromCloud.current) return; // Skip if this change came from cloud
-
-    const timer = setTimeout(() => {
-      const now = Date.now();
-      // Prevent pushing too frequently (min 5s between pushes)
-      if (now - lastPushTime.current < 5000) return;
-      lastPushTime.current = now;
-
-      const dataToSave = buildDataSnapshot();
-      pushToCloud(dataToSave).then(() => {
-        setLastSyncTime(new Date().toLocaleTimeString());
-        setSyncError(false);
-      }).catch(() => setSyncError(true));
-    }, 3000);
-
-    return () => clearTimeout(timer);
-  }, [users, items, customers, suppliers, accounts, purchaseOrders, sales, returns, inventoryMovements, auditLogs, cashSessions, paymentRecords, promotions, mediaAssets, buildDataSnapshot, isDataLoaded]);
 
   // AUTO-PULL FROM CLOUD (every 30 seconds) — uses merge, not overwrite
   useEffect(() => {
