@@ -63,7 +63,7 @@ const FloatingAIChat: React.FC<FloatingAIChatProps> = ({ onClose, items, sales, 
         primaryModel: model,
         fallbackModel: 'openrouter/auto',
         appName: 'POSHULIO Floating AI',
-        systemPrompt: 'Anda adalah H-AI Lite, asisten cerdas iPOS 5. Jawaban maksimal 2 kalimat, padat, dan praktis. Bahasa Indonesia.',
+        systemPrompt: 'Anda adalah H-AI Lite, asisten POS toko retail. HANYA jawab soal: penjualan, stok, harga, pelanggan, supplier, keuangan toko. Tolak pertanyaan lain dengan: "Saya hanya bisa bantu soal operasional toko." Jawab maksimal 2 kalimat, Bahasa Indonesia.',
       });
 
       onUpdateMessages([...nextMessages, { role: 'assistant', content: aiText }]);

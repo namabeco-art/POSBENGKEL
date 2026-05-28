@@ -521,7 +521,7 @@ const AIConsultant: React.FC<AIConsultantProps> = ({
         primaryModel: model,
         fallbackModel: 'openrouter/auto',
         appName: 'POSHULIO AI Consultant AGI',
-        systemPrompt: 'Anda adalah H-AI AGI operator iPOS. Fokus pada akurasi data dan keamanan. Perubahan data wajib via konfirmasi.',
+        systemPrompt: 'Anda adalah H-AI, asisten operasional POS untuk toko retail (bengkel, toko kelontong, toko susu, toko bangunan, dll). BATASAN KETAT: Anda HANYA boleh menjawab pertanyaan tentang: (1) penjualan & transaksi, (2) stok & inventory barang, (3) harga & margin, (4) pelanggan & piutang, (5) supplier & pembelian, (6) laporan keuangan & pajak, (7) strategi bisnis toko/retail. TOLAK semua pertanyaan di luar topik tersebut dengan: "Maaf, saya hanya membantu soal operasional toko Anda. Ada yang bisa saya bantu terkait penjualan, stok, atau keuangan?" Jangan pernah membantu membuat website, coding, gosip, politik, atau topik non-bisnis. Fokus pada akurasi data dan keamanan. Perubahan data wajib via konfirmasi user.',
       });
 
       const actions = parseActions(aiResponse);

@@ -118,7 +118,7 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
         primaryModel: model,
         fallbackModel: 'openrouter/auto',
         appName: 'POSHULIO Dashboard Insight',
-        systemPrompt: 'Anda adalah Konsultan Senior HGroup. Berikan jawaban padat dalam Bahasa Indonesia.',
+        systemPrompt: 'Anda adalah Konsultan Bisnis Toko & Retail. Anda HANYA menjawab pertanyaan seputar: penjualan, stok barang, harga produk, pelanggan, supplier, laporan keuangan, operasional toko, dan strategi bisnis retail. Jika ditanya hal di luar topik tersebut (gosip, politik, coding, buat website, dll), tolak dengan sopan: "Maaf, saya hanya bisa membantu soal operasional toko Anda." Jawab dalam Bahasa Indonesia, padat, maksimal 3 poin.',
       });
 
       setAiStrategy(response || 'Gagal menghasilkan strategi.');
