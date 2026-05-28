@@ -126,3 +126,76 @@ export const requestOpenRouterReply = async ({
 
   throw lastError || new Error('OPENROUTER_UNKNOWN_ERROR');
 };
+
+/**
+ * Extract text from an image using AI Vision model via OpenRouter.
+ * Converts image file to base64 and sends to a vision-capable model.
+ * Used for OCR on supplier price list PDFs/images.
+ */
+export const extractTextFromImage = async ({
+  apiKey,
+  imageBase64,
+  mimeType,
+  prompt = 'Extract ALL text from this image. Output the raw text content exactly as shown, preserving numbers and formatting. Focus on product names, codes, and prices.',
+  model = 'google/gemini-flash-1.5',
+  appName = 'POSHULIO OCR',
+}: {
+  apiKey: string;
+  imageBase64: string;
+  mimeType: string;
+  prompt?: string;
+  model?: string;
+  appName?: string;
+}): Promise<string> => {
+  if (!apiKey) throw new Error('OPENROUTER_AUTH_ERROR::API key required for OCR');
+
+  const response = await withTimeout(fetch(OPENROUTER_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': globalThis.location?.origin || 'https://poshulio.vercel.app',
+      'X-Title': appName,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt },
+            { type: 'image_url', image_url: { url: `data:${mimeType};base64,${imageBase64}` } },
+          ],
+        },
+      ],
+      temperature: 0.1,
+      max_tokens: 4000,
+    }),
+  }), 30000); // 30s timeout for vision
+
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(normalizeError(response.status, data?.error?.message || 'Vision OCR failed'));
+  }
+
+  const text = getTextFromContent(data?.choices?.[0]?.message?.content);
+  if (!text) throw new Error('OPENROUTER_EMPTY_RESPONSE::No text extracted from image');
+  return text;
+};
+
+/**
+ * Convert a File to base64 string.
+ */
+export const fileToBase64 = (file: File): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Remove data:mime;base64, prefix
+      const base64 = result.split(',')[1];
+      resolve(base64);
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+};

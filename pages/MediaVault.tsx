@@ -1,7 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { CheckCircle2, FileText, Loader2, RefreshCw, Trash2, Upload, XCircle } from 'lucide-react';
+import { CheckCircle2, FileText, Loader2, RefreshCw, Trash2, Upload, XCircle, Eye, Sparkles } from 'lucide-react';
 import { MediaAsset, User } from '../types';
 import { deleteSupabaseMedia, isSupabaseMediaConfigured, refreshSupabaseSignedUrl, uploadMediaToSupabase } from '../services/mediaService';
+import { extractTextFromImage, fileToBase64 } from '../services/aiService';
+import { getResolvedOpenRouterApiKey } from '../services/appConfig';
+import { getCloudConfig } from '../services/syncService';
 
 interface MediaVaultProps {
   currentUser: User;
@@ -25,6 +28,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
   const [category, setCategory] = useState<MediaAsset['category']>('PRICE_LIST');
   const [notes, setNotes] = useState('');
   const [isUploading, setIsUploading] = useState(false);
+  const [ocrProgress, setOcrProgress] = useState('');
   const [status, setStatus] = useState<{ type: 'idle' | 'success' | 'error'; message: string }>({ type: 'idle', message: '' });
 
   const aiSourceCount = useMemo(() => mediaAssets.filter(asset => asset.useAsKnowledge).length, [mediaAssets]);
@@ -33,11 +37,48 @@ const MediaVault: React.FC<MediaVaultProps> = ({
     [mediaAssets],
   );
 
-  const readExtractedText = async (file: File) => {
+  const readExtractedText = async (file: File): Promise<string> => {
+    // Text-based files: read directly
     const isTextFile = file.type.startsWith('text/') || file.name.match(/\.(txt|csv|json|md)$/i);
-    if (!isTextFile) return '';
-    const content = await file.text();
-    return content.slice(0, MAX_TEXT_EXTRACT);
+    if (isTextFile) {
+      const content = await file.text();
+      return content.slice(0, MAX_TEXT_EXTRACT);
+    }
+
+    // Images & PDFs: use AI Vision OCR
+    const isImage = file.type.startsWith('image/');
+    const isPdf = file.type === 'application/pdf' || file.name.endsWith('.pdf');
+    
+    if (isImage) {
+      const apiKey = getResolvedOpenRouterApiKey(getCloudConfig().openRouterApiKey)?.trim();
+      if (!apiKey) return '';
+      
+      try {
+        setOcrProgress(`Membaca teks dari ${file.name}...`);
+        const base64 = await fileToBase64(file);
+        const extracted = await extractTextFromImage({
+          apiKey,
+          imageBase64: base64,
+          mimeType: file.type,
+          prompt: 'Extract ALL text from this price list image. Output product names, codes/SKU, and prices in a structured format. Preserve all numbers accurately.',
+        });
+        setOcrProgress('');
+        return extracted.slice(0, MAX_TEXT_EXTRACT);
+      } catch (e) {
+        setOcrProgress('');
+        console.warn('OCR failed:', e);
+        return '';
+      }
+    }
+
+    // PDF: convert first page to image is not possible in browser without library
+    // For now, inform user to use image format
+    if (isPdf) {
+      setOcrProgress('');
+      return '[PDF detected — untuk hasil terbaik, foto/screenshot halaman price list dan upload sebagai gambar (JPG/PNG)]';
+    }
+
+    return '';
   };
 
   const handleUpload: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
@@ -139,6 +180,14 @@ const MediaVault: React.FC<MediaVaultProps> = ({
           value={notes}
           onChange={e => setNotes(e.target.value)}
         />
+        {ocrProgress && (
+          <div className="text-xs text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2 flex items-center gap-2">
+            <Sparkles size={14} className="animate-pulse" /> {ocrProgress}
+          </div>
+        )}
+        <div className="bg-blue-50 border border-blue-100 rounded-lg px-3 py-2 text-xs text-blue-700">
+          💡 Upload foto/screenshot price list supplier (JPG/PNG) — AI akan otomatis baca dan extract harga. Lalu tanya di AI Consultant: "Berapa harga terbaru dari supplier X?"
+        </div>
         {status.type !== 'idle' && (
           <div className={`text-[11px] font-black rounded-xl px-3 py-2 border flex items-center gap-2 ${status.type === 'success' ? 'bg-emerald-50 border-emerald-200 text-emerald-700' : 'bg-red-50 border-red-200 text-red-700'}`}>
             {status.type === 'success' ? <CheckCircle2 size={14} /> : <XCircle size={14} />}
