@@ -196,8 +196,8 @@ const App: React.FC = () => {
             setLastSyncTime(new Date().toLocaleTimeString());
             setSyncError(false);
           }).catch(() => {
-            // Only set error if it's a real failure, not a transient one
-            setSyncError(true);
+            // Don't immediately show error — transient failures are normal
+            // syncError will only be set by manual sync or after initial load failure
           });
         }, 4000);
       }
@@ -224,11 +224,11 @@ const App: React.FC = () => {
           applyData(merged);
           setLastSyncTime(new Date().toLocaleTimeString());
           setSyncError(false);
-          // Small delay before allowing push again
           setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
         }
       } catch {
-        setSyncError(true);
+        // Silent fail — don't set syncError for background pulls
+        // Only manual sync should show error state
         isApplyingFromCloud.current = false;
       }
     }, 30000);

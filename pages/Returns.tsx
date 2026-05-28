@@ -167,41 +167,37 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
           </div>
 
           {!selectedSale ? (
-            <div className="space-y-6 animate-in fade-in duration-700">
-               <div className="flex items-center gap-3 px-2">
-                 <ShoppingBag size={20} className="text-slate-400"/>
-                 <h4 className="font-black text-slate-800 uppercase tracking-tighter text-sm md:text-lg">Atau Pilih Dari Faktur Terakhir</h4>
+            <div className="space-y-4 animate-in fade-in duration-700">
+               <div className="flex items-center gap-2 px-1">
+                 <ShoppingBag size={16} className="text-slate-400"/>
+                 <h4 className="font-medium text-slate-600 text-sm">Atau pilih dari faktur terakhir</h4>
                </div>
-               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  {sales.slice(0, 6).map(sale => (
-                    <button 
-                      key={sale.id}
-                      onClick={() => {
-                        setSelectedSale(sale);
-                        setInvoiceSearch(sale.invoiceNo);
-                      }}
-                      className="bg-white p-5 rounded-[1.5rem] border-2 border-slate-200 hover:border-orange-500 hover:bg-orange-50/30 transition-all text-left flex flex-col justify-between gap-4 group shadow-sm active:scale-[0.98]"
-                    >
-                       <div>
-                          <div className="flex justify-between items-start mb-2">
-                             <span className="text-[10px] font-black text-blue-700 uppercase tracking-tighter bg-blue-50 px-2.5 py-1 rounded-lg border border-blue-100">{sale.invoiceNo}</span>
-                             <span className="text-[8px] font-bold text-slate-400 uppercase">{sale.date.split(' ')[0]}</span>
-                          </div>
-                          <div className="font-black text-slate-800 uppercase text-sm truncate mb-1">{sale.customerName}</div>
-                          <div className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">Total Faktur: Rp {sale.total.toLocaleString()}</div>
-                       </div>
-                       <div className="flex items-center justify-between text-[9px] font-black text-orange-600 uppercase tracking-widest pt-3 border-t border-slate-100">
-                          <span>Klik Untuk Pilih</span>
-                          <ChevronRight size={14} className="group-hover:translate-x-1 transition-transform" />
-                       </div>
-                    </button>
-                  ))}
-                  {sales.length === 0 && (
-                    <div className="col-span-full py-20 text-center opacity-20 flex flex-col items-center gap-4">
-                       <ShoppingBag size={60} />
-                       <p className="font-black text-xs uppercase tracking-widest">Belum ada transaksi penjualan</p>
-                    </div>
-                  )}
+               <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                 <table className="w-full text-sm">
+                   <thead className="bg-slate-50 border-b border-slate-200">
+                     <tr>
+                       <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Invoice</th>
+                       <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500">Pelanggan</th>
+                       <th className="px-4 py-2.5 text-right text-xs font-medium text-slate-500">Total</th>
+                       <th className="px-4 py-2.5 text-left text-xs font-medium text-slate-500 hidden sm:table-cell">Tanggal</th>
+                       <th className="px-4 py-2.5 text-center text-xs font-medium text-slate-500">Pilih</th>
+                     </tr>
+                   </thead>
+                   <tbody className="divide-y divide-slate-100">
+                     {sales.slice(0, 10).map(sale => (
+                       <tr key={sale.id} className="hover:bg-orange-50/50 cursor-pointer transition-colors" onClick={() => { setSelectedSale(sale); setInvoiceSearch(sale.invoiceNo); }}>
+                         <td className="px-4 py-3"><span className="font-medium text-indigo-600">{sale.invoiceNo}</span></td>
+                         <td className="px-4 py-3 text-slate-700">{sale.customerName}</td>
+                         <td className="px-4 py-3 text-right font-medium text-slate-800">Rp {sale.total.toLocaleString()}</td>
+                         <td className="px-4 py-3 text-slate-400 text-xs hidden sm:table-cell">{sale.date?.split(' ')[0]}</td>
+                         <td className="px-4 py-3 text-center"><ChevronRight size={14} className="text-orange-400 mx-auto"/></td>
+                       </tr>
+                     ))}
+                     {sales.length === 0 && (
+                       <tr><td colSpan={5} className="py-12 text-center text-slate-400 text-sm">Belum ada penjualan</td></tr>
+                     )}
+                   </tbody>
+                 </table>
                </div>
             </div>
           ) : (
