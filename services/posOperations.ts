@@ -64,8 +64,11 @@ export const validateUniqueItem = (items: Item[], target: Item) => {
   const duplicatedCode = items.find(item => item.id !== target.id && item.code === target.code);
   if (duplicatedCode) throw new Error(`Kode barang ${target.code} sudah digunakan.`);
 
-  const duplicatedBarcode = items.find(item => item.id !== target.id && item.barcode === target.barcode);
-  if (duplicatedBarcode) throw new Error(`Barcode ${target.barcode} sudah digunakan.`);
+  // Bug #9 fix: Skip barcode check if empty
+  if (target.barcode) {
+    const duplicatedBarcode = items.find(item => item.id !== target.id && item.barcode === target.barcode);
+    if (duplicatedBarcode) throw new Error(`Barcode ${target.barcode} sudah digunakan.`);
+  }
 };
 
 export const completeSale = (

@@ -221,7 +221,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
         } else if (e.key.length === 1 && !showCheckout) {
           barcodeString += e.key;
           if (timeoutId) clearTimeout(timeoutId);
-          timeoutId = setTimeout(() => { barcodeString = ''; }, 50);
+          timeoutId = setTimeout(() => { barcodeString = ''; }, 150);
         }
       } catch (err) {
         console.error('[Barcode] handleKeyDown error:', err);
@@ -288,7 +288,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
         price: c.selectedPrice,
         total: c.qty * c.selectedPrice
       })),
-      subtotal: total,
+      subtotal: subtotal,
       discountAmount: promoDiscount + manualDiscount,
       promoName: selectedPromo?.name,
       pointsEarned: pointsToEarn,

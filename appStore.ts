@@ -104,6 +104,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       aiUndoStack: Array.isArray((data as any).aiUndoStack) ? (data as any).aiUndoStack : prev.aiUndoStack,
       aiConsultantHistory: Array.isArray(data.aiConsultantHistory) ? data.aiConsultantHistory : prev.aiConsultantHistory,
       floatingChatHistory: Array.isArray(data.floatingChatHistory) ? data.floatingChatHistory : prev.floatingChatHistory,
+      branches: Array.isArray((data as any).branches) ? (data as any).branches : prev.branches,
       openRouterApiKey: data.openRouterApiKey || prev.openRouterApiKey,
       aiModel: data.aiModel || prev.aiModel,
       supabaseUrl: data.supabaseUrl || prev.supabaseUrl,

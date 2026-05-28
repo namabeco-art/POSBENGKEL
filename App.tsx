@@ -7,10 +7,12 @@ import { pullFromCloud, pushToCloud, getCloudConfig, hasCloudConfig, applyActiva
 import { clearSessionLocal, loadAppDataLocal, loadSessionLocal, saveAppDataLocal, saveSessionLocal } from './services/storageService';
 import { hashPassword, sanitizeUserSession, verifyPassword } from './services/authService';
 import { canAccessTab, getAccessibleTabs, hasPermission } from './services/permissions';
+import { getLoginLockoutRemaining, recordFailedLogin, resetLoginAttempts } from './services/rateLimiter';
 import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem } from './services/posOperations';
 import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from './services/cloudProfiles';
 import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
+import { mergeAppData } from './services/mergeService';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const MasterData = lazy(() => import('./pages/MasterData'));
@@ -175,28 +177,35 @@ const App: React.FC = () => {
     clearSessionLocal();
   }, []);
 
-  // AUTO-SAVE LOGIC (PERSISTENCE)
-  // Subscribe to ALL store changes to ensure persistence
+  // Flag to prevent push/pull infinite loop
+  const isApplyingFromCloud = React.useRef(false);
+  const lastPushTime = React.useRef(0);
+
+  // AUTO-SAVE LOGIC (PERSISTENCE) — only save to localStorage
   useEffect(() => {
     if (!isDataLoaded) return;
 
-    // Use Zustand subscribe to detect any state change
     const unsubscribe = useAppStore.subscribe(() => {
+      if (isApplyingFromCloud.current) return; // Don't save during cloud pull
       const dataToSave = buildDataSnapshot();
       saveAppDataLocal(dataToSave);
     });
 
-    // Also save immediately on mount
     saveAppDataLocal(buildDataSnapshot());
-
     return () => unsubscribe();
   }, [buildDataSnapshot, isDataLoaded]);
 
-  // DEBOUNCED CLOUD PUSH (after local changes)
+  // DEBOUNCED CLOUD PUSH — only after LOCAL changes, not after cloud pull
   useEffect(() => {
     if (!isDataLoaded || !hasCloudConfig()) return;
+    if (isApplyingFromCloud.current) return; // Skip if this change came from cloud
 
     const timer = setTimeout(() => {
+      const now = Date.now();
+      // Prevent pushing too frequently (min 5s between pushes)
+      if (now - lastPushTime.current < 5000) return;
+      lastPushTime.current = now;
+
       const dataToSave = buildDataSnapshot();
       pushToCloud(dataToSave).then(() => {
         setLastSyncTime(new Date().toLocaleTimeString());
@@ -207,7 +216,7 @@ const App: React.FC = () => {
     return () => clearTimeout(timer);
   }, [users, items, customers, suppliers, accounts, purchaseOrders, sales, returns, inventoryMovements, auditLogs, cashSessions, paymentRecords, promotions, mediaAssets, buildDataSnapshot, isDataLoaded]);
 
-  // AUTO-PULL FROM CLOUD (every 30 seconds for multi-device sync)
+  // AUTO-PULL FROM CLOUD (every 30 seconds) — uses merge, not overwrite
   useEffect(() => {
     if (!isDataLoaded || !hasCloudConfig()) return;
 
@@ -215,36 +224,58 @@ const App: React.FC = () => {
       try {
         const cloudData = await pullFromCloud();
         if (cloudData && typeof cloudData === 'object') {
-          applyData(cloudData);
+          isApplyingFromCloud.current = true;
+          const localData = buildDataSnapshot();
+          const merged = mergeAppData(localData, cloudData);
+          applyData(merged);
           setLastSyncTime(new Date().toLocaleTimeString());
           setSyncError(false);
+          // Small delay before allowing push again
+          setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
         }
       } catch {
-        // Silent fail — don't disrupt the user
+        setSyncError(true);
+        isApplyingFromCloud.current = false;
       }
-    }, 30000); // Every 30 seconds
+    }, 30000);
 
     return () => clearInterval(interval);
-  }, [isDataLoaded, applyData]);
+  }, [isDataLoaded, applyData, buildDataSnapshot]);
 
-  // INITIAL LOAD
+  // INITIAL LOAD — fixed: load saved data FIRST, then find user from loaded data
   useEffect(() => {
     const initData = async () => {
       try {
-        // Load User Session
-        const savedSession = loadSessionLocal<User>();
-        if (savedSession) {
-          const user = users.find(item => item.id === savedSession.id) || savedSession;
-          setCurrentUser(user);
-        }
-
-        // Load Local Data first (responsive)
+        // 1. Load Local Data first
         const savedData = loadAppDataLocal();
         if (savedData) applyData(savedData);
 
-        // Then Refresh from Cloud (latest)
+        // 2. Load User Session (AFTER data is loaded so users array is correct)
+        const savedSession = loadSessionLocal<User>();
+        if (savedSession) {
+          const currentUsers = useAppStore.getState().users;
+          const user = currentUsers.find(item => item.id === savedSession.id) || savedSession;
+          setCurrentUser(user);
+        }
+
+        // 3. Then Refresh from Cloud (latest) with merge
         if (hasCloudConfig()) {
-          await handleManualRefresh(false);
+          try {
+            isApplyingFromCloud.current = true;
+            const cloudData = await pullFromCloud();
+            if (cloudData && typeof cloudData === 'object') {
+              const localData = buildDataSnapshot();
+              const merged = mergeAppData(localData, cloudData);
+              applyData(merged);
+              saveAppDataLocal(merged as AppData);
+            }
+            setSyncError(false);
+            setLastSyncTime(new Date().toLocaleTimeString());
+          } catch {
+            setSyncError(true);
+          } finally {
+            setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
+          }
         }
       } catch (e) {
         console.error("Initialization error", e);
@@ -253,19 +284,32 @@ const App: React.FC = () => {
       }
     };
     initData();
-  }, [handleManualRefresh, applyData]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoginError('');
+
+    // Bug #5 fix: Rate limiting
+    const lockoutRemaining = getLoginLockoutRemaining();
+    if (lockoutRemaining > 0) {
+      const min = Math.floor(lockoutRemaining / 60);
+      const sec = lockoutRemaining % 60;
+      setLoginError(`Terlalu banyak percobaan. Coba lagi dalam ${min}m ${sec}s.`);
+      return;
+    }
+
     const user = users.find(u => u.username === loginUsername.trim().toLowerCase());
     const legacyPassword = (user as any)?.password;
     const storedPassword = user?.passwordHash || legacyPassword || '';
     
     if (!user || !user.isActive || !(await verifyPassword(loginPassword, storedPassword))) {
       setLoginError('Username atau Password salah!');
+      const lockMsg = recordFailedLogin();
+      if (lockMsg) setLoginError(lockMsg);
       appendAuditLog({
-        id: `AUD-${Date.now()}`,
+        id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
         action: 'LOGIN_FAILED',
         actorName: loginUsername || 'Unknown',
         entityType: 'AUTH',
@@ -275,31 +319,45 @@ const App: React.FC = () => {
       return;
     }
 
-    // Perbaikan: Validasi Batasan Operasional Jam Kerja
+    // Bug #19 fix: Handle overnight schedule (e.g., 22:00 - 06:00)
     if (user.schedule && user.schedule.enabled) {
       const now = new Date();
-      const currentH = now.getHours();
-      const currentM = now.getMinutes();
-      const currentTimeInMinutes = currentH * 60 + currentM;
+      const currentTimeInMinutes = now.getHours() * 60 + now.getMinutes();
 
       const [startH, startM] = user.schedule.startTime.split(':').map(Number);
       const [endH, endM] = user.schedule.endTime.split(':').map(Number);
       const startTotal = startH * 60 + startM;
       const endTotal = endH * 60 + endM;
 
-      if (currentTimeInMinutes < startTotal || currentTimeInMinutes > endTotal) {
-        setLoginError(`AKSES DITOLAK: Jam kerja Anda adalah ${user.schedule.startTime} s/d ${user.schedule.endTime}. Silakan hubungi admin.`);
+      let isAllowed: boolean;
+      if (endTotal >= startTotal) {
+        // Normal schedule (e.g., 08:00 - 17:00)
+        isAllowed = currentTimeInMinutes >= startTotal && currentTimeInMinutes <= endTotal;
+      } else {
+        // Overnight schedule (e.g., 22:00 - 06:00)
+        isAllowed = currentTimeInMinutes >= startTotal || currentTimeInMinutes <= endTotal;
+      }
+
+      if (!isAllowed) {
+        setLoginError(`AKSES DITOLAK: Jam kerja Anda adalah ${user.schedule.startTime} s/d ${user.schedule.endTime}.`);
         return;
       }
     }
 
-    const upgradedPasswordHash = storedPassword === loginPassword ? await hashPassword(loginPassword) : user.passwordHash;
+    // Bug #6 fix: Upgrade legacy SHA-256 to PBKDF2 (detect by format, not value comparison)
+    let upgradedPasswordHash = user.passwordHash;
+    const isLegacyFormat = storedPassword.length === 64 && !storedPassword.includes(':');
+    if (isLegacyFormat) {
+      upgradedPasswordHash = await hashPassword(loginPassword);
+    }
+
     const updatedUser = { ...user, passwordHash: upgradedPasswordHash, lastLoginAt: new Date().toISOString() };
     setUsers(prev => prev.map(item => item.id === updatedUser.id ? updatedUser : item));
     setCurrentUser(updatedUser);
     saveSessionLocal(sanitizeUserSession(updatedUser));
+    resetLoginAttempts(); // Bug #5: reset on success
     appendAuditLog({
-      id: `AUD-${Date.now()}`,
+      id: `AUD-${Date.now()}-${Math.random().toString(36).slice(2,6)}`,
       action: 'LOGIN_SUCCESS',
       actorId: updatedUser.id,
       actorName: updatedUser.name,
@@ -415,11 +473,15 @@ const App: React.FC = () => {
   }, [adminUnlockPassword, adminUnlockUsername, users]);
 
   const exportBackup = () => {
-    const blob = new Blob([JSON.stringify(buildDataSnapshot(), null, 2)], { type: 'application/json;charset=utf-8' });
+    const snapshot = buildDataSnapshot();
+    // Bug #20 fix: Strip sensitive credentials from backup
+    const { openRouterApiKey, supabaseUrl, supabaseAnonKey, supabaseBucket, ...safeData } = snapshot;
+    const blob = new Blob([JSON.stringify(safeData, null, 2)], { type: 'application/json;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
     link.download = `poshulio-backup-${new Date().toISOString().slice(0, 10)}.json`;
     link.click();
+    URL.revokeObjectURL(link.href); // Bug #11 fix: revoke object URL
   };
 
   const importBackup = async (file: File) => {
@@ -488,24 +550,17 @@ const App: React.FC = () => {
       setIsSyncing(true);
       try {
         await withCloudInventoryLock(async () => {
-          // Re-read from cloud to get latest, merge, then push
-          const latest = await pullFromCloud();
-          const baseSnapshot = (latest && typeof latest === 'object')
-            ? ({ ...localSnapshot, ...latest } as AppData)
-            : localSnapshot;
-          const nextSnapshot = mutator(baseSnapshot);
-          await pushToCloud(nextSnapshot);
-          // Update local with cloud-merged version
-          applyData(nextSnapshot);
-          saveAppDataLocal(nextSnapshot);
+          // Push the already-mutated local state to cloud
+          const dataToSave = buildDataSnapshot(); // re-read after local apply
+          await pushToCloud(dataToSave);
         });
         setSyncError(false);
         setLastSyncTime(new Date().toLocaleTimeString());
+        lastPushTime.current = Date.now();
       } catch (error: any) {
         // Cloud sync failed — but transaction is already saved locally!
         setSyncError(true);
         console.warn('[Sync] Cloud sync failed, data saved locally:', error?.message);
-        // Don't throw — the sale is safe in localStorage
       } finally {
         setIsSyncing(false);
       }
@@ -1175,7 +1230,8 @@ const App: React.FC = () => {
                 </button>
               </form>
 
-              {/* Hint */}
+              {/* Hint — only show if default password hasn't been changed */}
+              {users.some(u => u.passwordHash === 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3') && (
               <div className="mt-6 flex items-center gap-3 p-3 bg-gradient-to-r from-slate-50 to-indigo-50/30 rounded-xl">
                 <div className="w-8 h-8 bg-indigo-100 rounded-lg flex items-center justify-center shrink-0">
                   <Key size={14} className="text-indigo-600" />
@@ -1184,6 +1240,7 @@ const App: React.FC = () => {
                   Default login: <span className="font-semibold text-slate-700">admin</span> / <span className="font-semibold text-slate-700">123</span>
                 </p>
               </div>
+              )}
             </div>
           </div>
 
