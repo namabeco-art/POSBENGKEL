@@ -26,9 +26,10 @@ interface UserManagementProps {
   onAddUser: (user: UserDraft) => void | Promise<void>;
   onUpdateUser: (user: UserDraft) => void | Promise<void>;
   onDeleteUser: (id: string) => void;
+  canManage?: boolean;
 }
 
-const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpdateUser, onDeleteUser }) => {
+const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpdateUser, onDeleteUser, canManage = true }) => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -124,12 +125,12 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
                 onChange={e => setSearchTerm(e.target.value)}
               />
            </div>
-           <button 
+           {canManage && <button
              onClick={() => { resetForm(); setIsModalOpen(true); }}
              className="flex items-center justify-center gap-3 bg-blue-600 text-white px-8 py-4 rounded-2xl font-black shadow-xl shadow-blue-100 hover:bg-blue-700 active:scale-95 transition-all border-b-4 border-blue-800 uppercase text-xs tracking-widest"
            >
              <UserPlus size={20} /> Tambah Akun
-           </button>
+           </button>}
         </div>
       </div>
 
@@ -183,19 +184,19 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
                  </div>
               </div>
             </div>
-            <div className="mt-8 flex gap-3 relative z-10">
+            {canManage && <div className="mt-8 flex gap-3 relative z-10">
                <button onClick={() => handleEdit(user)} className="flex-1 flex items-center justify-center gap-2 py-3.5 bg-white text-blue-600 border-2 border-blue-100 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-600 hover:text-white hover:border-blue-600 transition-all shadow-sm">
                  <Edit3 size={14}/> Edit Akun
                </button>
                <button onClick={() => onDeleteUser(user.id)} className="p-3.5 text-slate-300 hover:text-red-500 hover:bg-red-50 rounded-xl transition-all border-2 border-transparent hover:border-red-100">
                  <Trash2 size={18} />
                </button>
-            </div>
+            </div>}
           </div>
         ))}
       </div>
 
-      {isModalOpen && (
+      {isModalOpen && canManage && (
         <div className="fixed inset-0 bg-slate-900/80 backdrop-blur-xl z-[200] flex items-center justify-center p-0 md:p-4">
           <form onSubmit={handleSubmit} className="bg-white w-full max-w-5xl h-full md:h-auto md:max-h-[90vh] md:rounded-[3rem] shadow-2xl animate-in zoom-in duration-300 md:border-[10px] border-slate-100 flex flex-col overflow-hidden">
             <div className="p-6 md:p-8 bg-slate-50 border-b border-slate-200 flex justify-between items-center shrink-0">

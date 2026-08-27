@@ -124,6 +124,18 @@ describe('posOperations', () => {
 
     const result = receivePurchaseOrderStock(makeItems(), po, [{ itemId: 'I2', receivedQty: 3 }], makeUser());
     expect(result.items.find(item => item.id === 'I2')?.stock).toBe(8);
+    expect(result.items.find(item => item.id === 'I2')?.basePrice).toBe(1925);
+  });
+
+  it('receives only the remaining PO quantity and rejects duplicate receipt', () => {
+    const po: PurchaseOrder = {
+      id: 'PO-002', date: '10/04/2026', dueDate: '17/04/2026', termOfPayment: 7, discount: 0,
+      supplierId: 'SUP-1', supplierName: 'Supplier',
+      items: [{ itemId: 'I2', name: 'Produk B', orderedQty: 5, receivedQty: 3, cost: 1800 }],
+      subtotal: 9000, total: 9000, status: 'PENDING', isPaid: false,
+    };
+    expect(() => receivePurchaseOrderStock(makeItems(), po, [{ itemId: 'I2', receivedQty: 3 }], makeUser())).toThrow(/tidak valid/i);
+    expect(receivePurchaseOrderStock(makeItems(), po, [{ itemId: 'I2', receivedQty: 2 }], makeUser()).items.find(item => item.id === 'I2')?.stock).toBe(7);
   });
 
   it('adjusts stock from opname', () => {

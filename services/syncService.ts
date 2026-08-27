@@ -445,8 +445,7 @@ export const withCloudInventoryLock = async <T>(
       await sleep(retryMs);
     }
 
-    // IMPORTANT: Even if lock not acquired, still run the task.
-    // For single-store, it's better to process the sale than to block the cashier.
+    if (!acquired) throw new Error('Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
     try {
       return await task();
     } finally {
@@ -506,8 +505,7 @@ export const withCloudInventoryLock = async <T>(
     await sleep(retryMs);
   }
 
-  // IMPORTANT: Even if lock not acquired, still run the task.
-  // Better to have a potential conflict than to block the cashier entirely.
+  if (!acquired) throw new Error('Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
   try {
     return await task();
   } finally {
@@ -581,4 +579,3 @@ export const pullFromCloud = async () => {
   if (!encodedData) return null;
   return secureDecode(encodedData);
 };
-

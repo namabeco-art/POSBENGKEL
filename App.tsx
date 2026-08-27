@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
 import Layout from './components/Layout';
-import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashSession, Customer, InventoryMovement, Item, MediaAsset, PaymentRecord, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, Supplier, User, UserRole, Account } from './types';
+import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashExpense, CashSession, Customer, InventoryMovement, Item, MediaAsset, PaymentRecord, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, Supplier, User, UserRole, Account } from './types';
 import { mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, mockBranches, mockPromotions } from './store';
 import { ShieldCheck, User as UserIcon, Key, Clock, AlertCircle, Info, CloudLightning, RefreshCw, Loader2, Link2, CheckCircle2, X, Plus, Store, ChevronRight, Globe, Lock, Trash2, Settings2, Database, HardDrive, Server, QrCode, Terminal, Activity, ChevronDown, Search, Cloud, Monitor, MapPin, ShieldEllipsis } from 'lucide-react';
 import { pullFromCloud, pushToCloud, getCloudConfig, hasCloudConfig, applyActivationCode, saveCloudConfig, withCloudInventoryLock } from './services/syncService';
@@ -13,6 +13,9 @@ import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from '.
 import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
 import { mergeAppData } from './services/mergeService';
+import { loadAppDataIndexedDB, saveAppDataIndexedDB } from './services/indexedDbService';
+import { createId } from './services/idService';
+import { postCashExpenseAccounts, postPurchaseOrderAccounts, postPurchasePaymentAccounts, postReturnAccounts, postSaleAccounts, reverseCashExpenseAccounts } from './services/accountingService';
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const MasterData = lazy(() => import('./pages/MasterData'));
@@ -73,7 +76,7 @@ const App: React.FC = () => {
     purchaseOrders, setPurchaseOrders, sales, setSales,
     returns, setReturns, inventoryLogs, inventoryMovements, setInventoryMovements,
     auditLogs, paymentRecords, setPaymentRecords,
-    cashSessions, setCashSessions, promotions, setPromotions,
+    cashSessions, setCashSessions, cashExpenses, setCashExpenses, promotions, setPromotions,
     mediaAssets, setMediaAssets, aiUndoStack, setAiUndoStack,
     branches, aiConsultantHistory, setAiConsultantHistory,
     floatingChatHistory, setFloatingChatHistory,
@@ -119,6 +122,7 @@ const App: React.FC = () => {
       inventoryMovements: state.inventoryMovements,
       auditLogs: state.auditLogs,
       cashSessions: state.cashSessions,
+      cashExpenses: state.cashExpenses,
       paymentRecords: state.paymentRecords,
       promotions: state.promotions,
       mediaAssets: state.mediaAssets,
@@ -151,6 +155,7 @@ const App: React.FC = () => {
         const merged = mergeAppData(localData, cloudData);
         applyData(merged);
         saveAppDataLocal(merged as AppData);
+        void saveAppDataIndexedDB(merged as AppData);
       }
       setLastSyncTime(new Date().toLocaleTimeString());
       setSyncError(false);
@@ -181,7 +186,9 @@ const App: React.FC = () => {
 
     const unsubscribe = useAppStore.subscribe(() => {
       if (isApplyingFromCloud.current) return;
-      saveAppDataLocal(buildDataSnapshot());
+      const snapshot = buildDataSnapshot();
+      saveAppDataLocal(snapshot);
+      void saveAppDataIndexedDB(snapshot);
 
       // Schedule a cloud push if cloud is active
       if (hasCloudConfig()) {
@@ -203,7 +210,9 @@ const App: React.FC = () => {
       }
     });
 
-    saveAppDataLocal(buildDataSnapshot());
+    const initialSnapshot = buildDataSnapshot();
+    saveAppDataLocal(initialSnapshot);
+    void saveAppDataIndexedDB(initialSnapshot);
     return () => {
       unsubscribe();
       if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
@@ -222,6 +231,8 @@ const App: React.FC = () => {
           const localData = buildDataSnapshot();
           const merged = mergeAppData(localData, cloudData);
           applyData(merged);
+          saveAppDataLocal(merged as AppData);
+          void saveAppDataIndexedDB(merged as AppData);
           setLastSyncTime(new Date().toLocaleTimeString());
           setSyncError(false);
           setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
@@ -241,15 +252,27 @@ const App: React.FC = () => {
     const initData = async () => {
       try {
         // 1. Load Local Data first
-        const savedData = loadAppDataLocal();
-        if (savedData) applyData(savedData);
+        const savedData = await loadAppDataIndexedDB() || loadAppDataLocal();
+        if (savedData) {
+          let migratedData = savedData;
+          if (!Array.isArray(savedData.cashExpenses)) {
+            try {
+              const legacyExpenses = JSON.parse(localStorage.getItem('HGROUP_KAS_HARIAN') || '[]');
+              if (Array.isArray(legacyExpenses)) migratedData = { ...savedData, cashExpenses: legacyExpenses };
+            } catch { /* data lama yang rusak diabaikan */ }
+          }
+          applyData(migratedData);
+        }
 
         // 2. Load User Session (AFTER data is loaded so users array is correct)
         const savedSession = loadSessionLocal<User>();
         if (savedSession) {
           const currentUsers = useAppStore.getState().users;
-          const user = currentUsers.find(item => item.id === savedSession.id) || savedSession;
-          setCurrentUser(user);
+          const user = currentUsers.find(item => item.id === savedSession.id);
+          const maxAge = (user?.sessionPolicy?.maxOfflineMinutes || 12 * 60) * 60_000;
+          const sessionAge = Date.now() - new Date(savedSession.lastLoginAt || 0).getTime();
+          if (user?.isActive && sessionAge <= maxAge) setCurrentUser(user);
+          else clearSessionLocal();
         }
 
         // 3. Then Refresh from Cloud (latest) with merge
@@ -262,6 +285,7 @@ const App: React.FC = () => {
               const merged = mergeAppData(localData, cloudData);
               applyData(merged);
               saveAppDataLocal(merged as AppData);
+              void saveAppDataIndexedDB(merged as AppData);
             }
             setSyncError(false);
             setLastSyncTime(new Date().toLocaleTimeString());
@@ -531,38 +555,56 @@ const App: React.FC = () => {
 
   const runInventorySafeMutation = useCallback(async (
     mutator: (snapshot: AppData) => AppData,
-  ) => {
+  ): Promise<AppData> => {
     const localSnapshot = buildDataSnapshot();
     
-    // Always apply locally first — never lose a transaction
-    const nextLocal = mutator(localSnapshot);
-    applyData(nextLocal);
-    saveAppDataLocal(nextLocal);
+    // Prefer a locked cloud mutation; fall back to durable local storage when offline.
+    let cloudMutationError: unknown;
 
-    // Then try to sync to cloud (non-blocking for the cashier)
     if (hasCloudConfig()) {
       setIsSyncing(true);
+      let mutationError: unknown;
       try {
+        let nextCloud: AppData | null = null;
         await withCloudInventoryLock(async () => {
-          // Push the already-mutated local state to cloud
-          const dataToSave = buildDataSnapshot(); // re-read after local apply
-          await pushToCloud(dataToSave);
+          const remote = await pullFromCloud();
+          const latest = remote ? mergeAppData(localSnapshot, remote) as AppData : localSnapshot;
+          try {
+            nextCloud = mutator(latest);
+          } catch (error) {
+            mutationError = error;
+            throw error;
+          }
+          await pushToCloud(nextCloud);
         });
+        if (!nextCloud) throw new Error('Mutasi cloud tidak menghasilkan data.');
+        applyData(nextCloud);
+        saveAppDataLocal(nextCloud);
+        void saveAppDataIndexedDB(nextCloud);
         setSyncError(false);
         setLastSyncTime(new Date().toLocaleTimeString());
         lastPushTime.current = Date.now();
+        return nextCloud;
       } catch (error: any) {
-        // Cloud sync failed — but transaction is already saved locally!
+        if (mutationError) throw mutationError;
         setSyncError(true);
-        console.warn('[Sync] Cloud sync failed, data saved locally:', error?.message);
+        cloudMutationError = error;
+        console.warn('[Sync] Cloud gagal; menggunakan penyimpanan lokal:', error?.message);
       } finally {
         setIsSyncing(false);
       }
     }
+    const nextLocal = mutator(localSnapshot);
+    applyData(nextLocal);
+    saveAppDataLocal(nextLocal);
+    void saveAppDataIndexedDB(nextLocal);
+    if (cloudMutationError) console.warn('[Sync] Transaksi disimpan lokal setelah cloud gagal.');
+    return nextLocal;
   }, [applyData, buildDataSnapshot]);
 
   // HANDLERS WITH FUNCTIONAL UPDATES (PREV STATE SAFETY)
   const addItem = (item: Item) => {
+    if (!hasPermission(currentUser, 'item.create')) return alert('Anda tidak memiliki izin menambah barang.');
     try {
       validateUniqueItem(items, item);
       setItems(prev => [...prev, item]);
@@ -584,6 +626,7 @@ const App: React.FC = () => {
     }
   };
   const addItemsBulk = (newItems: Item[]) => {
+    if (!hasPermission(currentUser, 'item.create')) return alert('Anda tidak memiliki izin menambah barang.');
     try {
       newItems.forEach(item => validateUniqueItem([...items, ...newItems.filter(candidate => candidate.id !== item.id)], item));
       setItems(prev => [...prev, ...newItems]);
@@ -592,6 +635,7 @@ const App: React.FC = () => {
     }
   };
   const updateItem = (updated: Item) => {
+    if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengubah barang.');
     try {
       validateUniqueItem(items, updated);
       setItems(prev => prev.map(i => i.id === updated.id ? updated : i));
@@ -613,6 +657,7 @@ const App: React.FC = () => {
     }
   };
   const updateItemsBulk = (updatedList: Item[]) => {
+    if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengubah barang.');
     setItems(prev => {
       const newItems = [...prev];
       updatedList.forEach(updated => {
@@ -623,6 +668,7 @@ const App: React.FC = () => {
     });
   };
   const deleteItem = (id: string) => {
+    if (!hasPermission(currentUser, 'item.delete')) return alert('Anda tidak memiliki izin menghapus barang.');
     const target = items.find(item => item.id === id);
     if (target && currentUser) {
       appendAuditLog({
@@ -781,16 +827,17 @@ const App: React.FC = () => {
     });
   };
 
-  const addCustomer = (c: Customer) => setCustomers(prev => [...prev, c]);
-  const updateCustomer = (updated: Customer) => setCustomers(prev => prev.map(c => c.id === updated.id ? updated : c));
-  const deleteCustomer = (id: string) => setCustomers(prev => prev.filter(c => c.id !== id));
+  const addCustomer = (c: Customer) => hasPermission(currentUser, 'contact.create') ? setCustomers(prev => [...prev, c]) : alert('Anda tidak memiliki izin menambah kontak.');
+  const updateCustomer = (updated: Customer) => hasPermission(currentUser, 'contact.edit') ? setCustomers(prev => prev.map(c => c.id === updated.id ? updated : c)) : alert('Anda tidak memiliki izin mengubah kontak.');
+  const deleteCustomer = (id: string) => hasPermission(currentUser, 'contact.delete') ? setCustomers(prev => prev.filter(c => c.id !== id)) : alert('Anda tidak memiliki izin menghapus kontak.');
 
-  const addSupplier = (s: Supplier) => setSuppliers(prev => [...prev, s]);
-  const updateSupplier = (updated: Supplier) => setSuppliers(prev => prev.map(s => s.id === updated.id ? updated : s));
-  const deleteSupplier = (id: string) => setSuppliers(prev => prev.filter(s => s.id !== id));
+  const addSupplier = (s: Supplier) => hasPermission(currentUser, 'contact.create') ? setSuppliers(prev => [...prev, s]) : alert('Anda tidak memiliki izin menambah kontak.');
+  const updateSupplier = (updated: Supplier) => hasPermission(currentUser, 'contact.edit') ? setSuppliers(prev => prev.map(s => s.id === updated.id ? updated : s)) : alert('Anda tidak memiliki izin mengubah kontak.');
+  const deleteSupplier = (id: string) => hasPermission(currentUser, 'contact.delete') ? setSuppliers(prev => prev.filter(s => s.id !== id)) : alert('Anda tidak memiliki izin menghapus kontak.');
 
   const addUser = async (draft: UserDraft) => {
-    if (users.some(user => user.username === draft.username)) {
+    if (!hasPermission(currentUser, 'user.manage')) return alert('Anda tidak memiliki izin mengelola user.');
+    if (users.some(user => user.username.toLowerCase() === draft.username.trim().toLowerCase())) {
       alert('Username sudah digunakan.');
       return;
     }
@@ -822,8 +869,10 @@ const App: React.FC = () => {
     }
   };
   const updateUser = async (draft: UserDraft) => {
+    if (!hasPermission(currentUser, 'user.manage')) return alert('Anda tidak memiliki izin mengelola user.');
     const existing = users.find(user => user.id === draft.id);
     if (!existing) return;
+    if (users.some(user => user.id !== draft.id && user.username.toLowerCase() === draft.username.trim().toLowerCase())) return alert('Username sudah digunakan.');
     const passwordHash = draft.password ? await hashPassword(draft.password) : existing.passwordHash;
     const updated: User = {
       ...existing,
@@ -852,8 +901,11 @@ const App: React.FC = () => {
     }
   };
   const deleteUser = (id: string) => {
+    if (!hasPermission(currentUser, 'user.manage')) return alert('Anda tidak memiliki izin mengelola user.');
     if (id === currentUser?.id) return;
     const target = users.find(user => user.id === id);
+    const activeManagers = users.filter(user => user.isActive && (user.role === 'OWNER' || user.role === 'MANAGER'));
+    if (target?.isActive && (target.role === 'OWNER' || target.role === 'MANAGER') && activeManagers.length <= 1) return alert('Minimal satu Owner atau Manager aktif harus tersedia.');
     setUsers(prev => prev.filter(u => u.id !== id));
     if (target && currentUser) {
       appendAuditLog({
@@ -876,7 +928,7 @@ const App: React.FC = () => {
   }, [cashSessions]);
 
   const openCashSession = (openingCash: number) => {
-    if (!currentUser) return;
+    if (!currentUser || !hasPermission(currentUser, 'sale.create')) return;
     const existing = getOpenCashSession(currentUser.id);
     if (existing) {
       alert('Masih ada shift kasir yang terbuka.');
@@ -884,7 +936,7 @@ const App: React.FC = () => {
     }
 
     const session: CashSession = {
-      id: `CS-${Date.now().toString().slice(-6)}`,
+      id: createId('CS'),
       userId: currentUser.id,
       userName: currentUser.name,
       openedAt: new Date().toISOString(),
@@ -905,7 +957,16 @@ const App: React.FC = () => {
     }
 
     const sessionSales = sales.filter(sale => sale.cashSessionId === openSession.id);
-    const expectedCash = openSession.openingCash + sessionSales.filter(sale => sale.paymentType === 'TUNAI').reduce((sum, sale) => sum + sale.total, 0);
+    const cashRefunds = returns
+      .filter(ret => ret.status === 'APPROVED' && (ret.createdAt || '') >= openSession.openedAt)
+      .reduce((sum, ret) => {
+        const origin = sales.find(sale => sale.invoiceNo === ret.originalInvoiceNo);
+        return sum + (origin?.cashSessionId === openSession.id && origin.paymentType === 'TUNAI' ? ret.totalReturn : 0);
+      }, 0);
+    const sessionExpenses = cashExpenses
+      .filter(expense => expense.cashSessionId === openSession.id)
+      .reduce((sum, expense) => sum + expense.amount, 0);
+    const expectedCash = openSession.openingCash + sessionSales.filter(sale => sale.paymentType === 'TUNAI').reduce((sum, sale) => sum + sale.total, 0) - cashRefunds - sessionExpenses;
     const nonCashSales = sessionSales.filter(sale => sale.paymentType === 'NON-TUNAI').reduce((sum, sale) => sum + sale.total, 0);
     const creditSales = sessionSales.filter(sale => sale.paymentType === 'KREDIT').reduce((sum, sale) => sum + sale.total, 0);
     const shortageOrOverage = closingCash - expectedCash;
@@ -917,124 +978,174 @@ const App: React.FC = () => {
       expectedCash,
       nonCashSales,
       creditSales,
+      cashRefunds,
+      cashExpenses: sessionExpenses,
       shortageOrOverage,
       closingNotes,
       status: 'CLOSED',
     } : session));
   };
 
-  const addSale = (sale: Sale) => {
-    if (!currentUser) return;
-    (async () => {
-      try {
-        await runInventorySafeMutation((snapshot) => {
-          const openSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN') || null;
-          const result = completeSale(snapshot.items, sale, currentUser, snapshot.customers);
-          const preparedSale: Sale = {
-            ...sale,
-            createdAt: new Date().toISOString(),
-            status: 'COMPLETED',
-            operatorId: currentUser.id,
-            cashSessionId: openSession?.id,
-          };
-          
-          let nextCustomers = snapshot.customers;
-          if (sale.paymentType === 'KREDIT') {
-            nextCustomers = nextCustomers.map(customer => customer.id === sale.customerId ? { ...customer, currentDebt: customer.currentDebt + sale.total } : customer);
-          }
-          if (result.updatedCustomer) {
-            nextCustomers = nextCustomers.map(c => c.id === result.updatedCustomer!.id ? { ...c, rewardPoints: result.updatedCustomer!.rewardPoints } : c);
-          }
-          return {
-            ...snapshot,
-            sales: [preparedSale, ...snapshot.sales],
-            items: result.items,
-            customers: nextCustomers,
-            inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
-            paymentRecords: [result.payment, ...snapshot.paymentRecords],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
-          };
-        });
-      } catch (error: any) {
-        alert(error?.message || 'Gagal memproses penjualan. Coba lagi.');
-      }
-    })();
+  const addCashExpense = async (expense: CashExpense): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'accounting.view')) throw new Error('Anda tidak memiliki izin mencatat pengeluaran.');
+    if (expense.amount <= 0 || !expense.description.trim()) throw new Error('Keterangan dan nominal pengeluaran wajib diisi.');
+    await runInventorySafeMutation(snapshot => {
+      const openSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
+      const prepared = { ...expense, operatorId: currentUser.id, operatorName: currentUser.name, cashSessionId: openSession?.id };
+      return {
+        ...snapshot,
+        cashExpenses: [prepared, ...snapshot.cashExpenses],
+        accounts: postCashExpenseAccounts(snapshot.accounts, prepared.amount),
+      };
+    });
   };
 
-  const addReturn = (ret: SaleReturn) => {
-    if (!currentUser) return;
-    (async () => {
-      try {
-        const canApproveReturn = hasPermission(currentUser, 'return.approve');
-        const preparedReturn: SaleReturn = {
-          ...ret,
+  const deleteCashExpense = async (id: string): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'accounting.view')) throw new Error('Anda tidak memiliki izin menghapus pengeluaran.');
+    await runInventorySafeMutation(snapshot => {
+      const target = snapshot.cashExpenses.find(expense => expense.id === id);
+      if (!target) throw new Error('Pengeluaran tidak ditemukan.');
+      if (target.cashSessionId && snapshot.cashSessions.some(session => session.id === target.cashSessionId && session.status === 'CLOSED')) {
+        throw new Error('Pengeluaran dari shift yang sudah ditutup tidak dapat dihapus.');
+      }
+      return {
+        ...snapshot,
+        cashExpenses: snapshot.cashExpenses.filter(expense => expense.id !== id),
+        accounts: reverseCashExpenseAccounts(snapshot.accounts, target.amount),
+      };
+    });
+  };
+
+  const addSale = async (sale: Sale): Promise<Sale> => {
+    if (!currentUser || !hasPermission(currentUser, 'sale.create')) throw new Error('Anda tidak memiliki izin membuat penjualan.');
+    const next = await runInventorySafeMutation((snapshot) => {
+      if (snapshot.sales.some(entry => entry.id === sale.id || entry.invoiceNo === sale.invoiceNo)) {
+        throw new Error(`Faktur ${sale.invoiceNo} sudah tersimpan.`);
+      }
+      const customer = snapshot.customers.find(entry => entry.id === sale.customerId);
+      if (sale.paymentType === 'KREDIT') {
+        if (!customer || customer.creditLimit <= 0) throw new Error('Pilih pelanggan yang memiliki limit kredit.');
+        if (customer.currentDebt + sale.total > customer.creditLimit) throw new Error('Transaksi melebihi limit kredit pelanggan.');
+      }
+      const openSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN') || null;
+      const preparedSale: Sale = {
+        ...sale,
+        items: sale.items.map(line => ({
+          ...line,
+          costPrice: snapshot.items.find(item => item.id === line.itemId)?.basePrice ?? line.costPrice ?? 0,
+        })),
+        createdAt: new Date().toISOString(),
+        status: 'COMPLETED',
+        operatorId: currentUser.id,
+        cashSessionId: openSession?.id,
+      };
+      const result = completeSale(snapshot.items, preparedSale, currentUser, snapshot.customers);
+      let nextCustomers = snapshot.customers;
+      if (preparedSale.paymentType === 'KREDIT') {
+        nextCustomers = nextCustomers.map(entry => entry.id === preparedSale.customerId ? { ...entry, currentDebt: entry.currentDebt + preparedSale.total } : entry);
+      }
+      if (result.updatedCustomer) {
+        nextCustomers = nextCustomers.map(entry => entry.id === result.updatedCustomer!.id ? { ...entry, rewardPoints: result.updatedCustomer!.rewardPoints } : entry);
+      }
+      return {
+        ...snapshot,
+        sales: [preparedSale, ...snapshot.sales],
+        items: result.items,
+        customers: nextCustomers,
+        accounts: postSaleAccounts(snapshot.accounts, preparedSale),
+        inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
+        paymentRecords: [result.payment, ...snapshot.paymentRecords],
+        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+      };
+    });
+    const saved = next.sales.find(entry => entry.id === sale.id);
+    if (!saved) throw new Error('Penjualan gagal disimpan.');
+    return saved;
+  };
+
+  const addReturn = async (ret: SaleReturn): Promise<SaleReturn> => {
+    if (!currentUser || !hasPermission(currentUser, 'return.create')) throw new Error('Anda tidak memiliki izin membuat retur.');
+    const canApproveReturn = hasPermission(currentUser, 'return.approve');
+    const preparedReturn: SaleReturn = {
+      ...ret,
+      createdAt: new Date().toISOString(),
+      operatorId: currentUser.id,
+      status: canApproveReturn ? 'APPROVED' : 'PENDING',
+    };
+    const next = await runInventorySafeMutation((snapshot) => {
+      if (snapshot.returns.some(entry => entry.id === ret.id || entry.returnNo === ret.returnNo)) {
+        throw new Error(`Retur ${ret.returnNo} sudah tersimpan.`);
+      }
+      if (!canApproveReturn) {
+        const audit: AuditLog = {
+          id: createId('AUD'),
+          action: 'RETURN_COMPLETED',
+          actorId: currentUser.id,
+          actorName: currentUser.name,
+          entityType: 'RETURN',
+          entityId: preparedReturn.id,
+          entityLabel: preparedReturn.returnNo,
+          details: `Retur ${preparedReturn.returnNo} dibuat dan menunggu approval.`,
           createdAt: new Date().toISOString(),
-          operatorId: currentUser.id,
-          status: canApproveReturn ? 'APPROVED' : 'PENDING',
         };
-
-        if (!canApproveReturn) {
-          setReturns(prev => [preparedReturn, ...prev]);
-          appendAuditLog({
-            id: `AUD-${Date.now()}`,
-            action: 'RETURN_COMPLETED',
-            actorId: currentUser.id,
-            actorName: currentUser.name,
-            entityType: 'RETURN',
-            entityId: preparedReturn.id,
-            entityLabel: preparedReturn.returnNo,
-            details: `Retur ${preparedReturn.returnNo} dibuat dan menunggu approval.`,
-            createdAt: new Date().toISOString(),
-          });
-          return;
-        }
-
-        await runInventorySafeMutation((snapshot) => {
-          const result = completeReturn(snapshot.items, snapshot.sales, snapshot.returns, preparedReturn, currentUser);
-          return {
-            ...snapshot,
-            returns: [preparedReturn, ...snapshot.returns],
-            items: result.items,
-            inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
-            paymentRecords: [result.payment, ...snapshot.paymentRecords],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
-          };
-        });
-      } catch (error: any) {
-        alert(error?.message || 'Gagal memproses retur.');
+        return { ...snapshot, returns: [preparedReturn, ...snapshot.returns], auditLogs: [audit, ...snapshot.auditLogs].slice(0, 500) };
       }
-    })();
+      const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
+      const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, preparedReturn, currentUser);
+      const originSale = snapshot.sales.find(sale => sale.invoiceNo === preparedReturn.originalInvoiceNo)!;
+      const nextCustomers = originSale.paymentType === 'KREDIT'
+        ? snapshot.customers.map(customer => customer.id === originSale.customerId
+          ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - preparedReturn.totalReturn) }
+          : customer)
+        : snapshot.customers;
+      return {
+        ...snapshot,
+        returns: [preparedReturn, ...snapshot.returns],
+        items: result.items,
+        customers: nextCustomers,
+        accounts: postReturnAccounts(snapshot.accounts, originSale, preparedReturn.totalReturn),
+        inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
+        paymentRecords: [result.payment, ...snapshot.paymentRecords],
+        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+      };
+    });
+    return next.returns.find(entry => entry.id === ret.id) || preparedReturn;
   };
 
-  const approveReturn = (returnId: string) => {
-    if (!currentUser || !hasPermission(currentUser, 'return.approve')) return;
-    (async () => {
-      try {
+  const approveReturn = async (returnId: string): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'return.approve')) throw new Error('Anda tidak memiliki izin approve retur.');
         await runInventorySafeMutation((snapshot) => {
           const targetReturn = snapshot.returns.find(entry => entry.id === returnId);
           if (!targetReturn || targetReturn.status === 'APPROVED') return snapshot;
           const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
           const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, { ...targetReturn, status: 'APPROVED' }, currentUser);
+          const originSale = snapshot.sales.find(sale => sale.invoiceNo === targetReturn.originalInvoiceNo)!;
           return {
             ...snapshot,
             returns: snapshot.returns.map(entry => entry.id === returnId ? { ...entry, status: 'APPROVED' } : entry),
             items: result.items,
+            customers: originSale.paymentType === 'KREDIT'
+              ? snapshot.customers.map(customer => customer.id === originSale.customerId ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - targetReturn.totalReturn) } : customer)
+              : snapshot.customers,
+            accounts: postReturnAccounts(snapshot.accounts, originSale, targetReturn.totalReturn),
             inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
             paymentRecords: [result.payment, ...snapshot.paymentRecords],
             auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
           };
         });
-      } catch (error: any) {
-        alert(error?.message || 'Gagal approve retur.');
-      }
-    })();
   };
 
-  const addPurchaseOrder = (po: PurchaseOrder) => {
-    setPurchaseOrders(prev => [po, ...prev]);
-    if (currentUser) {
-      appendAuditLog({
-        id: `AUD-${Date.now()}`,
+  const addPurchaseOrder = async (po: PurchaseOrder): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'purchase.create')) throw new Error('Anda tidak memiliki izin membuat PO.');
+    await runInventorySafeMutation(snapshot => {
+      if (snapshot.purchaseOrders.some(entry => entry.id === po.id)) throw new Error(`PO ${po.id} sudah tersimpan.`);
+      if (po.total <= 0 || po.items.length === 0 || po.items.some(line => line.orderedQty <= 0 || line.cost < 0)) throw new Error('Data item PO tidak valid.');
+      return {
+        ...snapshot,
+        purchaseOrders: [po, ...snapshot.purchaseOrders],
+        accounts: postPurchaseOrderAccounts(snapshot.accounts, po.total),
+        auditLogs: [{
+        id: createId('AUD'),
         action: 'PO_CREATED',
         actorId: currentUser.id,
         actorName: currentUser.name,
@@ -1043,23 +1154,20 @@ const App: React.FC = () => {
         entityLabel: po.id,
         details: `PO ${po.id} dibuat untuk supplier ${po.supplierName}.`,
         createdAt: new Date().toISOString(),
-      });
-    }
+        } as AuditLog, ...snapshot.auditLogs].slice(0, 500),
+      };
+    });
   };
-  const payPurchaseOrder = (poId: string, amount?: number, note?: string, method?: string) => {
-    const po = purchaseOrders.find(item => item.id === poId);
-    if (!po) return;
-    const payableAmount = po.total - (po.paidAmount || 0);
-    const paymentAmount = amount && amount > 0 ? Math.min(amount, payableAmount) : payableAmount;
-    setPurchaseOrders(prev => prev.map(item => item.id === poId ? {
-      ...item,
-      paidAmount: (item.paidAmount || 0) + paymentAmount,
-      isPaid: ((item.paidAmount || 0) + paymentAmount) >= item.total,
-      paymentNotes: note ? [...(item.paymentNotes || []), note] : item.paymentNotes,
-    } : item));
-    if (po && currentUser) {
-      setPaymentRecords(prev => [{
-        id: `PAY-${Date.now()}`,
+  const payPurchaseOrder = async (poId: string, amount?: number, note?: string, method?: string): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'purchase.pay')) throw new Error('Anda tidak memiliki izin membayar PO.');
+    await runInventorySafeMutation(snapshot => {
+      const po = snapshot.purchaseOrders.find(item => item.id === poId);
+      if (!po) throw new Error('PO tidak ditemukan.');
+      const payableAmount = Math.max(0, po.total - (po.paidAmount || 0));
+      const paymentAmount = amount && amount > 0 ? Math.min(amount, payableAmount) : payableAmount;
+      if (paymentAmount <= 0) throw new Error('PO sudah lunas atau nominal tidak valid.');
+      const payment: PaymentRecord = {
+        id: createId('PAY'),
         referenceNo: po.id,
         referenceType: 'PURCHASE_ORDER',
         amount: paymentAmount,
@@ -1068,9 +1176,9 @@ const App: React.FC = () => {
         createdAt: new Date().toISOString(),
         operatorName: currentUser.name,
         operatorId: currentUser.id,
-      }, ...prev]);
-      appendAuditLog({
-        id: `AUD-${Date.now()}`,
+      };
+      const audit: AuditLog = {
+        id: createId('AUD'),
         action: 'PO_PAID',
         actorId: currentUser.id,
         actorName: currentUser.name,
@@ -1079,40 +1187,48 @@ const App: React.FC = () => {
         entityLabel: po.id,
         details: `Pembayaran PO ${po.id} sebesar Rp ${paymentAmount.toLocaleString()} berhasil dicatat.`,
         createdAt: new Date().toISOString(),
-      });
-    }
+      };
+      return {
+        ...snapshot,
+        purchaseOrders: snapshot.purchaseOrders.map(item => item.id === poId ? {
+          ...item,
+          paidAmount: (item.paidAmount || 0) + paymentAmount,
+          isPaid: ((item.paidAmount || 0) + paymentAmount) >= item.total,
+          paymentNotes: note ? [...(item.paymentNotes || []), note] : item.paymentNotes,
+        } : item),
+        accounts: postPurchasePaymentAccounts(snapshot.accounts, paymentAmount, method),
+        paymentRecords: [payment, ...snapshot.paymentRecords],
+        auditLogs: [audit, ...snapshot.auditLogs].slice(0, 500),
+      };
+    });
   };
-  const receivePurchaseOrder = (poId: string, updatedItems: { itemId: string, receivedQty: number }[]) => {
-    if (!currentUser) return;
-    (async () => {
-      try {
+  const receivePurchaseOrder = async (poId: string, updatedItems: { itemId: string, receivedQty: number }[]): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'purchase.receive')) throw new Error('Anda tidak memiliki izin menerima PO.');
         await runInventorySafeMutation((snapshot) => {
           const po = snapshot.purchaseOrders.find(item => item.id === poId);
-          if (!po) return snapshot;
+          if (!po) throw new Error('PO tidak ditemukan.');
           const result = receivePurchaseOrderStock(snapshot.items, po, updatedItems, currentUser);
+          if (result.movements.length === 0) throw new Error('Masukkan minimal satu qty penerimaan.');
+          const nextLines = po.items.map(line => {
+            const update = updatedItems.find(entry => entry.itemId === line.itemId);
+            return update ? { ...line, receivedQty: line.receivedQty + update.receivedQty } : line;
+          });
           return {
             ...snapshot,
             purchaseOrders: snapshot.purchaseOrders.map(item => item.id === poId ? {
               ...item,
-              status: 'RECEIVED',
-              items: item.items.map(line => {
-                const update = updatedItems.find(u => u.itemId === line.itemId);
-                return update ? { ...line, receivedQty: update.receivedQty } : line;
-              }),
+              status: nextLines.every(line => line.receivedQty >= line.orderedQty) ? 'RECEIVED' : 'PENDING',
+              items: nextLines,
             } : item),
             items: result.items,
             inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
             auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
           };
         });
-      } catch (error: any) {
-        alert(error?.message || 'Gagal receive PO.');
-      }
-    })();
   };
 
   const handleStockAdjustment = (log: any) => {
-    if (!currentUser) return;
+    if (!currentUser || !hasPermission(currentUser, 'stock.adjust')) return alert('Anda tidak memiliki izin menyesuaikan stok.');
     (async () => {
       try {
         await runInventorySafeMutation((snapshot) => {
@@ -1132,7 +1248,7 @@ const App: React.FC = () => {
   };
 
   const handleStockAdjustmentBulk = (logs: any[]) => {
-    if (!currentUser) return;
+    if (!currentUser || !hasPermission(currentUser, 'stock.adjust')) return alert('Anda tidak memiliki izin menyesuaikan stok.');
     (async () => {
       try {
         await runInventorySafeMutation((snapshot) => {
@@ -1274,14 +1390,14 @@ const App: React.FC = () => {
 
     switch (activeTab) {
       case 'dashboard': return <Dashboard items={items} sales={sales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} />;
-      case 'master-items': return <MasterData type="items" items={items} onAddItem={addItem} onAddItemsBulk={addItemsBulk} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} />;
-      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} />;
+      case 'master-items': return <MasterData type="items" items={items} onAddItem={addItem} onAddItemsBulk={addItemsBulk} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
+      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
       case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} onCompleteSale={addSale} />;
       case 'sales-list': return <SalesList sales={sales} onInitiateReturn={(invNo) => { setPreselectedReturnInvoice(invNo); setActiveTab('returns'); }} />;
       case 'returns': return <Returns sales={sales} returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
       case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} currentUser={currentUser} />;
-      case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} />;
-      case 'accounting': return <Accounting accounts={accounts} sales={sales} cashSessions={cashSessions} />;
+      case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} canAdjust={hasPermission(currentUser, 'stock.adjust')} />;
+      case 'accounting': return <Accounting accounts={accounts} sales={sales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
       case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={sales} purchaseOrders={purchaseOrders} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
       case 'media-vault': return (
         <MediaVault
@@ -1305,7 +1421,7 @@ const App: React.FC = () => {
           onNavigate={setActiveTab}
         />
       );
-      case 'user-management': return <UserManagement users={users} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={deleteUser} />;
+      case 'user-management': return <UserManagement users={users} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={deleteUser} canManage={hasPermission(currentUser, 'user.manage')} />;
       case 'ai-consultant': return (
         <AIConsultant
           items={items}

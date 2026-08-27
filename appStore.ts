@@ -3,7 +3,7 @@ import { useShallow } from 'zustand/shallow';
 import { 
   AppData, User, Item, Customer, Supplier, Account, PurchaseOrder, 
   Sale, SaleReturn, InventoryMovement, AuditLog, CashSession, PaymentRecord, PromotionCampaign, 
-  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage
+  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage, CashExpense
 } from './types';
 import { 
   mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, 
@@ -25,6 +25,7 @@ export interface AppState extends AppData {
   inventoryMovements: InventoryMovement[];
   auditLogs: AuditLog[];
   cashSessions: CashSession[];
+  cashExpenses: CashExpense[];
   paymentRecords: PaymentRecord[];
   promotions: PromotionCampaign[];
   mediaAssets: MediaAsset[];
@@ -53,6 +54,7 @@ export interface AppState extends AppData {
   setReturns: (returns: SaleReturn[] | ((prev: SaleReturn[]) => SaleReturn[])) => void;
   setInventoryMovements: (movements: InventoryMovement[] | ((prev: InventoryMovement[]) => InventoryMovement[])) => void;
   setCashSessions: (sessions: CashSession[] | ((prev: CashSession[]) => CashSession[])) => void;
+  setCashExpenses: (expenses: CashExpense[] | ((prev: CashExpense[]) => CashExpense[])) => void;
   setPaymentRecords: (records: PaymentRecord[] | ((prev: PaymentRecord[]) => PaymentRecord[])) => void;
   setAccounts: (accounts: Account[] | ((prev: Account[]) => Account[])) => void;
   setAiUndoStack: (stack: AIUndoEntry[] | ((prev: AIUndoEntry[]) => AIUndoEntry[])) => void;
@@ -75,6 +77,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   inventoryMovements: [],
   auditLogs: [],
   cashSessions: [],
+  cashExpenses: [],
   paymentRecords: [],
   promotions: mockPromotions,
   mediaAssets: [],
@@ -98,6 +101,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       inventoryMovements: Array.isArray(data.inventoryMovements) ? data.inventoryMovements : prev.inventoryMovements,
       auditLogs: Array.isArray(data.auditLogs) ? data.auditLogs : prev.auditLogs,
       cashSessions: Array.isArray(data.cashSessions) ? data.cashSessions : prev.cashSessions,
+      cashExpenses: Array.isArray(data.cashExpenses) ? data.cashExpenses : prev.cashExpenses,
       paymentRecords: Array.isArray(data.paymentRecords) ? data.paymentRecords : prev.paymentRecords,
       promotions: Array.isArray((data as any).promotions) ? (data as any).promotions : prev.promotions,
       mediaAssets: Array.isArray((data as any).mediaAssets) ? (data as any).mediaAssets : prev.mediaAssets,
@@ -140,6 +144,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setReturns: (updater) => set((state) => ({ returns: typeof updater === 'function' ? updater(state.returns) : updater })),
   setInventoryMovements: (updater) => set((state) => ({ inventoryMovements: typeof updater === 'function' ? updater(state.inventoryMovements) : updater })),
   setCashSessions: (updater) => set((state) => ({ cashSessions: typeof updater === 'function' ? updater(state.cashSessions) : updater })),
+  setCashExpenses: (updater) => set((state) => ({ cashExpenses: typeof updater === 'function' ? updater(state.cashExpenses) : updater })),
   setPaymentRecords: (updater) => set((state) => ({ paymentRecords: typeof updater === 'function' ? updater(state.paymentRecords) : updater })),
   setAccounts: (updater) => set((state) => ({ accounts: typeof updater === 'function' ? updater(state.accounts) : updater })),
   setAiUndoStack: (updater) => set((state) => ({ aiUndoStack: typeof updater === 'function' ? updater(state.aiUndoStack) : updater })),
@@ -170,6 +175,7 @@ export const usePurchaseOrders = () => useAppStore(state => state.purchaseOrders
 export const useInventoryMovements = () => useAppStore(state => state.inventoryMovements);
 export const useAuditLogs = () => useAppStore(state => state.auditLogs);
 export const useCashSessions = () => useAppStore(state => state.cashSessions);
+export const useCashExpenses = () => useAppStore(state => state.cashExpenses);
 export const usePaymentRecords = () => useAppStore(state => state.paymentRecords);
 export const usePromotions = () => useAppStore(state => state.promotions);
 export const useMediaAssets = () => useAppStore(state => state.mediaAssets);
@@ -192,6 +198,7 @@ export const useAppActions = () => useAppStoreShallow(state => ({
   setReturns: state.setReturns,
   setInventoryMovements: state.setInventoryMovements,
   setCashSessions: state.setCashSessions,
+  setCashExpenses: state.setCashExpenses,
   setPaymentRecords: state.setPaymentRecords,
   setAccounts: state.setAccounts,
   setAiUndoStack: state.setAiUndoStack,

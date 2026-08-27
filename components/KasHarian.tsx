@@ -3,19 +3,15 @@ import {
   Plus, Trash2, Coffee, Fuel, ShoppingBag, Wrench, Truck,
   X, Calendar, DollarSign, TrendingDown, Receipt, Download
 } from 'lucide-react';
-
-interface KasEntry {
-  id: string;
-  date: string;
-  description: string;
-  amount: number;
-  category: string;
-  createdAt: string;
-}
+import { CashExpense } from '../types';
+import { createId } from '../services/idService';
 
 interface KasHarianProps {
   openingCash: number;
   salesCashToday: number;
+  entries: CashExpense[];
+  onAddEntry: (entry: CashExpense) => Promise<void>;
+  onDeleteEntry: (id: string) => Promise<void>;
 }
 
 const CATEGORIES = [
@@ -27,28 +23,23 @@ const CATEGORIES = [
   { id: 'lainnya', label: 'Lainnya', icon: <Receipt size={14}/> },
 ];
 
-const STORAGE_KEY = 'HGROUP_KAS_HARIAN';
-
-const loadEntries = (): KasEntry[] => {
-  try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'); }
-  catch { return []; }
+const localDateKey = (value: string): string => {
+  const date = new Date(value);
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 };
 
-const saveEntries = (entries: KasEntry[]) => {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
-};
-
-const KasHarian: React.FC<KasHarianProps> = ({ openingCash, salesCashToday }) => {
-  const [entries, setEntries] = useState<KasEntry[]>(loadEntries);
+const KasHarian: React.FC<KasHarianProps> = ({ openingCash, salesCashToday, entries, onAddEntry, onDeleteEntry }) => {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ description: '', amount: 0, category: 'lainnya' });
   const [filterDate, setFilterDate] = useState(new Date().toISOString().slice(0, 10));
+  const [isSaving, setIsSaving] = useState(false);
 
   const todayStr = new Date().toLocaleDateString('id-ID');
 
   const todayEntries = useMemo(() => {
     return entries.filter(e => {
-      const entryDate = new Date(e.createdAt).toISOString().slice(0, 10);
+      const entryDate = localDateKey(e.createdAt);
       return entryDate === filterDate;
     });
   }, [entries, filterDate]);
@@ -56,41 +47,55 @@ const KasHarian: React.FC<KasHarianProps> = ({ openingCash, salesCashToday }) =>
   const totalPengeluaran = useMemo(() => todayEntries.reduce((sum, e) => sum + e.amount, 0), [todayEntries]);
   const kasAkhir = openingCash + salesCashToday - totalPengeluaran;
 
-  const handleAdd = (e: React.FormEvent) => {
+  const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.description || form.amount <= 0) return;
 
-    const newEntry: KasEntry = {
-      id: `KAS-${Date.now()}`,
+    const newEntry: CashExpense = {
+      id: createId('KAS'),
       date: todayStr,
       description: form.description,
       amount: form.amount,
       category: form.category,
       createdAt: new Date().toISOString(),
+      operatorName: '',
     };
-
-    const updated = [newEntry, ...entries];
-    setEntries(updated);
-    saveEntries(updated);
-    setForm({ description: '', amount: 0, category: 'lainnya' });
-    setShowForm(false);
+    setIsSaving(true);
+    try {
+      await onAddEntry(newEntry);
+      setForm({ description: '', amount: 0, category: 'lainnya' });
+      setShowForm(false);
+    } catch (error: any) {
+      alert(error?.message || 'Pengeluaran gagal disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
-  const handleDelete = (id: string) => {
+  const handleDelete = async (id: string) => {
     if (!confirm('Hapus pengeluaran ini?')) return;
-    const updated = entries.filter(e => e.id !== id);
-    setEntries(updated);
-    saveEntries(updated);
+    try {
+      await onDeleteEntry(id);
+    } catch (error: any) {
+      alert(error?.message || 'Pengeluaran gagal dihapus.');
+    }
   };
 
   const exportKasHarian = () => {
+    const csv = (value: unknown) => {
+      let text = String(value ?? '');
+      if (/^[=+\-@]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
     const header = 'Tanggal,Keterangan,Kategori,Jumlah\n';
-    const rows = todayEntries.map(e => `"${e.date}","${e.description}","${e.category}",${e.amount}`).join('\n');
+    const rows = todayEntries.map(e => [e.date, e.description, e.category, e.amount].map(csv).join(',')).join('\n');
     const blob = new Blob([header + rows], { type: 'text/csv;charset=utf-8' });
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
+    const url = URL.createObjectURL(blob);
+    link.href = url;
     link.download = `kas-harian-${filterDate}.csv`;
     link.click();
+    URL.revokeObjectURL(url);
   };
 
   const getCategoryIcon = (catId: string) => CATEGORIES.find(c => c.id === catId)?.icon || <Receipt size={14}/>;
@@ -218,8 +223,8 @@ const KasHarian: React.FC<KasHarianProps> = ({ openingCash, salesCashToday }) =>
               </div>
             </div>
 
-            <button type="submit" className="w-full py-3.5 bg-red-600 text-white font-semibold rounded-xl hover:bg-red-700 transition-all flex items-center justify-center gap-2">
-              <TrendingDown size={16}/> Catat Pengeluaran
+            <button type="submit" disabled={isSaving} className="w-full py-3.5 bg-red-600 disabled:bg-slate-400 text-white font-semibold rounded-xl hover:bg-red-700 transition-all flex items-center justify-center gap-2">
+              <TrendingDown size={16}/> {isSaving ? 'Menyimpan...' : 'Catat Pengeluaran'}
             </button>
           </form>
         </div>

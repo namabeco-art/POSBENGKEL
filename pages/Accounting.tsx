@@ -1,22 +1,24 @@
 import React, { useState, useMemo } from 'react';
-import { Account, Sale, CashSession } from '../types';
+import { Account, Sale, CashExpense, CashSession, User } from '../types';
 import { Calculator, BookOpen, Receipt, ArrowUpRight, ArrowDownLeft, Plus, X, Landmark, Wallet, FileText, DollarSign } from 'lucide-react';
 import KasHarian from '../components/KasHarian';
 import LaporanPajak from '../components/LaporanPajak';
+import { createId } from '../services/idService';
 
 interface AccountingProps {
   accounts: Account[];
   sales?: Sale[];
   cashSessions?: CashSession[];
+  cashExpenses?: CashExpense[];
+  currentUser: User;
+  onAddCashExpense: (expense: CashExpense) => Promise<void>;
+  onDeleteCashExpense: (id: string) => Promise<void>;
 }
 
-const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessions = [] }) => {
+const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessions = [], cashExpenses = [], currentUser, onAddCashExpense, onDeleteCashExpense }) => {
   const [activeTab, setActiveTab] = useState<'coa' | 'kas-harian' | 'pajak'>('coa');
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [journals, setJournals] = useState([
-    { id: 1, date: '14 Nov 2024', desc: 'Biaya Listrik Kantor', amount: 450000, type: 'EXPENSE' },
-    { id: 2, date: '14 Nov 2024', desc: 'Setoran Bank BCA', amount: 15000000, type: 'ASSET' }
-  ]);
+  const journals = cashExpenses.map(expense => ({ id: expense.id, date: expense.date, desc: expense.description, amount: expense.amount, type: 'EXPENSE' }));
   const [newEntry, setNewEntry] = useState({ desc: '', amount: 0, account: '6-1100' });
 
   // Calculate today's cash sales for KasHarian
@@ -24,16 +26,29 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
     const today = new Date().toLocaleDateString('id-ID');
     const todaySales = sales.filter(s => s.date.startsWith(today) && s.paymentType === 'TUNAI');
     const salesCashToday = todaySales.reduce((sum, s) => sum + s.total, 0);
-    const openSession = cashSessions.find(cs => cs.status === 'OPEN');
+    const openSession = cashSessions.find(cs => cs.status === 'OPEN' && cs.userId === currentUser.id);
     const openingCash = openSession?.openingCash || 0;
     return { openingCash, salesCashToday };
-  }, [sales, cashSessions]);
+  }, [sales, cashSessions, currentUser.id]);
 
-  const handleAddJournal = (e: React.FormEvent) => {
+  const handleAddJournal = async (e: React.FormEvent) => {
     e.preventDefault();
-    setJournals([{ id: Date.now(), date: new Date().toLocaleDateString('id-ID'), desc: newEntry.desc, amount: newEntry.amount, type: 'EXPENSE' }, ...journals]);
-    setIsModalOpen(false);
-    setNewEntry({ desc: '', amount: 0, account: '6-1100' });
+    try {
+      await onAddCashExpense({
+        id: createId('KAS'),
+        date: new Date().toLocaleDateString('id-ID'),
+        description: newEntry.desc,
+        amount: newEntry.amount,
+        category: 'lainnya',
+        createdAt: new Date().toISOString(),
+        operatorId: currentUser.id,
+        operatorName: currentUser.name,
+      });
+      setIsModalOpen(false);
+      setNewEntry({ desc: '', amount: 0, account: '6-1100' });
+    } catch (error: any) {
+      alert(error?.message || 'Jurnal gagal disimpan.');
+    }
   };
 
   const totalSaldo = accounts.filter(a => a.type === 'ASSET').reduce((sum, a) => sum + a.balance, 0);
@@ -123,7 +138,7 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
       )}
 
       {activeTab === 'kas-harian' && (
-        <KasHarian openingCash={todayCashData.openingCash} salesCashToday={todayCashData.salesCashToday} />
+        <KasHarian openingCash={todayCashData.openingCash} salesCashToday={todayCashData.salesCashToday} entries={cashExpenses} onAddEntry={onAddCashExpense} onDeleteEntry={onDeleteCashExpense} />
       )}
 
       {activeTab === 'pajak' && (

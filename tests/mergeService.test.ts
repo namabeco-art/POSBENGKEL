@@ -56,6 +56,23 @@ describe('mergeService', () => {
       expect((merged.items![0] as any).stock).toBe(15);
     });
 
+    it('should prefer remote status for mutable transactions', () => {
+      const local = {
+        returns: [{ id: 'R1', returnNo: 'RET-1', status: 'PENDING' }],
+        purchaseOrders: [{ id: 'PO-1', status: 'PENDING' }],
+        cashSessions: [{ id: 'CS-1', status: 'OPEN' }],
+      };
+      const remote = {
+        returns: [{ id: 'R1', returnNo: 'RET-1', status: 'APPROVED' }],
+        purchaseOrders: [{ id: 'PO-1', status: 'RECEIVED' }],
+        cashSessions: [{ id: 'CS-1', status: 'CLOSED' }],
+      };
+      const merged = mergeAppData(local as any, remote as any);
+      expect(merged.returns![0].status).toBe('APPROVED');
+      expect(merged.purchaseOrders![0].status).toBe('RECEIVED');
+      expect(merged.cashSessions![0].status).toBe('CLOSED');
+    });
+
     it('should keep local AI state (per-device)', () => {
       const local = {
         aiConsultantHistory: [{ id: 'M1', role: 'user', content: 'hello', timestamp: '' }],

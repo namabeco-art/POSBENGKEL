@@ -41,7 +41,7 @@ const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
     filteredSales.forEach(sale => {
       sale.items.forEach(si => {
         const masterItem = items.find(i => i.id === si.itemId);
-        const cost = masterItem?.basePrice || 0;
+        const cost = si.costPrice ?? masterItem?.basePrice ?? 0;
         if (!profitMap[si.itemId]) {
           profitMap[si.itemId] = { itemId: si.itemId, name: si.name, category: masterItem?.category || '', totalRevenue: 0, totalCost: 0, totalQty: 0 };
         }
@@ -66,7 +66,7 @@ const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
       let totalCost = 0;
       sale.items.forEach(si => {
         const masterItem = items.find(i => i.id === si.itemId);
-        totalCost += (masterItem?.basePrice || 0) * si.qty;
+        totalCost += (si.costPrice ?? masterItem?.basePrice ?? 0) * si.qty;
       });
       const profit = sale.total - totalCost;
       const marginPercent = sale.total > 0 ? Math.round((profit / sale.total) * 100) : 0;

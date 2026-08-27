@@ -9,8 +9,9 @@ import {
   User,
   Customer,
 } from '../types';
+import { createId } from './idService';
 
-const makeId = (prefix: string) => `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
+const makeId = createId;
 const nowIso = () => new Date().toISOString();
 
 const createAudit = (
@@ -198,16 +199,22 @@ export const receivePurchaseOrderStock = (
   for (const update of updates) {
     const poItem = po.items.find(item => item.itemId === update.itemId);
     if (!poItem) throw new Error(`Item penerimaan tidak ada di PO ${po.id}.`);
-    if (update.receivedQty < 0 || update.receivedQty > poItem.orderedQty) {
+    const remainingQty = poItem.orderedQty - poItem.receivedQty;
+    if (update.receivedQty < 0 || update.receivedQty > remainingQty) {
       throw new Error(`Qty terima ${poItem.name} tidak valid.`);
     }
+    if (update.receivedQty === 0) continue;
 
     const itemIndex = nextItems.findIndex(item => item.id === update.itemId);
     if (itemIndex < 0) throw new Error(`Barang ${poItem.name} tidak ditemukan di master data.`);
 
     const currentItem = nextItems[itemIndex];
     const newStock = currentItem.stock + update.receivedQty;
-    nextItems[itemIndex] = { ...currentItem, stock: newStock, basePrice: poItem.cost };
+    const effectiveUnitCost = poItem.cost * (1 - Math.min(100, Math.max(0, po.discount || 0)) / 100);
+    const weightedCost = newStock > 0
+      ? ((currentItem.stock * currentItem.basePrice) + (update.receivedQty * effectiveUnitCost)) / newStock
+      : effectiveUnitCost;
+    nextItems[itemIndex] = { ...currentItem, stock: newStock, basePrice: Math.round(weightedCost) };
     movements.push(createMovement(currentItem, update.receivedQty, currentItem.stock, newStock, 'PURCHASE_RECEIPT', 'IN', po.id, user));
   }
 

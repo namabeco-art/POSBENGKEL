@@ -58,6 +58,7 @@ export const SyncProvider: React.FC<SyncProviderProps> = ({ children, currentUse
       inventoryMovements: state.inventoryMovements,
       auditLogs: state.auditLogs,
       cashSessions: state.cashSessions,
+      cashExpenses: state.cashExpenses,
       paymentRecords: state.paymentRecords,
       promotions: state.promotions,
       mediaAssets: state.mediaAssets,

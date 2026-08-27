@@ -1,5 +1,18 @@
 import { Sale, PurchaseOrder, Item, Customer, Account } from '../types';
 
+const escapeHtml = (value: unknown): string => String(value ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#039;');
+
+const csvCell = (value: unknown): string => {
+  let text = String(value ?? '');
+  if (/^[=+\-@]/.test(text)) text = `'${text}`;
+  return `"${text.replace(/"/g, '""')}"`;
+};
+
 const thermalStyles = `
   @page { margin: 0; }
   body { 
@@ -36,7 +49,7 @@ export const printReceipt = (sale: Sale) => {
   win.document.write(`
     <html>
       <head>
-        <title>Struk ${sale.invoiceNo}</title>
+        <title>Struk ${escapeHtml(sale.invoiceNo)}</title>
         <style>${thermalStyles}</style>
       </head>
       <body>
@@ -45,12 +58,12 @@ export const printReceipt = (sale: Sale) => {
           <div>Sistem iPOS 5 Pro</div>
           <div>--------------------------</div>
         </div>
-        <div>No: ${sale.invoiceNo}</div>
-        <div>Tgl: ${sale.date}</div>
-        <div>Pel: ${sale.customerName}</div>
+        <div>No: ${escapeHtml(sale.invoiceNo)}</div>
+        <div>Tgl: ${escapeHtml(sale.date)}</div>
+        <div>Pel: ${escapeHtml(sale.customerName)}</div>
         <div class="line"></div>
         ${sale.items.map(item => `
-          <div class="bold">${item.name.toUpperCase()}</div>
+          <div class="bold">${escapeHtml(item.name.toUpperCase())}</div>
           <div class="item-row">
             <span>${item.qty} x ${item.price.toLocaleString()}</span>
             <span>${item.total.toLocaleString()}</span>
@@ -71,7 +84,7 @@ export const printReceipt = (sale: Sale) => {
         </div>
         <div class="line"></div>
         <div class="center footer">
-          KASIR: ${sale.operatorName}<br>
+          KASIR: ${escapeHtml(sale.operatorName)}<br>
           Terima kasih atas kunjungan Anda.<br>
           Powered by H-AI Enterprise
         </div>
@@ -89,7 +102,7 @@ export const printPurchaseOrder = (po: PurchaseOrder) => {
   win.document.write(`
     <html>
       <head>
-        <title>PO ${po.id}</title>
+        <title>PO ${escapeHtml(po.id)}</title>
         <style>${documentStyles}</style>
       </head>
       <body>
@@ -99,13 +112,13 @@ export const printPurchaseOrder = (po: PurchaseOrder) => {
             <div style="font-weight: bold; margin-top: 5px;">HGROUP ENTERPRISE V5</div>
           </div>
           <div style="text-align: right;">
-            <div>NO: ${po.id}</div>
-            <div>TGL: ${po.date}</div>
+            <div>NO: ${escapeHtml(po.id)}</div>
+            <div>TGL: ${escapeHtml(po.date)}</div>
           </div>
         </div>
         <div style="margin-bottom: 20px;">
           <strong>KEPADA SUPPLIER:</strong><br>
-          ${po.supplierName}<br>
+          ${escapeHtml(po.supplierName)}<br>
           Status: ${po.isPaid ? 'LUNAS' : 'TEMPO'}
         </div>
         <table>
@@ -122,7 +135,7 @@ export const printPurchaseOrder = (po: PurchaseOrder) => {
             ${po.items.map((i, idx) => `
               <tr>
                 <td>${idx + 1}</td>
-                <td>${i.name}</td>
+                <td>${escapeHtml(i.name)}</td>
                 <td>${i.orderedQty}</td>
                 <td>Rp ${i.cost.toLocaleString()}</td>
                 <td>Rp ${(i.orderedQty * i.cost).toLocaleString()}</td>
@@ -140,7 +153,7 @@ export const printPurchaseOrder = (po: PurchaseOrder) => {
           </div>
           <div style="text-align: center; width: 200px;">
             Supplier,<br><br><br><br>
-            ( ${po.supplierName} )
+            ( ${escapeHtml(po.supplierName)} )
           </div>
         </div>
         <script>setTimeout(() => { window.print(); window.close(); }, 500);</script>
@@ -157,24 +170,24 @@ export const printSimpleReport = (title: string, columns: string[], data: any[][
   win.document.write(`
     <html>
       <head>
-        <title>${title}</title>
+        <title>${escapeHtml(title)}</title>
         <style>${documentStyles}</style>
       </head>
       <body>
         <div class="header">
-          <div class="title">${title}</div>
+          <div class="title">${escapeHtml(title)}</div>
           <div>Cetak: ${new Date().toLocaleString()}</div>
         </div>
         <table>
           <thead>
             <tr>
-              ${columns.map(col => `<th>${col}</th>`).join('')}
+              ${columns.map(col => `<th>${escapeHtml(col)}</th>`).join('')}
             </tr>
           </thead>
           <tbody>
             ${data.map(row => `
               <tr>
-                ${row.map(cell => `<td>${cell}</td>`).join('')}
+                ${row.map(cell => `<td>${escapeHtml(cell)}</td>`).join('')}
               </tr>
             `).join('')}
           </tbody>
@@ -188,8 +201,8 @@ export const printSimpleReport = (title: string, columns: string[], data: any[][
 
 export const exportToExcel = (title: string, columns: string[], data: any[][]) => {
   const csvContent = [
-    columns.join(','),
-    ...data.map(row => row.map(cell => `"${cell.toString().replace(/"/g, '""')}"`).join(','))
+    columns.map(csvCell).join(','),
+    ...data.map(row => row.map(csvCell).join(','))
   ].join('\n');
 
   const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
@@ -201,4 +214,5 @@ export const exportToExcel = (title: string, columns: string[], data: any[][]) =
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
+  URL.revokeObjectURL(url);
 };

@@ -147,6 +147,8 @@ export interface SaleItem {
   name: string;
   qty: number;
   price: number;
+  /** Harga pokok saat transaksi terjadi. Jangan dihitung ulang dari master barang. */
+  costPrice?: number;
   total: number;
 }
 
@@ -275,9 +277,23 @@ export interface CashSession {
   expectedCash?: number;
   nonCashSales?: number;
   creditSales?: number;
+  cashRefunds?: number;
+  cashExpenses?: number;
   shortageOrOverage?: number;
   closingNotes?: string;
   status: 'OPEN' | 'CLOSED';
+}
+
+export interface CashExpense {
+  id: string;
+  date: string;
+  description: string;
+  amount: number;
+  category: string;
+  createdAt: string;
+  operatorId?: string;
+  operatorName: string;
+  cashSessionId?: string;
 }
 
 export interface PaymentRecord {
@@ -375,6 +391,7 @@ export interface AppData {
   inventoryMovements: InventoryMovement[];
   auditLogs: AuditLog[];
   cashSessions: CashSession[];
+  cashExpenses: CashExpense[];
   paymentRecords: PaymentRecord[];
   promotions: PromotionCampaign[];
   mediaAssets?: MediaAsset[];

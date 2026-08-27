@@ -9,15 +9,17 @@ import {
 } from 'lucide-react';
 import { PurchaseOrder, Supplier, Item, User } from '../types';
 import { printPurchaseOrder } from '../services/printService';
+import { createDocumentNo } from '../services/idService';
+import { hasPermission } from '../services/permissions';
 
 interface PurchasingProps {
   purchaseOrders: PurchaseOrder[];
   suppliers: Supplier[];
   items: Item[];
   currentUser: User;
-  onAddPO: (po: PurchaseOrder) => void;
-  onReceivePO: (poId: string, updatedItems: { itemId: string, receivedQty: number }[]) => void;
-  onPayPO: (poId: string, amount?: number, note?: string, method?: string) => void;
+  onAddPO: (po: PurchaseOrder) => Promise<void>;
+  onReceivePO: (poId: string, updatedItems: { itemId: string, receivedQty: number }[]) => Promise<void>;
+  onPayPO: (poId: string, amount?: number, note?: string, method?: string) => Promise<void>;
 }
 
 const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, items, currentUser, onAddPO, onReceivePO, onPayPO }) => {
@@ -43,6 +45,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
 
   const [receiptUpdates, setReceiptUpdates] = useState<{ itemId: string, receivedQty: number }[]>([]);
+  const [isSaving, setIsSaving] = useState(false);
 
   const tabs = [
     { id: 'po', label: '1. Draft PO', icon: <FileText size={16} /> },
@@ -67,6 +70,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
 
   const handleSaveEditDraft = () => {
     if (editingDraftIndex === null) return;
+    if (editFormData.qty <= 0 || editFormData.cost < 0) return alert('Qty harus lebih dari nol dan harga tidak boleh negatif.');
     const newList = [...poDraftItems];
     newList[editingDraftIndex] = {
       ...newList[editingDraftIndex],
@@ -77,7 +81,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     setEditingDraftIndex(null);
   };
 
-  const handleSavePO = () => {
+  const handleSavePO = async () => {
     if (!selectedSupplier || poDraftItems.length === 0) return;
 
     const subtotal = poDraftItems.reduce((s, p) => s + (p.qty * p.cost), 0);
@@ -88,7 +92,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     due.setDate(today.getDate() + termOfPayment);
 
     const newPO: PurchaseOrder = {
-      id: `PO-${Date.now().toString().slice(-6)}`,
+      id: createDocumentNo('PO'),
       date: today.toLocaleDateString('id-ID'),
       dueDate: due.toLocaleDateString('id-ID'),
       termOfPayment,
@@ -110,10 +114,17 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
       paymentNotes: []
     };
 
-    onAddPO(newPO);
-    setIsNewPOModalOpen(false);
-    resetDraftForm();
-    setActiveSubTab('receive');
+    setIsSaving(true);
+    try {
+      await onAddPO(newPO);
+      setIsNewPOModalOpen(false);
+      resetDraftForm();
+      setActiveSubTab('receive');
+    } catch (error: any) {
+      alert(error?.message || 'PO gagal disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const resetDraftForm = () => {
@@ -124,20 +135,28 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     setDiscountPercent(0);
   };
 
-  const handleFinalPayment = (e: React.FormEvent) => {
+  const handleFinalPayment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (selectedPOToPay) {
-      onPayPO(selectedPOToPay.id, paymentAmount || (selectedPOToPay.total - (selectedPOToPay.paidAmount || 0)), paymentNotes, paymentMethod);
-      setSelectedPOToPay(null);
-      setPaymentNotes(''); // Reset notes
-      setPaymentAmount(0);
-      alert(`Pembayaran Faktur ${selectedPOToPay.id} Berhasil.`);
+      setIsSaving(true);
+      try {
+        await onPayPO(selectedPOToPay.id, paymentAmount || (selectedPOToPay.total - (selectedPOToPay.paidAmount || 0)), paymentNotes, paymentMethod);
+        const paidPoId = selectedPOToPay.id;
+        setSelectedPOToPay(null);
+        setPaymentNotes('');
+        setPaymentAmount(0);
+        alert(`Pembayaran Faktur ${paidPoId} Berhasil.`);
+      } catch (error: any) {
+        alert(error?.message || 'Pembayaran PO gagal.');
+      } finally {
+        setIsSaving(false);
+      }
     }
   };
 
   const openReceiveModal = (po: PurchaseOrder) => {
     setSelectedPOToReceive(po);
-    setReceiptUpdates(po.items.map(i => ({ itemId: i.itemId, receivedQty: i.orderedQty })));
+    setReceiptUpdates(po.items.map(i => ({ itemId: i.itemId, receivedQty: Math.max(0, i.orderedQty - i.receivedQty) })));
   };
 
   const handlePrintPO = () => {
@@ -210,7 +229,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
           />
         </div>
         
-        {activeSubTab === 'po' && (
+        {activeSubTab === 'po' && hasPermission(currentUser, 'purchase.create') && (
           <button 
             onClick={() => setIsNewPOModalOpen(true)}
             className="w-full md:w-auto flex items-center justify-center gap-2.5 bg-blue-700 text-white px-8 py-3.5 md:py-4 rounded-2xl font-bold uppercase text-[10px] tracking-widest hover:bg-blue-800 shadow-lg active:scale-95 transition-all"
@@ -258,19 +277,16 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                     </td>
                     <td className="px-5 py-4 text-center">
                       <div className="flex justify-center gap-1.5 md:gap-2">
-                        {po.status === 'PENDING' ? (
+                        <button onClick={() => setSelectedPOToView(po)} className="p-3 md:px-3 md:py-2 bg-white border-2 border-blue-200 text-blue-600 rounded-xl active:scale-90"><Eye size={18}/></button>
+                        {po.status === 'PENDING' && hasPermission(currentUser, 'purchase.receive') && (
                           <button 
                             onClick={() => openReceiveModal(po)}
                             className="p-2.5 md:px-4 md:py-2.5 bg-slate-900 text-white rounded-xl hover:bg-emerald-600 transition-all font-black text-[9px] uppercase tracking-tighter active:scale-90"
                           >
                             <ArrowDownCircle size={18} className="md:hidden"/><span className="hidden md:inline">TERIMA</span>
                           </button>
-                        ) : (
-                          <>
-                            <button onClick={() => setSelectedPOToView(po)} className="p-3 md:px-3 md:py-2 bg-white border-2 border-blue-200 text-blue-600 rounded-xl active:scale-90"><Eye size={18}/></button>
-                            {!po.isPaid && <button onClick={() => { setSelectedPOToPay(po); setPaymentAmount(po.total - (po.paidAmount || 0)); }} className="p-3 md:px-3 md:py-2 bg-emerald-50 text-emerald-700 border-2 border-emerald-200 rounded-xl active:scale-90"><DollarSign size={18}/></button>}
-                          </>
                         )}
+                        {!po.isPaid && hasPermission(currentUser, 'purchase.pay') && <button onClick={() => { setSelectedPOToPay(po); setPaymentAmount(po.total - (po.paidAmount || 0)); }} className="p-3 md:px-3 md:py-2 bg-emerald-50 text-emerald-700 border-2 border-emerald-200 rounded-xl active:scale-90"><DollarSign size={18}/></button>}
                       </div>
                     </td>
                   </tr>
@@ -496,8 +512,8 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                          </div>
                          <div className="flex gap-2 w-full md:w-auto">
                             <button onClick={resetDraftForm} className="flex-1 md:flex-none px-4 md:px-6 py-3 md:py-4 bg-white/5 text-slate-400 rounded-xl font-black text-[8px] md:text-[10px] uppercase hover:bg-red-500/20 hover:text-red-400 transition-all active:scale-95 border border-white/10">RESET</button>
-                            <button disabled={!selectedSupplier || poDraftItems.length === 0} onClick={handleSavePO} className="flex-[2] md:flex-none px-6 md:px-10 py-3 md:py-4 bg-blue-600 text-white font-black text-[9px] md:text-[10px] rounded-xl shadow-xl hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 transition-all flex items-center justify-center gap-2 uppercase tracking-widest border-b-4 border-blue-800 active:scale-95">
-                               <CheckCircle size={16} className="md:w-[18px] md:h-[18px]"/> SIMPAN PO
+                            <button disabled={!selectedSupplier || poDraftItems.length === 0 || isSaving} onClick={handleSavePO} className="flex-[2] md:flex-none px-6 md:px-10 py-3 md:py-4 bg-blue-600 text-white font-black text-[9px] md:text-[10px] rounded-xl shadow-xl hover:bg-blue-500 disabled:bg-slate-700 disabled:text-slate-500 transition-all flex items-center justify-center gap-2 uppercase tracking-widest border-b-4 border-blue-800 active:scale-95">
+                               <CheckCircle size={16} className="md:w-[18px] md:h-[18px]"/> {isSaving ? 'MENYIMPAN...' : 'SIMPAN PO'}
                             </button>
                          </div>
                       </div>
@@ -613,7 +629,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                     </div>
                  </div>
 
-                 <button type="submit" className="w-full py-5 bg-emerald-600 text-white font-black text-lg rounded-2xl shadow-xl hover:bg-emerald-700 transition-all border-b-8 border-emerald-800 active:scale-95 uppercase tracking-widest">KONFIRMASI LUNAS</button>
+                 <button type="submit" disabled={isSaving} className="w-full py-5 bg-emerald-600 disabled:bg-slate-400 text-white font-black text-lg rounded-2xl shadow-xl hover:bg-emerald-700 transition-all border-b-8 border-emerald-800 active:scale-95 uppercase tracking-widest">{isSaving ? 'MENYIMPAN...' : 'KONFIRMASI BAYAR'}</button>
               </div>
            </form>
         </div>
@@ -647,15 +663,17 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                         <div className="flex items-center bg-white border-4 border-slate-300 rounded-xl overflow-hidden focus-within:border-emerald-500 shadow-inner transition-all">
                            <input 
                              type="number" 
+                             min={0}
+                             max={Math.max(0, p.orderedQty - p.receivedQty)}
                              className="w-16 p-2 text-center font-black text-blue-600 text-sm outline-none bg-transparent"
                              value={receiptUpdates.find(u => u.itemId === p.itemId)?.receivedQty ?? 0}
                              onChange={(e) => {
-                               const val = parseInt(e.target.value) || 0;
+                               const val = Math.min(Math.max(0, parseInt(e.target.value) || 0), Math.max(0, p.orderedQty - p.receivedQty));
                                setReceiptUpdates(receiptUpdates.map(u => u.itemId === p.itemId ? { ...u, receivedQty: val } : u));
                              }}
                            />
                            <button onClick={() => {
-                             setReceiptUpdates(receiptUpdates.map(u => u.itemId === p.itemId ? { ...u, receivedQty: p.orderedQty } : u));
+                             setReceiptUpdates(receiptUpdates.map(u => u.itemId === p.itemId ? { ...u, receivedQty: Math.max(0, p.orderedQty - p.receivedQty) } : u));
                            }} className="bg-emerald-50 px-4 py-2 text-emerald-600 hover:bg-emerald-500 hover:text-white transition-all border-l-2 border-slate-200 active:scale-90"><Check size={20} /></button>
                         </div>
                      </div>
@@ -668,12 +686,19 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                    <span className="text-[9px] font-black text-blue-400 uppercase tracking-widest mb-1 leading-none">Sistem Inventory</span>
                    <div className="text-lg font-black tracking-tight">POSTING STOK MASUK</div>
                 </div>
-                <button onClick={() => {
-                  onReceivePO(selectedPOToReceive.id, receiptUpdates);
-                  setSelectedPOToReceive(null);
-                  setActiveSubTab('history');
-                }} className="w-full md:w-auto px-10 py-5 bg-emerald-600 text-white font-black text-xs rounded-2xl shadow-xl hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 uppercase tracking-widest border-b-4 border-emerald-800 active:scale-95">
-                   <CheckCircle size={20}/> TERIMA BARANG
+                <button disabled={isSaving} onClick={async () => {
+                  setIsSaving(true);
+                  try {
+                    await onReceivePO(selectedPOToReceive.id, receiptUpdates);
+                    setSelectedPOToReceive(null);
+                    setActiveSubTab('receive');
+                  } catch (error: any) {
+                    alert(error?.message || 'Penerimaan PO gagal.');
+                  } finally {
+                    setIsSaving(false);
+                  }
+                }} className="w-full md:w-auto px-10 py-5 bg-emerald-600 disabled:bg-slate-500 text-white font-black text-xs rounded-2xl shadow-xl hover:bg-emerald-700 transition-all flex items-center justify-center gap-2 uppercase tracking-widest border-b-4 border-emerald-800 active:scale-95">
+                   <CheckCircle size={20}/> {isSaving ? 'MENYIMPAN...' : 'TERIMA BARANG'}
                 </button>
              </div>
           </div>

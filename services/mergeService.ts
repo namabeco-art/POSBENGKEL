@@ -104,14 +104,15 @@ export const mergeAppData = (local: Partial<AppData>, remote: Partial<AppData>):
     accounts: mergeByCode(local.accounts || [], remote.accounts || []),
     branches: mergeMutable(local.branches || [], remote.branches || []),
 
-    // Append-only transactional data — union of both
+    // Append-only transaction logs use union; mutable workflow documents prefer cloud state.
     sales: mergeAppendOnly(local.sales || [], remote.sales || []),
-    returns: mergeAppendOnly(local.returns || [], remote.returns || []),
-    purchaseOrders: mergeAppendOnly(local.purchaseOrders || [], remote.purchaseOrders || []),
+    returns: mergeMutable(local.returns || [], remote.returns || []),
+    purchaseOrders: mergeMutable(local.purchaseOrders || [], remote.purchaseOrders || []),
     inventoryMovements: mergeAppendOnly(local.inventoryMovements || [], remote.inventoryMovements || []),
     auditLogs: mergeAppendOnly(local.auditLogs || [], remote.auditLogs || []).slice(0, 2000),
     paymentRecords: mergeAppendOnly(local.paymentRecords || [], remote.paymentRecords || []),
-    cashSessions: mergeAppendOnly(local.cashSessions || [], remote.cashSessions || []),
+    cashSessions: mergeMutable(local.cashSessions || [], remote.cashSessions || []),
+    cashExpenses: mergeAppendOnly(local.cashExpenses || [], remote.cashExpenses || []),
     inventoryLogs: mergeAppendOnly(local.inventoryLogs || [], remote.inventoryLogs || []),
 
     // Promotions — merge by ID

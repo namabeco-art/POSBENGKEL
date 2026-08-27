@@ -38,12 +38,16 @@ interface MasterDataProps {
   onManualPush?: () => Promise<void>;
   onRefresh?: () => void;
   isSyncing?: boolean;
+  canCreate?: boolean;
+  canEdit?: boolean;
+  canDelete?: boolean;
 }
 
 const MasterData: React.FC<MasterDataProps> = ({ 
   type, items = [], customers = [], suppliers = [], 
   onAddItem, onAddItemsBulk, onUpdateItem, onUpdateItemsBulk, onAddCustomer, onUpdateCustomer, onAddSupplier, onUpdateSupplier,
-  onDeleteItem, onDeleteCustomer, onDeleteSupplier, onManualPush
+  onDeleteItem, onDeleteCustomer, onDeleteSupplier, onManualPush,
+  canCreate = true, canEdit = true, canDelete = true
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -445,13 +449,13 @@ const MasterData: React.FC<MasterDataProps> = ({
           <button onClick={handleDownloadTemplate} className="flex items-center gap-2 p-3 bg-white border border-slate-300 rounded-xl text-slate-600 hover:bg-slate-50 transition-all shadow-sm active:scale-95" title="Download Template Excel">
             <Download size={18}/><span className="hidden lg:block text-[11px] font-bold uppercase">Template</span>
           </button>
-          <button onClick={handleImportClick} className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-700 hover:bg-emerald-100 transition-all shadow-sm active:scale-95" title="Import Excel">
+          {canCreate && <button onClick={handleImportClick} className="flex items-center gap-2 p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-700 hover:bg-emerald-100 transition-all shadow-sm active:scale-95" title="Import Excel">
             <Upload size={18}/><span className="hidden lg:block text-[11px] font-bold uppercase">Import</span>
-          </button>
+          </button>}
           <button onClick={handleExport} className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-300 rounded-xl text-blue-700 hover:bg-blue-100 transition-all shadow-sm active:scale-95" title="Export Excel">
             <FileSpreadsheet size={18}/><span className="hidden lg:block text-[11px] font-bold uppercase">Export</span>
           </button>
-          {selectedItemIds.length > 0 && (
+          {canEdit && selectedItemIds.length > 0 && (
             <button 
               onClick={() => setIsBulkEditModalOpen(true)}
               className="flex items-center gap-2 p-3 bg-orange-50 border border-orange-300 rounded-xl text-orange-700 hover:bg-orange-100 transition-all shadow-sm active:scale-95 animate-in slide-in-from-left"
@@ -461,12 +465,12 @@ const MasterData: React.FC<MasterDataProps> = ({
           )}
         </div>
         <div className="flex items-center gap-2">
-          <button onClick={() => setIsPriceManagerOpen(true)} className="flex items-center gap-2 px-4 py-3.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-2xl font-bold hover:bg-amber-100 transition-all active:scale-95 text-xs uppercase tracking-tight">
+          {canEdit && <button onClick={() => setIsPriceManagerOpen(true)} className="flex items-center gap-2 px-4 py-3.5 bg-amber-50 text-amber-700 border border-amber-200 rounded-2xl font-bold hover:bg-amber-100 transition-all active:scale-95 text-xs uppercase tracking-tight">
             <TrendingUp size={18} /> <span className="hidden sm:inline">Kelola Harga</span><span className="sm:hidden">Harga</span>
-          </button>
-          <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-6 py-3.5 bg-blue-700 text-white rounded-2xl font-bold hover:bg-blue-800 shadow-xl transition-all active:scale-95 uppercase tracking-tight">
+          </button>}
+          {canCreate && <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-6 py-3.5 bg-blue-700 text-white rounded-2xl font-bold hover:bg-blue-800 shadow-xl transition-all active:scale-95 uppercase tracking-tight">
             <Plus size={20} /> <span className="hidden sm:inline">TAMBAH BARANG BARU</span><span className="sm:hidden">TAMBAH BARANG</span>
-          </button>
+          </button>}
         </div>
       </div>
 
@@ -579,8 +583,8 @@ const MasterData: React.FC<MasterDataProps> = ({
                   </td>
                   <td className="px-8 py-5">
                     <div className="flex justify-center gap-2">
-                      <button onClick={() => handleEditItemClick(item)} className="p-3 text-slate-600 hover:text-blue-700 hover:bg-blue-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Edit2 size={18} /></button>
-                      <button onClick={() => onDeleteItem && onDeleteItem(item.id)} className="p-3 text-slate-600 hover:text-red-700 hover:bg-red-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Trash2 size={18} /></button>
+                      {canEdit && <button onClick={() => handleEditItemClick(item)} className="p-3 text-slate-600 hover:text-blue-700 hover:bg-blue-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Edit2 size={18} /></button>}
+                      {canDelete && <button onClick={() => onDeleteItem && onDeleteItem(item.id)} className="p-3 text-slate-600 hover:text-red-700 hover:bg-red-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Trash2 size={18} /></button>}
                     </div>
                   </td>
                 </tr>
@@ -707,7 +711,7 @@ const MasterData: React.FC<MasterDataProps> = ({
            <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600" size={18} />
            <input type="text" placeholder={`Cari ${contactTab === 'customer' ? 'pelanggan' : 'supplier'}...`} className="w-full pl-11 pr-4 py-3.5 bg-white border border-slate-300 rounded-2xl focus:ring-4 focus:ring-blue-100 outline-none shadow-sm font-bold text-slate-800 transition-all placeholder:text-slate-400 focus:border-blue-600" value={searchTerm} onChange={e => setSearchTerm(e.target.value)} />
         </div>
-        <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-8 py-3.5 bg-slate-900 text-white rounded-2xl font-bold hover:bg-black shadow-xl active:scale-95 transition-all uppercase text-sm tracking-tight"><Plus size={20} /> Tambah {contactTab === 'customer' ? 'Pelanggan' : 'Supplier'}</button>
+        {canCreate && <button onClick={handleOpenAddModal} className="flex items-center gap-2 px-8 py-3.5 bg-slate-900 text-white rounded-2xl font-bold hover:bg-black shadow-xl active:scale-95 transition-all uppercase text-sm tracking-tight"><Plus size={20} /> Tambah {contactTab === 'customer' ? 'Pelanggan' : 'Supplier'}</button>}
       </div>
 
       <div className="bg-white rounded-[2rem] border border-slate-300 shadow-xl overflow-hidden">
@@ -748,8 +752,8 @@ const MasterData: React.FC<MasterDataProps> = ({
                      )}
                      <td className="px-8 py-5 text-center">
                         <div className="flex justify-center gap-2">
-                           <button onClick={() => handleEditContactClick(contact)} className="p-3 text-slate-700 hover:text-blue-700 hover:bg-blue-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Edit2 size={18}/></button>
-                           <button onClick={() => contactTab === 'customer' ? (onDeleteCustomer && onDeleteCustomer(contact.id)) : (onDeleteSupplier && onDeleteSupplier(contact.id))} className="p-3 text-slate-700 hover:text-red-700 hover:bg-red-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Trash2 size={18}/></button>
+                           {canEdit && <button onClick={() => handleEditContactClick(contact)} className="p-3 text-slate-700 hover:text-blue-700 hover:bg-blue-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Edit2 size={18}/></button>}
+                           {canDelete && <button onClick={() => contactTab === 'customer' ? (onDeleteCustomer && onDeleteCustomer(contact.id)) : (onDeleteSupplier && onDeleteSupplier(contact.id))} className="p-3 text-slate-700 hover:text-red-700 hover:bg-red-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Trash2 size={18}/></button>}
                         </div>
                      </td>
                   </tr>

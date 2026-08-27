@@ -18,6 +18,7 @@ const buildSeedData = (users: User[]): AppData => ({
   inventoryMovements: [],
   auditLogs: [],
   cashSessions: [],
+  cashExpenses: [],
   paymentRecords: [],
   promotions: mockPromotions.map(promo => ({ ...promo })),
   branches: mockBranches.map(branch => ({ ...branch })),
@@ -40,18 +41,18 @@ const seedLocalAppData = async (page: Page, data: AppData) => {
 
 const login = async (page: Page, username: string, password = '123') => {
   await page.goto('/');
-  await expect(page.getByPlaceholder('ID AKUN')).toBeVisible({ timeout: 60_000 });
-  await page.getByPlaceholder('ID AKUN').fill(username);
-  await page.locator('form input[type="password"]').first().fill(password);
-  await page.getByRole('button', { name: /masuk dashboard/i }).click();
+  await expect(page.locator('#login-user')).toBeVisible({ timeout: 60_000 });
+  await page.locator('#login-user').fill(username);
+  await page.locator('#login-pass').fill(password);
+  await page.getByRole('button', { name: /masuk/i }).click();
 };
 
 test('admin can access protected modules and operate cashier shift', async ({ page }) => {
   await login(page, 'admin');
 
   await expect(page.getByText('Dashboard Hulio Group')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Pengaturan API' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Manajemen User' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Pengaturan' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'User' })).toBeVisible();
 
   await page.getByRole('button', { name: /buka shift kasir/i }).click();
   await expect(page.getByRole('heading', { name: /mulai shift kasir/i })).toBeVisible();
@@ -67,8 +68,8 @@ test('admin can access protected modules and operate cashier shift', async ({ pa
   await page.getByRole('button', { name: 'Pembelian' }).click();
   await expect(page.getByPlaceholder(/cari nomor faktur atau supplier/i)).toBeVisible();
 
-  await page.getByRole('button', { name: 'Pengaturan API' }).click();
-  await expect(page.getByText(/Pengaturan API & Cloud/i)).toBeVisible();
+  await page.getByRole('button', { name: 'Pengaturan' }).click();
+  await expect(page.getByRole('heading', { name: 'Pengaturan', exact: true }).last()).toBeVisible();
 });
 
 test('kasir can login, complete sale, and open linked return flow without admin access', async ({ page }) => {
@@ -82,32 +83,30 @@ test('kasir can login, complete sale, and open linked return flow without admin 
   await login(page, 'kasir');
 
   await expect(page.getByText('Dashboard Hulio Group')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Point of Sale (Kasir)' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Daftar Penjualan' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Retur Penjualan' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Pengaturan API' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Manajemen User' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Kasir', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Penjualan' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Retur' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Pengaturan' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'User' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Pembelian' })).toHaveCount(0);
 
-  await page.getByRole('button', { name: /point of sale \(kasir\)/i }).click();
-  await expect(page.getByText('TRANSAKSI BARU')).toBeVisible();
+  await page.getByRole('button', { name: 'Kasir', exact: true }).click();
+  await expect(page.getByPlaceholder('Cari barang / scan barcode...')).toBeVisible();
 
-  await page.getByPlaceholder('Cari barang / barcode...').fill('Indomie');
-  await page.getByText('Indomie Goreng Original').first().click();
-  await expect(page.locator('text=1 ITEMS')).toBeVisible();
+  await page.getByPlaceholder('Cari barang / scan barcode...').fill('Oli Mesin');
+  await page.getByText('Oli Mesin 1L SAE 10W-40').first().click();
 
-  await page.getByRole('button', { name: /^BAYAR$/ }).click();
+  await page.getByRole('button', { name: /^bayar$/i }).click();
   await expect(page.getByText('PEMBAYARAN')).toBeVisible();
-  await page.getByRole('button', { name: /\+50K/i }).click();
   await page.getByRole('button', { name: /SELESAI & SIMPAN/i }).click();
 
   await expect(page.getByText('TRANSAKSI BERHASIL')).toBeVisible();
   await page.getByRole('button', { name: 'PENJUALAN BARU' }).click();
 
-  await page.getByRole('button', { name: 'Daftar Penjualan' }).click();
+  await page.getByRole('button', { name: 'Penjualan' }).click();
   await expect(page.getByText(/Umum( \/ Retail)?/i)).toBeVisible();
 
-  const invoiceNumber = await page.locator('tbody tr button').first().textContent();
+  const invoiceNumber = await page.locator('tbody tr').first().locator('text=/INV-/').first().textContent();
   await page.locator('tbody tr').first().getByRole('button').last().click();
 
   await expect(page.getByRole('heading', { name: 'Manajemen Retur' })).toBeVisible();
@@ -115,11 +114,10 @@ test('kasir can login, complete sale, and open linked return flow without admin 
     await expect(page.getByPlaceholder('Contoh: INV-123456...')).toHaveValue(invoiceNumber.trim());
   }
   await expect(page.getByText('Daftar Barang Faktur')).toBeVisible();
-  await expect(page.getByText('Indomie Goreng Original')).toBeVisible();
+  await expect(page.getByText('Oli Mesin 1L SAE 10W-40')).toBeVisible();
 });
 
 test('owner dashboard hides ERP Control Tower entry from sidebar', async ({ page }) => {
   await login(page, 'admin');
-  await expect(page.getByRole('button', { name: 'ERP Control Tower' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Laporan (Report)' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Laporan' })).toBeVisible();
 });

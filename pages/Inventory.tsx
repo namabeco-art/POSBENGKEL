@@ -13,9 +13,10 @@ interface InventoryProps {
   movements?: InventoryMovement[];
   onAdjustStock: (log: any) => void;
   onAdjustStockBulk?: (logs: any[]) => void;
+  canAdjust?: boolean;
 }
 
-const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAdjustStock, onAdjustStockBulk }) => {
+const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAdjustStock, onAdjustStockBulk, canAdjust = true }) => {
   const [activeTab, setActiveTab] = useState('opname');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [opnameMode, setOpnameMode] = useState<'single' | 'bulk'>('single');
@@ -225,12 +226,12 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
             <button onClick={handleDownloadTemplate} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-white border-2 border-slate-300 text-slate-600 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-slate-50 transition-all active:scale-95 shadow-sm">
               <Download size={16}/> Template
             </button>
-            <button onClick={() => fileImportRef.current?.click()} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-emerald-100 border-2 border-emerald-300 text-emerald-800 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-emerald-200 transition-all active:scale-95 shadow-sm">
+            {canAdjust && <button onClick={() => fileImportRef.current?.click()} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-emerald-100 border-2 border-emerald-300 text-emerald-800 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-emerald-200 transition-all active:scale-95 shadow-sm">
               <Upload size={16}/> Import
-            </button>
-            <button onClick={() => { setOpnameMode('single'); setIsModalOpen(true); }} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-blue-700 text-white px-6 py-3.5 rounded-xl font-black shadow-lg hover:bg-blue-800 transition-all active:scale-95 uppercase text-[9px] md:text-[10px] tracking-widest">
+            </button>}
+            {canAdjust && <button onClick={() => { setOpnameMode('single'); setIsModalOpen(true); }} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-blue-700 text-white px-6 py-3.5 rounded-xl font-black shadow-lg hover:bg-blue-800 transition-all active:scale-95 uppercase text-[9px] md:text-[10px] tracking-widest">
               <Plus size={16}/> Opname Baru
-            </button>
+            </button>}
           </div>
         </div>
 
@@ -267,7 +268,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
         </div>
       </div>
 
-      {isModalOpen && (
+      {isModalOpen && canAdjust && (
         <div className="fixed inset-0 bg-slate-950/95 backdrop-blur-xl z-[200] flex items-center justify-center p-0 md:p-4 animate-in fade-in duration-300">
           <div className={`bg-white w-full ${opnameMode === 'bulk' ? 'max-w-4xl' : 'max-w-lg'} h-full md:h-auto md:max-h-[90vh] md:rounded-[2.5rem] shadow-2xl flex flex-col overflow-hidden border-4 border-slate-100`}>
             <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-white shrink-0">

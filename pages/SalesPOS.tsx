@@ -30,6 +30,7 @@ import {
 import { Item, User, Customer, Sale, PromotionCampaign } from '../types';
 import { printReceipt } from '../services/printService';
 import { printReceiptWebSerial, isWebSerialSupported } from '../services/thermalPrinterService';
+import { createDocumentNo, createId } from '../services/idService';
 
 interface CartItem {
   id: string;
@@ -43,7 +44,7 @@ interface SalesPOSProps {
   items: Item[];
   customers: Customer[];
   promotions: PromotionCampaign[];
-  onCompleteSale: (sale: Sale) => void;
+  onCompleteSale: (sale: Sale) => Promise<Sale>;
 }
 
 const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, promotions, onCompleteSale }) => {
@@ -60,6 +61,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
   const [showMobileCart, setShowMobileCart] = useState(false);
   const [promoName, setPromoName] = useState<string>('NONE');
   const [manualDiscount, setManualDiscount] = useState<number>(0);
+  const [isSaving, setIsSaving] = useState(false);
   
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -122,9 +124,10 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     return Math.round(selectedPromo.value);
   }, [selectedPromo, subtotal]);
 
+  const appliedManualDiscount = Math.min(Math.max(0, manualDiscount), Math.max(0, subtotal - promoDiscount));
   const total = useMemo(() => {
-    return Math.max(0, subtotal - promoDiscount - manualDiscount);
-  }, [manualDiscount, promoDiscount, subtotal]);
+    return Math.max(0, subtotal - promoDiscount - appliedManualDiscount);
+  }, [appliedManualDiscount, promoDiscount, subtotal]);
 
   const changeAmount = useMemo(() => {
     return Math.max(0, amountReceived - total);
@@ -268,15 +271,19 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     }
   };
 
-  const handleFinishTransaction = () => {
-    if (paymentType === 'KREDIT' && (selectedCustomer.currentDebt + total) > selectedCustomer.creditLimit && selectedCustomer.creditLimit > 0) {
+  const handleFinishTransaction = async () => {
+    if (paymentType === 'KREDIT' && (selectedCustomer.id === 'UMUM' || selectedCustomer.creditLimit <= 0)) {
+      alert('Pilih pelanggan yang memiliki limit kredit.');
+      return;
+    }
+    if (paymentType === 'KREDIT' && (selectedCustomer.currentDebt + total) > selectedCustomer.creditLimit) {
       alert('Limit kredit pelanggan terlampaui.');
       return;
     }
-    const invoiceId = `INV-${Date.now().toString().slice(-6)}`;
+    const invoiceId = createDocumentNo('INV');
     const pointsToEarn = Math.floor(total / 10000); // 1 pt per Rp 10rb
     const saleData: Sale = {
-      id: Math.random().toString(36).substr(2, 9),
+      id: createId('SALE'),
       invoiceNo: invoiceId,
       date: new Date().toLocaleDateString('id-ID') + ' ' + new Date().toLocaleTimeString('id-ID'),
       customerId: selectedCustomer.id,
@@ -289,7 +296,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
         total: c.qty * c.selectedPrice
       })),
       subtotal: subtotal,
-      discountAmount: promoDiscount + manualDiscount,
+      discountAmount: promoDiscount + appliedManualDiscount,
       promoName: selectedPromo?.name,
       pointsEarned: pointsToEarn,
       tax: 0,
@@ -301,9 +308,16 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       operatorName: currentUser.name
     };
 
-    onCompleteSale(saleData);
-    setLastCompletedSale(saleData);
-    setShowSuccessModal(true);
+    setIsSaving(true);
+    try {
+      const savedSale = await onCompleteSale(saleData);
+      setLastCompletedSale(savedSale);
+      setShowSuccessModal(true);
+    } catch (error: any) {
+      alert(error?.message || 'Transaksi gagal disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const finalizeAndReset = () => {
@@ -454,10 +468,10 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                 <span>Subtotal</span>
                 <span>Rp {subtotal.toLocaleString()}</span>
              </div>
-             {(promoDiscount + manualDiscount) > 0 && (
+             {(promoDiscount + appliedManualDiscount) > 0 && (
                <div className="flex justify-between items-center text-xs text-emerald-400">
                  <span>Diskon</span>
-                 <span>- Rp {(promoDiscount + manualDiscount).toLocaleString()}</span>
+                 <span>- Rp {(promoDiscount + appliedManualDiscount).toLocaleString()}</span>
                </div>
              )}
              <div className="pt-2 border-t border-white/10 flex justify-between items-end">
@@ -666,7 +680,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                       </option>
                     ))}
                   </select>
-                  <input type="number" className="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl font-black text-[10px] outline-none" placeholder="Diskon manual" value={manualDiscount} onChange={e => setManualDiscount(parseInt(e.target.value) || 0)} />
+                  <input type="number" min={0} max={Math.max(0, subtotal - promoDiscount)} className="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl font-black text-[10px] outline-none" placeholder="Diskon manual" value={manualDiscount} onChange={e => setManualDiscount(Math.min(Math.max(0, parseInt(e.target.value) || 0), Math.max(0, subtotal - promoDiscount)))} />
                 </div>
 
                 <div className="grid grid-cols-3 gap-3 md:gap-3">
@@ -759,7 +773,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
               
               <button 
                 type="button"
-                disabled={isAmountShort}
+                disabled={isAmountShort || isSaving}
                 onClick={handleFinishTransaction} 
                 className={`w-full py-4 md:py-4 text-white font-black text-sm md:text-base rounded-2xl md:rounded-2xl shadow-xl transition-all border-b-4 shrink-0 flex items-center justify-center gap-2 active:scale-95 ${
                   isAmountShort 
@@ -767,7 +781,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                     : 'bg-emerald-600 hover:bg-emerald-700 border-emerald-800 shadow-emerald-200'
                 }`}
               >
-                {isAmountShort ? 'JUMLAH KURANG' : 'SELESAI & SIMPAN'} <ChevronRight size={20}/>
+                {isSaving ? 'MENYIMPAN...' : isAmountShort ? 'JUMLAH KURANG' : 'SELESAI & SIMPAN'} <ChevronRight size={20}/>
               </button>
            </div>
         </div>

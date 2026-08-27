@@ -40,7 +40,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
   const calculateSaleProfit = (sale: Sale) => {
     return sale.items.reduce((totalProfit, saleItem) => {
       const masterItem = items.find(i => i.id === saleItem.itemId);
-      const costPrice = masterItem ? masterItem.basePrice : 0;
+      const costPrice = saleItem.costPrice ?? masterItem?.basePrice ?? 0;
       const itemProfit = (saleItem.price - costPrice) * saleItem.qty;
       return totalProfit + itemProfit;
     }, 0);

@@ -8,13 +8,14 @@ import {
   ShoppingBag
 } from 'lucide-react';
 import { Sale, SaleReturn, ReturnItem, User } from '../types';
+import { createDocumentNo, createId } from '../services/idService';
 
 interface ReturnsProps {
   sales: Sale[];
   returns: SaleReturn[];
   currentUser: User;
-  onCompleteReturn: (ret: SaleReturn) => void;
-  onApproveReturn?: (returnId: string) => void;
+  onCompleteReturn: (ret: SaleReturn) => Promise<SaleReturn>;
+  onApproveReturn?: (returnId: string) => Promise<void>;
   preselectedInvoiceNo?: string;
 }
 
@@ -25,6 +26,7 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
   const [returnItems, setReturnItems] = useState<{ [itemId: string]: { qty: number, reason: string } }>({});
   const [viewingReturnDetail, setViewingReturnDetail] = useState<SaleReturn | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
     if (preselectedInvoiceNo) {
@@ -69,9 +71,10 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
 
   const totalReturnAmount = useMemo(() => {
     if (!selectedSale) return 0;
+    const paidRatio = selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1;
     return (Object.entries(returnItems) as any).reduce((sum: number, [itemId, data]: any) => {
       const saleItem = selectedSale.items.find(i => i.itemId === itemId);
-      return sum + (data.qty * (saleItem?.price || 0));
+      return sum + Math.round(data.qty * (saleItem?.price || 0) * paidRatio);
     }, 0);
   }, [selectedSale, returnItems]);
 
@@ -83,12 +86,12 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
     );
   }, [returns, logSearch]);
 
-  const handleSubmitReturn = () => {
+  const handleSubmitReturn = async () => {
     if (!selectedSale || Object.keys(returnItems).length === 0) return;
 
     const returnData: SaleReturn = {
-      id: Math.random().toString(36).substr(2, 9),
-      returnNo: `RET-${Date.now().toString().slice(-6)}`,
+      id: createId('RET'),
+      returnNo: createDocumentNo('RET'),
       originalInvoiceNo: selectedSale.invoiceNo,
       date: new Date().toLocaleDateString('id-ID') + ' ' + new Date().toLocaleTimeString('id-ID'),
       customerId: selectedSale.customerId,
@@ -97,18 +100,25 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
         itemId,
         name: selectedSale.items.find(i => i.itemId === itemId)?.name || '',
         qty: data.qty,
-        price: selectedSale.items.find(i => i.itemId === itemId)?.price || 0,
+        price: Math.round((selectedSale.items.find(i => i.itemId === itemId)?.price || 0) * (selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1)),
         reason: data.reason || 'Salah Beli / Rusak'
       })),
       totalReturn: totalReturnAmount,
       operatorName: currentUser.name
     };
 
-    onCompleteReturn(returnData);
-    setSelectedSale(null);
-    setReturnItems({});
-    setInvoiceSearch('');
-    setActiveSubTab('log');
+    setIsSaving(true);
+    try {
+      await onCompleteReturn(returnData);
+      setSelectedSale(null);
+      setReturnItems({});
+      setInvoiceSearch('');
+      setActiveSubTab('log');
+    } catch (error: any) {
+      alert(error?.message || 'Retur gagal disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
@@ -271,11 +281,11 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
                     </div>
 
                     <button 
-                      disabled={totalReturnAmount === 0}
+                      disabled={totalReturnAmount === 0 || isSaving}
                       onClick={handleSubmitReturn}
                       className="w-full py-4 md:py-5 bg-orange-600 hover:bg-orange-700 disabled:bg-slate-800 disabled:text-slate-600 text-white font-black text-sm md:text-lg rounded-2xl shadow-xl transition-all flex items-center justify-center gap-3 border-b-8 border-orange-800 active:scale-95 uppercase tracking-widest"
                     >
-                       <CheckCircle size={20}/> PROSES RETUR
+                       <CheckCircle size={20}/> {isSaving ? 'MENYIMPAN...' : 'PROSES RETUR'}
                     </button>
                  </div>
               </div>
@@ -335,7 +345,7 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
                               <FileText size={15}/>
                            </button>
                            {ret.status === 'PENDING' && onApproveReturn && (
-                             <button onClick={() => onApproveReturn(ret.id)} className="px-2 py-1 bg-emerald-600 text-white rounded-md text-[10px] font-medium hover:bg-emerald-700">
+                             <button onClick={() => void onApproveReturn(ret.id).catch(error => alert(error?.message || 'Approve retur gagal.'))} className="px-2 py-1 bg-emerald-600 text-white rounded-md text-[10px] font-medium hover:bg-emerald-700">
                                Approve
                              </button>
                            )}
