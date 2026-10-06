@@ -31,14 +31,40 @@ import { Item, User, Customer, Sale, PromotionCampaign, CashSession, StoreProfil
 import { printReceipt } from '../services/printService';
 import { printReceiptWebSerial, isThermalPrinterEnabled } from '../services/thermalPrinterService';
 import { createDocumentNo, createId } from '../services/idService';
-import { getSellPrice } from '../services/pricing';
+import { findStockShortage, getAvailableStock, getSellPrice, getSellUnits, type SellUnit } from '../services/pricing';
 
 interface CartItem {
+  /** Kunci baris: barang + satuan (satu barang bisa dijual per Botol dan per Dus sekaligus). */
   id: string;
   item: Item;
+  unitName: string;
+  /** Isi satuan dalam satuan dasar (Botol = 1, Dus (12) = 12). */
+  conversion: number;
+  /** Harga per satuan yang dipilih. */
   selectedPrice: number;
+  /** Jumlah dalam satuan yang dipilih. */
   qty: number;
 }
+
+const lineKey = (itemId: string, unitName: string) => `${itemId}|${unitName}`;
+
+/** Kebutuhan stok riil per satuan baris (paket → komponen; Dus → isi dalam satuan dasar). */
+const perUnitDemand = (line: CartItem): Array<[string, number]> =>
+  line.item.isBundle && line.item.components?.length
+    ? line.item.components.map(component => [component.itemId, component.qty * line.conversion])
+    : [[line.item.id, line.conversion]];
+
+/** Batasi qty tiap baris agar total kebutuhan stok (termasuk komponen paket) tidak melebihi stok. */
+const clampCartToStock = (lines: CartItem[], items: Item[]): CartItem[] => {
+  const remaining = new Map(items.map(item => [item.id, item.stock]));
+  return lines.map(line => {
+    const demand = perUnitDemand(line);
+    const maxQty = Math.min(...demand.map(([itemId, perUnit]) => (perUnit > 0 ? Math.floor((remaining.get(itemId) ?? 0) / perUnit) : Infinity)));
+    const qty = Math.max(0, Math.min(line.qty, maxQty));
+    demand.forEach(([itemId, perUnit]) => remaining.set(itemId, (remaining.get(itemId) ?? 0) - perUnit * qty));
+    return qty === line.qty ? line : { ...line, qty };
+  });
+};
 
 interface SalesPOSProps {
   currentUser: User;
@@ -173,24 +199,33 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       if (prev.length === 0) return prev;
       const notices: string[] = [];
       let changed = false;
-      const next = prev.flatMap(c => {
-        const latest = items.find(item => item.id === c.id);
+      const repriced = prev.flatMap(c => {
+        const latest = items.find(item => item.id === c.item.id);
         if (!latest) {
           notices.push(`${c.item.name} dihapus dari master barang dan dikeluarkan dari keranjang.`);
           changed = true;
           return [];
         }
-        const price = getSellPrice(latest, selectedCustomer.level);
-        const qty = Math.min(c.qty, Math.max(0, latest.stock));
-        if (price !== c.selectedPrice && latest === c.item) {
-          // Ganti level pelanggan: tidak perlu notifikasi.
-        } else if (price !== c.selectedPrice) {
-          notices.push(`Harga ${latest.name} berubah: ${formatRp(c.selectedPrice)} → ${formatRp(price)}.`);
+        const unit = getSellUnits(latest, selectedCustomer.level).find(entry => entry.name === c.unitName);
+        if (!unit || unit.price <= 0) {
+          notices.push(`Satuan ${c.unitName} untuk ${latest.name} tidak tersedia lagi; dikeluarkan dari keranjang.`);
+          changed = true;
+          return [];
         }
-        if (qty !== c.qty) notices.push(`Stok ${latest.name} tinggal ${latest.stock}; qty disesuaikan.`);
-        if (latest === c.item && price === c.selectedPrice && qty === c.qty) return [c];
+        if (unit.price !== c.selectedPrice && latest !== c.item) {
+          // Perubahan level pelanggan saja tidak perlu notifikasi; perubahan harga master perlu.
+          notices.push(`Harga ${latest.name} (${unit.name}) berubah: ${formatRp(c.selectedPrice)} → ${formatRp(unit.price)}.`);
+        }
+        if (latest === c.item && unit.price === c.selectedPrice && unit.conversion === c.conversion) return [c];
         changed = true;
-        return qty > 0 ? [{ ...c, item: latest, selectedPrice: price, qty }] : [];
+        return [{ ...c, item: latest, selectedPrice: unit.price, conversion: unit.conversion }];
+      });
+      const clamped = clampCartToStock(repriced, items);
+      const next = clamped.filter((line, index) => {
+        if (line.qty === repriced[index].qty) return true;
+        changed = true;
+        notices.push(`Stok ${line.item.name} tidak cukup; qty ${line.unitName} disesuaikan menjadi ${line.qty}.`);
+        return line.qty > 0;
       });
       if (notices.length > 0) setCartNotices(current => [...notices, ...current].slice(0, 5));
       return changed ? next : prev;
@@ -203,29 +238,47 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     }
   }, [promoName, selectedPromo]);
 
-  const addToCart = useCallback((item: Item) => {
-    if (item.stock <= 0) {
+  /** Terapkan keranjang baru hanya jika stok (termasuk komponen paket & isi Dus) mencukupi. */
+  const commitCart = useCallback((next: CartItem[]) => {
+    const shortage = findStockShortage(next.map(line => ({ item: line.item, baseQty: line.qty * line.conversion })), items);
+    if (shortage) {
+      alert(`Stok ${shortage.name} tidak mencukupi (butuh ${shortage.needed}, tersedia ${shortage.available}).`);
+      return false;
+    }
+    setCart(next);
+    return true;
+  }, [items]);
+
+  const addToCart = useCallback((item: Item, chosenUnit?: SellUnit) => {
+    if (getAvailableStock(item, items) <= 0) {
       alert(`Stok ${item.name} habis!`);
       return;
     }
-    const price = getSellPrice(item, selectedCustomer.level);
-    if (price <= 0) {
+    const unit = chosenUnit || getSellUnits(item, selectedCustomer.level)[0];
+    if (unit.price <= 0) {
       alert(`Harga jual ${item.name} belum diatur (Rp 0). Minta admin/owner mengisi harga di Master Barang.`);
       return;
     }
-    setCart(prevCart => {
-      const existing = prevCart.find(c => c.id === item.id);
-      if (existing) {
-        if (existing.qty + 1 > item.stock) {
-          alert("Jumlah melebihi stok yang tersedia!");
-          return prevCart;
-        }
-        return prevCart.map(c => c.id === item.id ? { ...c, qty: c.qty + 1 } : c);
-      } else {
-        return [...prevCart, { id: item.id, item, selectedPrice: price, qty: 1 }];
-      }
-    });
-  }, [selectedCustomer.level]);
+    const key = lineKey(item.id, unit.name);
+    const existing = cart.find(c => c.id === key);
+    commitCart(existing
+      ? cart.map(c => (c.id === key ? { ...c, qty: c.qty + 1 } : c))
+      : [...cart, { id: key, item, unitName: unit.name, conversion: unit.conversion, selectedPrice: unit.price, qty: 1 }]);
+  }, [cart, commitCart, items, selectedCustomer.level]);
+
+  /** Ganti satuan baris (mis. Botol → Dus). Baris dengan satuan sama digabung. */
+  const changeUnit = (id: string, unitName: string) => {
+    const line = cart.find(c => c.id === id);
+    if (!line) return;
+    const unit = getSellUnits(line.item, selectedCustomer.level).find(entry => entry.name === unitName);
+    if (!unit) return;
+    const key = lineKey(line.item.id, unit.name);
+    const target = cart.find(c => c.id === key);
+    const next = target
+      ? cart.filter(c => c.id !== id).map(c => (c.id === key ? { ...c, qty: c.qty + line.qty } : c))
+      : cart.map(c => (c.id === id ? { ...c, id: key, unitName: unit.name, conversion: unit.conversion, selectedPrice: unit.price } : c));
+    commitCart(next);
+  };
 
   useEffect(() => {
     let barcodeString = '';
@@ -281,27 +334,14 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
   }, [items, cart, total, showCheckout, addToCart]);
 
   const updateQty = (id: string, delta: number) => {
-    setCart(cart.map(c => {
-      if (c.id === id) {
-        const newQty = Math.max(1, c.qty + delta);
-        if (newQty > c.item.stock) {
-           alert("Stok tidak mencukupi!");
-           return c;
-        }
-        return { ...c, qty: newQty };
-      }
-      return c;
-    }));
+    commitCart(cart.map(c => (c.id === id ? { ...c, qty: Math.max(1, c.qty + delta) } : c)));
   };
 
   const setManualQty = (id: string, value: string) => {
-    const num = parseInt(value) || 0;
-    const cartItem = cart.find(c => c.id === id);
-    if (cartItem && num > cartItem.item.stock) {
-      alert("Stok tidak mencukupi!");
-      return;
-    }
-    setCart(cart.map(c => id === c.id ? { ...c, qty: num } : c));
+    const num = Math.max(0, parseInt(value) || 0);
+    const next = cart.map(c => (id === c.id ? { ...c, qty: num } : c));
+    if (num === 0) setCart(next); // sementara kosong saat mengetik; dikembalikan ke 1 saat blur
+    else commitCart(next);
   };
 
   const handleBlurQty = (id: string, value: number) => {
@@ -333,9 +373,13 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       items: cart.map(c => ({
         itemId: c.item.id,
         name: c.item.name,
-        qty: c.qty,
-        price: c.selectedPrice,
-        total: c.qty * c.selectedPrice
+        qty: c.qty * c.conversion, // satuan dasar untuk stok & retur
+        price: c.selectedPrice / c.conversion,
+        total: c.qty * c.selectedPrice,
+        unitName: c.unitName,
+        unitQty: c.qty,
+        unitPrice: c.selectedPrice,
+        conversion: c.conversion,
       })),
       subtotal: subtotal,
       discountAmount: promoDiscount + appliedManualDiscount,
@@ -501,7 +545,20 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                    <div className="flex justify-between items-start gap-2">
                       <div className="min-w-0 flex-1">
                         <p className="font-medium text-slate-800 text-sm truncate leading-tight">{c.item.name}</p>
-                        <p className="text-xs text-slate-400 mt-0.5">{c.item.brand}</p>
+                        {(() => {
+                          const units = getSellUnits(c.item, selectedCustomer.level);
+                          if (units.length <= 1) return <p className="text-xs text-slate-400 mt-0.5">{c.item.brand}{c.item.brand ? ' • ' : ''}{c.unitName}</p>;
+                          return (
+                            <select
+                              aria-label={`Satuan ${c.item.name}`}
+                              className="mt-1 text-xs border border-slate-200 rounded-md px-1.5 py-1 bg-white text-slate-700"
+                              value={c.unitName}
+                              onChange={event => changeUnit(c.id, event.target.value)}
+                            >
+                              {units.map(unit => <option key={unit.name} value={unit.name}>{unit.name} — {formatRp(unit.price)}</option>)}
+                            </select>
+                          );
+                        })()}
                       </div>
                       <button type="button" onClick={() => setCart(cart.filter(x => x.id !== c.id))} className="p-1.5 text-slate-300 hover:text-red-500 transition-all active:scale-90 rounded-md hover:bg-red-50"><Trash2 size={14}/></button>
                    </div>
@@ -620,7 +677,9 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
               <div className={viewMode === 'grid' ? "grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4 gap-4 md:gap-6" : "space-y-3"}>
                 {currentItems.map(item => {
                   const appliedPrice = getSellPrice(item, selectedCustomer.level);
-                  const isOutOfStock = item.stock <= 0;
+                  const availableStock = getAvailableStock(item, items);
+                  const isOutOfStock = availableStock <= 0;
+                  const extraUnits = getSellUnits(item, selectedCustomer.level).slice(1);
                   const hasNoPrice = appliedPrice <= 0;
                   return (
                     <button 
@@ -637,7 +696,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                           <div className="w-full h-full flex items-center justify-center text-slate-300"><ShoppingBag size={32} /></div>
                         )}
                         <div className={`absolute top-2 right-2 md:top-3 md:right-3 backdrop-blur-md text-white text-[9px] md:text-[10px] font-bold px-2 py-0.5 md:px-3 md:py-1 rounded-full shadow-lg ${isOutOfStock ? 'bg-red-600' : 'bg-slate-900/80'}`}>
-                          {isOutOfStock ? 'HABIS' : item.stock}
+                          {isOutOfStock ? 'HABIS' : availableStock}
                         </div>
                         {isOutOfStock && (
                           <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
@@ -655,8 +714,9 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                         </div>
                         <div className="flex items-center justify-between border-t border-slate-50 pt-2 md:pt-3 mt-2 md:mt-4">
                           <div className="flex flex-col">
-                            <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-tighter">LV {selectedCustomer.level}</span>
+                            <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-tighter">LV {selectedCustomer.level}{item.isBundle ? ' • PAKET' : ''}</span>
                             <div className={`font-bold text-sm md:text-lg tracking-tight leading-none ${isOutOfStock || hasNoPrice ? 'text-slate-400' : 'text-blue-700'}`}>{hasNoPrice ? 'Harga belum diatur' : formatRp(appliedPrice)}</div>
+                            {extraUnits.length > 0 && <div className="text-[9px] md:text-[10px] font-semibold text-slate-500 mt-1">{extraUnits.map(unit => `${unit.name}: ${formatRp(unit.price)}`).join(' • ')}</div>}
                           </div>
                           <div className={`p-2 md:p-2 bg-slate-50 rounded-lg text-slate-400 transition-all border border-slate-200 ${!isOutOfStock ? 'group-hover:bg-blue-600 group-hover:text-white' : ''}`}><Plus size={16}/></div>
                         </div>

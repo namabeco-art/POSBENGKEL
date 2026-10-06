@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { Item, PriceChangeLog, PriceChangeSource } from '../types';
 import { findColumn, parseCsv, downloadCsv } from '../services/csv';
-import { getMarginPercent, parseRupiah, roundPrice, type RoundingStep } from '../services/pricing';
+import { getMarginPercent, parseRupiah, roundPrice, syncUnitPrices, type RoundingStep } from '../services/pricing';
 
 interface PriceManagerProps {
   items: Item[];
@@ -323,7 +323,8 @@ const PriceManager: React.FC<PriceManagerProps> = ({ items, priceHistory = [], o
         id: item.id,
         basePrice: change.newBasePrice,
         memberPrices: change.newMemberPrices,
-        units: item.units?.map(unit => (unit.conversion === 1 && change.newMemberPrices[0] > 0 ? { ...unit, price: change.newMemberPrices[0] } : unit)),
+        // Harga Dus/Pak ikut naik/turun dengan rasio yang sama dengan harga Level 1.
+        units: syncUnitPrices(item.units, change.oldMemberPrices[0] || 0, change.newMemberPrices[0] || 0, rounding),
       };
     }).filter(Boolean) as Array<Partial<Item> & { id: string }>;
 

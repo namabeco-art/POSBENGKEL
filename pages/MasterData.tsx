@@ -20,7 +20,9 @@ import PriceManager from '../components/PriceManager';
 import CustomerPaymentModal from '../components/CustomerPaymentModal';
 import { createId } from '../services/idService';
 import { downloadCsv, findColumn, parseCsv } from '../services/csv';
-import { getMarginPercent, getSellPrice, parseRupiah } from '../services/pricing';
+import { getAvailableStock, getBaseUnitName, getItemCost, getMarginPercent, getSellPrice, parseRupiah } from '../services/pricing';
+
+type UnitDraft = { name: string; conversion: number; price: number };
 
 const ITEM_CSV_HEADER = ['Kode', 'Nama', 'Kategori', 'Merk', 'Harga Dasar', 'Harga Level 1', 'Harga Level 2', 'Harga Level 3', 'Harga Level 4', 'Barcode', 'URL Gambar', 'Stok'];
 
@@ -120,7 +122,8 @@ const MasterData: React.FC<MasterDataProps> = ({
   const [newItem, setNewItem] = useState({
     code: '', name: '', barcode: '', category: 'Sembako', brand: '',
     basePrice: 0, priceL1: 0, priceL2: 0, priceL3: 0, priceL4: 0,
-    stock: 0, imageUrl: '', isBundle: false, components: [] as BundleComponent[]
+    stock: 0, imageUrl: '', isBundle: false, components: [] as BundleComponent[],
+    baseUnitName: 'Pcs', extraUnits: [] as UnitDraft[],
   });
 
   const [isSelectingComponent, setIsSelectingComponent] = useState(false);
@@ -200,7 +203,9 @@ const MasterData: React.FC<MasterDataProps> = ({
       stock: item.stock,
       imageUrl: item.imageUrl || '',
       isBundle: item.isBundle || false,
-      components: item.components || []
+      components: item.components || [],
+      baseUnitName: getBaseUnitName(item),
+      extraUnits: (item.units || []).filter(unit => unit.conversion > 1).map(unit => ({ name: unit.name, conversion: unit.conversion, price: unit.price })),
     });
     setIsModalOpen(true);
   };
@@ -248,10 +253,28 @@ const MasterData: React.FC<MasterDataProps> = ({
     }
 
     const existing = editingId ? items.find(i => i.id === editingId) : undefined;
-    // Pertahankan satuan lain (mis. Dus isi 12); hanya harga satuan dasar yang mengikuti Level 1.
-    const units = existing?.units?.length
-      ? existing.units.map(unit => (unit.conversion === 1 ? { ...unit, price: memberPrices[0] } : unit))
-      : [{ name: 'Pcs', conversion: 1, price: memberPrices[0] }];
+    // Satuan jual: satuan dasar (harga = Level 1) + satuan besar seperti Dus/Pak dengan harga sendiri.
+    const baseUnitName = newItem.baseUnitName.trim() || 'Pcs';
+    const extraUnits = newItem.extraUnits
+      .map(unit => ({ name: unit.name.trim(), conversion: Math.round(unit.conversion || 0), price: Math.round(unit.price || 0) }))
+      .filter(unit => unit.name || unit.conversion || unit.price);
+    const unitNames = new Set([baseUnitName.toLowerCase()]);
+    for (const unit of extraUnits) {
+      if (!unit.name || unit.conversion <= 1 || unit.price <= 0) {
+        alert('Lengkapi satuan tambahan: nama, isi (lebih dari 1), dan harga.');
+        return;
+      }
+      if (unitNames.has(unit.name.toLowerCase())) {
+        alert(`Nama satuan "${unit.name}" dipakai lebih dari sekali.`);
+        return;
+      }
+      unitNames.add(unit.name.toLowerCase());
+      const costPerPack = newItem.basePrice * unit.conversion;
+      if (costPerPack > 0 && unit.price <= costPerPack && !window.confirm(`Harga ${unit.name} Rp ${unit.price.toLocaleString('id-ID')} tidak lebih tinggi dari modal ${unit.conversion} x Rp ${newItem.basePrice.toLocaleString('id-ID')}. Tetap simpan?`)) {
+        return;
+      }
+    }
+    const units = [{ name: baseUnitName, conversion: 1, price: memberPrices[0] }, ...extraUnits];
     const itemData = {
       code: newItem.code,
       name: newItem.name.trim(),
@@ -269,7 +292,8 @@ const MasterData: React.FC<MasterDataProps> = ({
     if (existing && onUpdateItem) {
       onUpdateItem({ ...existing, ...itemData }); // stok tetap dari data terbaru (diatur lewat Stok Opname)
     } else if (onAddItem) {
-      onAddItem({ id: createId('ITEM'), ...itemData, stock: Math.max(0, newItem.stock || 0), warehouseId: 'W1', isActive: true });
+      // Stok paket dihitung dari komponen; stok sendiri tidak dipakai.
+      onAddItem({ id: createId('ITEM'), ...itemData, stock: newItem.isBundle ? 0 : Math.max(0, newItem.stock || 0), warehouseId: 'W1', isActive: true });
     }
     setIsModalOpen(false);
     resetItemForm();
@@ -301,7 +325,8 @@ const MasterData: React.FC<MasterDataProps> = ({
     setNewItem({
       code: '', name: '', barcode: '', category: 'Sembako', brand: '',
       basePrice: 0, priceL1: 0, priceL2: 0, priceL3: 0, priceL4: 0,
-      stock: 0, imageUrl: '', isBundle: false, components: []
+      stock: 0, imageUrl: '', isBundle: false, components: [],
+      baseUnitName: 'Pcs', extraUnits: [],
     });
     setEditingId(null);
     setIsAddingCategory(false);
@@ -501,8 +526,9 @@ const MasterData: React.FC<MasterDataProps> = ({
       const matchesBrand = filterBrand === 'Semua' || item.brand === filterBrand;
       
       let matchesStock = true;
-      if (filterStockStatus === 'Kritis') matchesStock = item.stock < 10;
-      else if (filterStockStatus === 'Aman') matchesStock = item.stock >= 10;
+      const available = getAvailableStock(item, items);
+      if (filterStockStatus === 'Kritis') matchesStock = available < 10;
+      else if (filterStockStatus === 'Aman') matchesStock = available >= 10;
 
       let matchesType = true;
       if (filterType === 'Reguler') matchesType = !item.isBundle;
@@ -676,13 +702,16 @@ const MasterData: React.FC<MasterDataProps> = ({
                   <td className="px-8 py-5 border-r border-slate-100">
                      {(() => {
                        const sellPrice = getSellPrice(item, 1);
-                       const margin = getMarginPercent(sellPrice, item.basePrice);
-                       const isLoss = item.basePrice > 0 && sellPrice > 0 && sellPrice <= item.basePrice;
+                       const cost = getItemCost(item, items);
+                       const margin = getMarginPercent(sellPrice, cost);
+                       const isLoss = cost > 0 && sellPrice > 0 && sellPrice <= cost;
+                       const extraUnits = (item.units || []).filter(unit => unit.conversion > 1);
                        return (
                          <>
                            <div className="font-bold text-slate-900 text-base tracking-tighter">{sellPrice > 0 ? `Rp ${sellPrice.toLocaleString('id-ID')}` : <span className="text-red-600 text-sm">Belum diatur</span>}</div>
-                           <div className="text-[10px] font-bold text-slate-500 uppercase">Modal: Rp {item.basePrice.toLocaleString('id-ID')}</div>
-                           {margin !== null && item.basePrice > 0 && (
+                           <div className="text-[10px] font-bold text-slate-500 uppercase">Modal: Rp {cost.toLocaleString('id-ID')} / {getBaseUnitName(item)}</div>
+                           {extraUnits.length > 0 && <div className="text-[10px] font-semibold text-slate-500">{extraUnits.map(unit => `${unit.name}: Rp ${unit.price.toLocaleString('id-ID')}`).join(' • ')}</div>}
+                           {margin !== null && cost > 0 && (
                              <div className={`mt-1 inline-block text-[10px] font-bold px-2 py-0.5 rounded ${isLoss ? 'bg-red-100 text-red-700' : margin < 10 ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
                                {isLoss ? 'RUGI ' : 'Margin '}{margin.toFixed(1)}%
                              </div>
@@ -692,8 +721,16 @@ const MasterData: React.FC<MasterDataProps> = ({
                      })()}
                   </td>
                   <td className="px-8 py-5 text-right border-r border-slate-100">
-                    <div className={`font-bold text-xl tracking-tighter ${item.stock < 10 ? 'text-red-600' : 'text-emerald-700'}`}>{item.stock}</div>
-                    <div className={`text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full inline-block ${item.stock < 10 ? 'bg-red-50 text-red-500 border border-red-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>{item.stock < 10 ? 'KRITIS' : 'AMAN'}</div>
+                    {(() => {
+                      const stock = getAvailableStock(item, items);
+                      return (
+                        <>
+                          <div className={`font-bold text-xl tracking-tighter ${stock < 10 ? 'text-red-600' : 'text-emerald-700'}`}>{stock}</div>
+                          <div className={`text-[9px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-full inline-block ${stock < 10 ? 'bg-red-50 text-red-500 border border-red-100' : 'bg-emerald-50 text-emerald-600 border-emerald-100'}`}>{stock < 10 ? 'KRITIS' : 'AMAN'}</div>
+                          {item.isBundle && <div className="text-[9px] text-slate-400 mt-1">dari stok komponen</div>}
+                        </>
+                      );
+                    })()}
                   </td>
                   <td className="px-8 py-5">
                     <div className="flex justify-center gap-2">
@@ -1030,8 +1067,10 @@ const MasterData: React.FC<MasterDataProps> = ({
                         </div>
                         <div className="col-span-2 md:col-span-1">
                            <label className="text-[11px] font-bold text-blue-700 uppercase tracking-widest block mb-2">{editingId ? 'Stok Saat Ini' : 'Stok Awal'}</label>
-                           <input type="number" min={0} disabled={!!editingId} className={`w-full border border-slate-300 rounded-2xl p-4 font-bold outline-none focus:border-blue-500 ${editingId ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white text-slate-900'}`} value={editingId ? (items.find(i => i.id === editingId)?.stock ?? newItem.stock) : newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
-                           {editingId && <p className="text-[10px] text-slate-500 mt-1">Ubah stok lewat menu Stok Opname agar tercatat di kartu stok.</p>}
+                           <input type="number" min={0} disabled={!!editingId || newItem.isBundle} className={`w-full border border-slate-300 rounded-2xl p-4 font-bold outline-none focus:border-blue-500 ${editingId || newItem.isBundle ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white text-slate-900'}`} value={editingId ? (items.find(i => i.id === editingId)?.stock ?? newItem.stock) : newItem.isBundle ? 0 : newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
+                           {newItem.isBundle
+                             ? <p className="text-[10px] text-slate-500 mt-1">Stok paket dihitung otomatis dari stok komponen. Saat paket terjual, stok komponen yang berkurang.</p>
+                             : editingId && <p className="text-[10px] text-slate-500 mt-1">Ubah stok lewat menu Stok Opname agar tercatat di kartu stok.</p>}
                         </div>
                       </div>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -1052,6 +1091,33 @@ const MasterData: React.FC<MasterDataProps> = ({
                         })}
                       </div>
                       <p className="text-[11px] text-slate-500">Harga Level 2–4 yang dikosongkan otomatis memakai harga Level 1.</p>
+                      {!newItem.isBundle && (
+                        <div className="bg-white rounded-2xl border border-slate-200 p-4 space-y-3">
+                          <div className="flex items-center justify-between gap-3">
+                            <p className="text-[11px] font-bold text-slate-700 uppercase tracking-widest">Satuan Jual</p>
+                            <button type="button" onClick={() => setNewItem(prev => ({ ...prev, extraUnits: [...prev.extraUnits, { name: '', conversion: 12, price: 0 }] }))} className="px-3 py-1.5 text-[11px] font-bold bg-slate-100 hover:bg-slate-200 rounded-lg">+ Tambah satuan (Dus/Pak)</button>
+                          </div>
+                          <label className="flex items-center gap-2 text-xs text-slate-600">
+                            Satuan dasar
+                            <input aria-label="Nama satuan dasar" className="w-28 px-2 py-1.5 border border-slate-300 rounded-lg font-bold text-slate-800" value={newItem.baseUnitName} onChange={e => setNewItem({ ...newItem, baseUnitName: e.target.value })} placeholder="Pcs" />
+                            <span className="text-slate-400">harga = Level 1</span>
+                          </label>
+                          {newItem.extraUnits.map((unit, index) => {
+                            const update = (patch: Partial<UnitDraft>) => setNewItem(prev => ({ ...prev, extraUnits: prev.extraUnits.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)) }));
+                            const perBase = unit.conversion > 0 && unit.price > 0 ? unit.price / unit.conversion : 0;
+                            return (
+                              <div key={index} className="grid grid-cols-12 gap-2 items-center">
+                                <input aria-label="Nama satuan" className="col-span-4 px-2 py-1.5 border border-slate-300 rounded-lg text-xs font-bold" placeholder="Dus (12)" value={unit.name} onChange={e => update({ name: e.target.value })} />
+                                <input aria-label="Isi satuan" type="number" min={2} className="col-span-2 px-2 py-1.5 border border-slate-300 rounded-lg text-xs font-bold" placeholder="Isi" value={unit.conversion || ''} onChange={e => update({ conversion: parseInt(e.target.value) || 0 })} />
+                                <input aria-label="Harga satuan" type="number" min={0} className="col-span-3 px-2 py-1.5 border border-slate-300 rounded-lg text-xs font-bold" placeholder="Harga" value={unit.price || ''} onChange={e => update({ price: parseInt(e.target.value) || 0 })} />
+                                <span className="col-span-2 text-[10px] text-slate-500">{perBase > 0 ? `≈ Rp ${Math.round(perBase).toLocaleString('id-ID')}/${newItem.baseUnitName || 'Pcs'}` : ''}</span>
+                                <button type="button" aria-label="Hapus satuan" onClick={() => setNewItem(prev => ({ ...prev, extraUnits: prev.extraUnits.filter((_, i) => i !== index) }))} className="col-span-1 p-1.5 text-red-500 hover:bg-red-50 rounded-lg"><Trash2 size={14} /></button>
+                              </div>
+                            );
+                          })}
+                          {newItem.extraUnits.length > 0 && <p className="text-[10px] text-slate-500">Kasir bisa memilih satuan ini di keranjang. Stok tetap dihitung dalam satuan dasar.</p>}
+                        </div>
+                      )}
                       {editingId && priceHistory.some(entry => entry.itemId === editingId) && (
                         <div className="bg-white rounded-2xl border border-slate-200 p-4">
                           <p className="text-[11px] font-bold text-slate-700 uppercase tracking-widest mb-2">Riwayat Harga Terakhir</p>

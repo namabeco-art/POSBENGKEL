@@ -127,3 +127,96 @@ export const scaleSellPricesToCost = (
   const ratio = newCost / oldCost;
   return memberPrices.map(price => (price > 0 ? roundPrice(price * ratio, step) : price));
 };
+
+/** Nama satuan dasar barang (conversion = 1), default "Pcs". */
+export const getBaseUnitName = (item: Pick<Item, 'units'>): string =>
+  item.units?.find(unit => unit.conversion === 1)?.name?.trim() || 'Pcs';
+
+export interface SellUnit {
+  name: string;
+  conversion: number;
+  price: number;
+}
+
+/**
+ * Satuan yang bisa dijual di kasir: satuan dasar (harga mengikuti level pelanggan)
+ * + satuan besar seperti Dus/Pak yang punya harga sendiri.
+ */
+export const getSellUnits = (item: Pick<Item, 'memberPrices' | 'units'>, level = 1): SellUnit[] => {
+  const base: SellUnit = { name: getBaseUnitName(item), conversion: 1, price: getSellPrice(item, level) };
+  const extras = (item.units || [])
+    .filter(unit => unit.conversion > 1 && unit.price > 0 && unit.name?.trim())
+    .map(unit => ({ name: unit.name.trim(), conversion: unit.conversion, price: unit.price }));
+  return [base, ...extras];
+};
+
+/** Harga modal barang. Untuk paket: jumlah modal komponen saat ini (bukan angka saat paket dibuat). */
+export const getItemCost = (item: Item, items: Item[]): number => {
+  if (item.isBundle && item.components?.length) {
+    return item.components.reduce((sum, component) => {
+      const source = items.find(entry => entry.id === component.itemId);
+      return sum + (source?.basePrice ?? component.basePrice ?? 0) * component.qty;
+    }, 0);
+  }
+  return item.basePrice || 0;
+};
+
+/** Stok yang bisa dijual. Untuk paket: berapa paket yang bisa dirakit dari stok komponen. */
+export const getAvailableStock = (item: Item, items: Item[]): number => {
+  if (item.isBundle && item.components?.length) {
+    return Math.max(0, Math.min(...item.components.map(component => {
+      const source = items.find(entry => entry.id === component.itemId);
+      return source && component.qty > 0 ? Math.floor(source.stock / component.qty) : 0;
+    })));
+  }
+  return item.stock;
+};
+
+/** Kebutuhan stok riil (satuan dasar, per barang non-paket) dari daftar baris keranjang. */
+export const getStockDemand = (lines: Array<{ item: Item; baseQty: number }>): Map<string, { item: Item | null; name: string; qty: number }> => {
+  const demand = new Map<string, { item: Item | null; name: string; qty: number }>();
+  const add = (id: string, name: string, qty: number) => {
+    const current = demand.get(id);
+    demand.set(id, { item: null, name, qty: (current?.qty || 0) + qty });
+  };
+  lines.forEach(({ item, baseQty }) => {
+    if (item.isBundle && item.components?.length) {
+      item.components.forEach(component => add(component.itemId, component.name, component.qty * baseQty));
+    } else {
+      add(item.id, item.name, baseQty);
+    }
+  });
+  return demand;
+};
+
+/** Cari barang yang stoknya tidak cukup untuk keranjang ini. */
+export const findStockShortage = (lines: Array<{ item: Item; baseQty: number }>, items: Item[]): { name: string; needed: number; available: number } | null => {
+  for (const [itemId, entry] of getStockDemand(lines)) {
+    const source = items.find(item => item.id === itemId);
+    const available = source?.stock ?? 0;
+    if (entry.qty > available) return { name: source?.name || entry.name, needed: entry.qty, available };
+  }
+  return null;
+};
+
+/**
+ * Sesuaikan harga satuan saat harga Level 1 berubah: satuan dasar = harga baru,
+ * satuan besar (Dus/Pak) ikut naik/turun dengan rasio yang sama.
+ */
+export const syncUnitPrices = (units: Item['units'] | undefined, oldBasePrice: number, newBasePrice: number, step: RoundingStep = 0): Item['units'] => {
+  if (!units?.length) return newBasePrice > 0 ? [{ name: 'Pcs', conversion: 1, price: newBasePrice }] : [];
+  return units.map(unit => {
+    if (unit.conversion === 1) return newBasePrice > 0 ? { ...unit, price: newBasePrice } : unit;
+    if (!(oldBasePrice > 0) || !(newBasePrice > 0) || oldBasePrice === newBasePrice) return unit;
+    return { ...unit, price: roundPrice(unit.price * (newBasePrice / oldBasePrice), step) };
+  });
+};
+
+/** Label qty & harga baris penjualan untuk struk/daftar: "2 Dus (12) x Rp 600.000" atau "3 Botol x Rp 55.000". */
+export const describeSaleLine = (line: { qty: number; price: number; unitName?: string; unitQty?: number; unitPrice?: number; conversion?: number }) => {
+  const rupiah = (value: number) => Math.round(value || 0).toLocaleString('id-ID');
+  if (line.unitName && line.unitQty && line.conversion && line.conversion > 1) {
+    return { qtyText: `${line.unitQty} ${line.unitName}`, priceText: rupiah(line.unitPrice ?? line.price * line.conversion) };
+  }
+  return { qtyText: `${line.qty}${line.unitName ? ` ${line.unitName}` : ''}`, priceText: rupiah(line.price) };
+};

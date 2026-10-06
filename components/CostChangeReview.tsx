@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { AlertTriangle, TrendingUp, X } from 'lucide-react';
 import { Item, PriceChangeSource } from '../types';
 import type { CostChange } from '../services/posOperations';
-import { getMarginPercent, getSellPrice, roundPrice, scaleSellPricesToCost, type RoundingStep } from '../services/pricing';
+import { getMarginPercent, getSellPrice, roundPrice, scaleSellPricesToCost, syncUnitPrices, type RoundingStep } from '../services/pricing';
 
 interface CostChangeReviewProps {
   changes: CostChange[];
@@ -57,7 +57,7 @@ const CostChangeReview: React.FC<CostChangeReviewProps> = ({ changes, items, ref
       .map(row => ({
         id: row.item.id,
         memberPrices: row.proposed,
-        units: row.item.units?.map(unit => (unit.conversion === 1 && row.proposed[0] > 0 ? { ...unit, price: row.proposed[0] } : unit)),
+        units: syncUnitPrices(row.item.units, row.item.memberPrices[0] || 0, row.proposed[0] || 0, rounding),
       }));
     if (patches.length === 0) return onClose();
     onApply(patches, 'COST_REVIEW', `Penyesuaian harga jual setelah ${referenceNo}`);

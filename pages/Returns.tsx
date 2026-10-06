@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { Sale, SaleReturn, ReturnItem, User } from '../types';
 import { createDocumentNo, createId } from '../services/idService';
+import { describeSaleLine } from '../services/pricing';
 
 interface ReturnsProps {
   sales: Sale[];
@@ -69,6 +70,21 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
     }));
   };
 
+  /**
+   * Baris faktur digabung per barang (mis. 1 Dus + 3 Botol oli = 15 Botol).
+   * Harga retur per satuan dasar = rata-rata harga baris tersebut.
+   */
+  const saleLines = useMemo(() => {
+    if (!selectedSale) return [];
+    const grouped = new Map<string, { itemId: string; name: string; qty: number; total: number; labels: string[] }>();
+    selectedSale.items.forEach(line => {
+      const current = grouped.get(line.itemId) || { itemId: line.itemId, name: line.name, qty: 0, total: 0, labels: [] };
+      const label = describeSaleLine(line);
+      grouped.set(line.itemId, { ...current, qty: current.qty + line.qty, total: current.total + line.total, labels: [...current.labels, `${label.qtyText} x Rp ${label.priceText}`] });
+    });
+    return Array.from(grouped.values()).map(entry => ({ ...entry, price: entry.qty > 0 ? entry.total / entry.qty : 0 }));
+  }, [selectedSale]);
+
   /** Qty yang sudah pernah diretur (disetujui maupun menunggu) per barang untuk faktur terpilih. */
   const alreadyReturned = useMemo(() => {
     const map: Record<string, number> = {};
@@ -89,10 +105,10 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
     if (!selectedSale) return 0;
     const paidRatio = selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1;
     return selectedReturnLines.reduce((sum, [itemId, data]) => {
-      const saleItem = selectedSale.items.find(i => i.itemId === itemId);
+      const saleItem = saleLines.find(i => i.itemId === itemId);
       return sum + Math.round(data.qty * (saleItem?.price || 0) * paidRatio);
     }, 0);
-  }, [selectedSale, selectedReturnLines]);
+  }, [selectedSale, selectedReturnLines, saleLines]);
 
   const filteredReturns = useMemo(() => {
     return returns.filter(r => 
@@ -114,9 +130,9 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
       customerName: selectedSale.customerName,
       items: selectedReturnLines.map(([itemId, data]) => ({
         itemId,
-        name: selectedSale.items.find(i => i.itemId === itemId)?.name || '',
+        name: saleLines.find(i => i.itemId === itemId)?.name || '',
         qty: data.qty,
-        price: Math.round((selectedSale.items.find(i => i.itemId === itemId)?.price || 0) * (selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1)),
+        price: Math.round((saleLines.find(i => i.itemId === itemId)?.price || 0) * (selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1)),
         reason: data.reason || 'Salah Beli / Rusak'
       })),
       totalReturn: totalReturnAmount,
@@ -238,11 +254,11 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
                        <button onClick={() => setSelectedSale(null)} className="text-red-500 font-black text-[9px] uppercase hover:underline">Batal</button>
                     </div>
                     <div className="p-4 md:p-6 space-y-4">
-                       {selectedSale.items.map(item => (
+                       {saleLines.map(item => (
                          <div key={item.itemId} className="flex flex-col md:flex-row items-center justify-between p-4 md:p-5 bg-white border-2 border-slate-100 rounded-2xl md:rounded-3xl hover:border-orange-200 transition-all gap-4">
                             <div className="flex-1 min-w-0">
                                <div className="font-black text-slate-800 uppercase text-xs md:text-sm truncate">{item.name}</div>
-                               <div className="text-[9px] md:text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Terjual: {item.qty} PCS @ Rp {item.price.toLocaleString('id-ID')}{alreadyReturned[item.itemId] ? ` • Sudah diretur: ${alreadyReturned[item.itemId]}` : ''}</div>
+                               <div className="text-[9px] md:text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Terjual: {item.labels.join(' + ')} (= {item.qty} satuan dasar){alreadyReturned[item.itemId] ? ` • Sudah diretur: ${alreadyReturned[item.itemId]}` : ''}</div>
                             </div>
 
                             <div className="flex items-center gap-4 md:gap-8 w-full md:w-auto justify-between">

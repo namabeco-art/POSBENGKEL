@@ -6,7 +6,7 @@ import { getCloudConfig } from '../services/syncService';
 import { parseOpenRouterError, requestOpenRouterReply } from '../services/aiService';
 import ShiftManagementModal from '../components/ShiftManagementModal';
 import { hasPermission } from '../services/permissions';
-import { getBelowCostLevels, getMarginPercent, getSellPrice } from '../services/pricing';
+import { getBelowCostLevels, getItemCost, getMarginPercent, getSellPrice } from '../services/pricing';
 
 interface DashboardProps {
   items: Item[];
@@ -101,7 +101,7 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
     [cashSessions, currentUser.id],
   );
 
-  const lowStockItems = useMemo(() => items.filter(item => item.stock <= (item.reorderLevel || 10)).slice(0, 5), [items]);
+  const lowStockItems = useMemo(() => items.filter(item => !item.isBundle && item.stock <= (item.reorderLevel || 10)).slice(0, 5), [items]);
   const canSeeCost = hasPermission(currentUser, 'item.edit') || hasPermission(currentUser, 'report.view');
   const lastClosedSession = useMemo(
     () => cashSessions.filter(session => session.userId === currentUser.id && session.status === 'CLOSED')
@@ -114,7 +114,8 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
     const belowCost: { id: string; name: string; sell: number; cost: number }[] = [];
     const thinMargin: { id: string; name: string; margin: number }[] = [];
     const noPrice: { id: string; name: string }[] = [];
-    items.forEach(item => {
+    items.forEach(rawItem => {
+      const item = rawItem.isBundle ? { ...rawItem, basePrice: getItemCost(rawItem, items) } : rawItem;
       const sell = getSellPrice(item, 1);
       if (sell <= 0) { noPrice.push({ id: item.id, name: item.name }); return; }
       if (getBelowCostLevels(item).length > 0) { belowCost.push({ id: item.id, name: item.name, sell, cost: item.basePrice }); return; }

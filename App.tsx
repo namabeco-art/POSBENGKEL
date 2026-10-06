@@ -8,7 +8,7 @@ import { clearSessionLocal, loadAppDataLocal, loadSessionLocal, saveAppDataLocal
 import { hashPassword, sanitizeUserSession, verifyPassword } from './services/authService';
 import { canAccessTab, getAccessibleTabs, hasPermission } from './services/permissions';
 import { getLoginLockoutRemaining, recordFailedLogin, resetLoginAttempts } from './services/rateLimiter';
-import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem, type CostChange } from './services/posOperations';
+import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem, voidSaleStock, type CostChange } from './services/posOperations';
 import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from './services/cloudProfiles';
 import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
@@ -16,7 +16,7 @@ import { mergeAppData } from './services/mergeService';
 import { loadAppDataIndexedDB, saveAppDataIndexedDB } from './services/indexedDbService';
 import { createDocumentNo, createId } from './services/idService';
 import { postCashExpenseAccounts, postCustomerPaymentAccounts, postPurchaseOrderAccounts, postPurchasePaymentAccounts, postReturnAccounts, postSaleAccounts, reverseCashExpenseAccounts, reversePurchaseOrderAccounts } from './services/accountingService';
-import { buildPriceChangeLogs, PRICE_HISTORY_LIMIT } from './services/pricing';
+import { buildPriceChangeLogs, getItemCost, PRICE_HISTORY_LIMIT, syncUnitPrices } from './services/pricing';
 import { stampAppData } from './services/syncMeta';
 import { AUDIT_LOG_LIMIT } from './services/mergeService';
 import ErrorBoundary from './components/ErrorBoundary';
@@ -736,6 +736,7 @@ const App: React.FC = () => {
           basePrice: row.basePrice > 0 ? row.basePrice : existing.basePrice,
           memberPrices: row.memberPrices.map((price, level) => (price > 0 ? price : existing.memberPrices[level] || 0)),
         };
+        next.units = syncUnitPrices(existing.units, existing.memberPrices[0] || 0, next.memberPrices[0] || 0);
         try { validateUniqueItem(working, next); } catch (error: any) { errors.push(`Baris ${line}: ${error.message}`); return; }
         working = working.map(item => (item.id === existing.id ? next : item));
         if (!addedIds.has(existing.id)) updatedIds.add(existing.id);
@@ -856,6 +857,7 @@ const App: React.FC = () => {
           ...item,
           basePrice: draft.newBasePrice,
           memberPrices: draft.newMemberPrices,
+          units: syncUnitPrices(item.units, item.memberPrices[0] || 0, draft.newMemberPrices[0] || 0),
         };
       }),
     );
@@ -935,7 +937,9 @@ const App: React.FC = () => {
       const beforeItems = useAppStore.getState().items.filter(item => map.has(item.id));
       setItems(prev => prev.map(item => {
         const restore = map.get(item.id);
-        return restore ? { ...item, basePrice: restore.basePrice, memberPrices: [...restore.memberPrices] } : item;
+        return restore
+          ? { ...item, basePrice: restore.basePrice, memberPrices: [...restore.memberPrices], units: syncUnitPrices(item.units, item.memberPrices[0] || 0, restore.memberPrices[0] || 0) }
+          : item;
       }));
       logPriceChanges(beforeItems, useAppStore.getState().items.filter(item => map.has(item.id)), 'AI_UNDO', target.label);
     }
@@ -1247,7 +1251,11 @@ const App: React.FC = () => {
         ...sale,
         items: sale.items.map(line => ({
           ...line,
-          costPrice: snapshot.items.find(item => item.id === line.itemId)?.basePrice ?? line.costPrice ?? 0,
+          costPrice: (() => {
+            const source = snapshot.items.find(item => item.id === line.itemId);
+            // Modal per satuan dasar; paket = jumlah modal komponen saat ini.
+            return source ? getItemCost(source, snapshot.items) : line.costPrice ?? 0;
+          })(),
         })),
         createdAt: new Date().toISOString(),
         status: 'COMPLETED',
@@ -1264,7 +1272,7 @@ const App: React.FC = () => {
       }
       return {
         ...snapshot,
-        sales: [preparedSale, ...snapshot.sales],
+        sales: [{ ...preparedSale, items: result.saleItems }, ...snapshot.sales],
         items: result.items,
         customers: nextCustomers,
         accounts: postSaleAccounts(snapshot.accounts, preparedSale),
@@ -1276,6 +1284,55 @@ const App: React.FC = () => {
     const saved = next.sales.find(entry => entry.id === sale.id);
     if (!saved) throw new Error('Penjualan gagal disimpan.');
     return saved;
+  };
+
+  /**
+   * Batalkan transaksi (void) — untuk salah input di shift yang sama. Stok, kas/bank, piutang, dan poin dikembalikan.
+   * Transaksi dari shift yang sudah ditutup, yang sudah diretur, atau yang piutangnya sudah dicicil harus lewat Retur.
+   */
+  const voidSale = async (saleId: string, reason: string): Promise<void> => {
+    if (!currentUser || !hasPermission(currentUser, 'sale.void')) throw new Error('Anda tidak memiliki izin membatalkan transaksi.');
+    const trimmedReason = reason.trim();
+    if (!trimmedReason) throw new Error('Alasan pembatalan wajib diisi.');
+    await runInventorySafeMutation(snapshot => {
+      const sale = snapshot.sales.find(entry => entry.id === saleId);
+      if (!sale) throw new Error('Transaksi tidak ditemukan.');
+      if (sale.status === 'VOID') throw new Error(`Faktur ${sale.invoiceNo} sudah dibatalkan.`);
+      if (snapshot.returns.some(entry => entry.originalInvoiceNo === sale.invoiceNo)) {
+        throw new Error('Faktur ini sudah memiliki retur — gunakan menu Retur untuk sisa barang.');
+      }
+      if (sale.cashSessionId && snapshot.cashSessions.some(session => session.id === sale.cashSessionId && session.status === 'CLOSED')) {
+        throw new Error('Shift kasir untuk transaksi ini sudah ditutup — gunakan menu Retur.');
+      }
+      const customer = snapshot.customers.find(entry => entry.id === sale.customerId);
+      if (sale.paymentType === 'KREDIT' && customer && customer.currentDebt < sale.total) {
+        throw new Error('Piutang transaksi ini sudah dibayar sebagian — gunakan menu Retur.');
+      }
+      const result = voidSaleStock(snapshot.items, sale, currentUser, trimmedReason);
+      const now = new Date().toISOString();
+      return {
+        ...snapshot,
+        sales: snapshot.sales.map(entry => entry.id === saleId ? {
+          ...entry,
+          status: 'VOID' as const,
+          voidedAt: now,
+          voidedBy: currentUser.name,
+          voidReason: trimmedReason,
+          updatedAt: now,
+        } : entry),
+        items: result.items,
+        customers: snapshot.customers.map(entry => {
+          if (entry.id !== sale.customerId) return entry;
+          const currentDebt = sale.paymentType === 'KREDIT' ? Math.max(0, entry.currentDebt - sale.total) : entry.currentDebt;
+          const rewardPoints = Math.max(0, (entry.rewardPoints || 0) - (sale.pointsEarned || 0) + (sale.pointsUsed || 0));
+          return currentDebt === entry.currentDebt && rewardPoints === (entry.rewardPoints || 0) ? entry : { ...entry, currentDebt, rewardPoints };
+        }),
+        accounts: postReturnAccounts(snapshot.accounts, sale, sale.total),
+        inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
+        paymentRecords: [result.payment, ...snapshot.paymentRecords],
+        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
+      };
+    });
   };
 
   const addReturn = async (ret: SaleReturn): Promise<SaleReturn> => {
@@ -1576,6 +1633,9 @@ const App: React.FC = () => {
     })();
   };
 
+  // Transaksi yang di-void tidak dihitung di omzet, laporan, pajak, maupun AI.
+  const activeSales = sales.filter(sale => sale.status !== 'VOID');
+
   if (!currentUser) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-indigo-50 via-white to-sky-50 flex items-center justify-center p-4">
@@ -1682,16 +1742,16 @@ const App: React.FC = () => {
 
     switch (activeTab) {
       case 'settings': return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile} />;
-      case 'dashboard': return <Dashboard items={items} sales={sales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
+      case 'dashboard': return <Dashboard items={items} sales={activeSales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
       case 'master-items': return <MasterData type="items" items={items} priceHistory={priceHistory} onAddItem={addItem} onImportItems={importItems} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onAdjustStockBulk={canAdjustStock ? handleStockAdjustmentBulk : undefined} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
       case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
       case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} cashSessions={cashSessions} storeProfile={storeProfile} onCompleteSale={addSale} onNavigate={setActiveTab} />;
-      case 'sales-list': return <SalesList sales={sales} onInitiateReturn={(invNo) => { setPreselectedReturnInvoice(invNo); setActiveTab('returns'); }} />;
-      case 'returns': return <Returns sales={sales} returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
+      case 'sales-list': return <SalesList sales={sales} storeProfile={storeProfile} onVoidSale={hasPermission(currentUser, 'sale.void') ? voidSale : undefined} onInitiateReturn={(invNo) => { setPreselectedReturnInvoice(invNo); setActiveTab('returns'); }} />;
+      case 'returns': return <Returns sales={activeSales}  returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
       case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} onUpdateItemsBulk={hasPermission(currentUser, 'item.edit') ? updateItemsBulk : undefined} currentUser={currentUser} />;
       case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} canAdjust={canAdjustStock} />;
-      case 'accounting': return <Accounting accounts={accounts} sales={sales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
-      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={sales} returns={returns} purchaseOrders={purchaseOrders} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
+      case 'accounting': return <Accounting accounts={accounts} sales={activeSales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
+      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={activeSales} returns={returns} purchaseOrders={purchaseOrders} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
       case 'media-vault': return (
         <MediaVault
           currentUser={currentUser}
@@ -1704,7 +1764,7 @@ const App: React.FC = () => {
       case 'erp-control': return (
         <ERPControlTower
           currentUser={currentUser}
-          sales={sales}
+          sales={activeSales}
           purchaseOrders={purchaseOrders}
           returns={returns}
           items={items}
@@ -1718,7 +1778,7 @@ const App: React.FC = () => {
       case 'ai-consultant': return (
         <AIConsultant
           items={items}
-          sales={sales}
+          sales={activeSales}
           accounts={accounts}
           messages={aiConsultantHistory}
           onUpdateMessages={setAiConsultantHistory}
@@ -1739,7 +1799,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={sales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError}>
+    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={activeSales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError}>
       <ErrorBoundary key={activeTab} fallbackTitle="Halaman ini">
         <Suspense fallback={<PageLoadingFallback />}>
           {renderContent()}

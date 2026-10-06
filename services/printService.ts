@@ -1,4 +1,5 @@
 import { Sale, PurchaseOrder, StoreProfile } from '../types';
+import { describeSaleLine } from './pricing';
 
 const escapeHtml = (value: unknown): string => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -65,6 +66,7 @@ export const printReceipt = (sale: Sale, profile?: StoreProfile) => {
           ${profile?.phone ? `<div>${escapeHtml(profile.phone)}</div>` : ''}
           <div>--------------------------</div>
         </div>
+        ${sale.status === 'VOID' ? '<div class="center bold" style="font-size: 14px;">*** VOID / DIBATALKAN ***</div>' : ''}
         <div>No: ${escapeHtml(sale.invoiceNo)}</div>
         <div>Tgl: ${escapeHtml(sale.date)}</div>
         <div>Pel: ${escapeHtml(sale.customerName)}</div>
@@ -72,7 +74,7 @@ export const printReceipt = (sale: Sale, profile?: StoreProfile) => {
         ${sale.items.map(item => `
           <div class="bold">${escapeHtml(item.name.toUpperCase())}</div>
           <div class="item-row">
-            <span>${item.qty} x ${rupiah(item.price)}</span>
+            <span>${escapeHtml(describeSaleLine(item).qtyText)} x ${describeSaleLine(item).priceText}</span>
             <span>${rupiah(item.total)}</span>
           </div>
         `).join('')}

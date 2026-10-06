@@ -35,6 +35,9 @@ const mergeById = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
     const existing = merged.get(item.id);
     if (!existing) {
       merged.set(item.id, item);
+    } else if (item.updatedAt || existing.updatedAt) {
+      // Dokumen yang diperbarui (mis. penjualan di-void) — versi terbaru menang.
+      if ((item.updatedAt || item.createdAt || '') > (existing.updatedAt || existing.createdAt || '')) merged.set(item.id, item);
     } else if (item.createdAt && existing.createdAt) {
       if (new Date(item.createdAt) > new Date(existing.createdAt)) {
         merged.set(item.id, item);

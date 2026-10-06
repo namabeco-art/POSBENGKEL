@@ -1,4 +1,5 @@
 import { Sale, StoreProfile } from '../types';
+import { describeSaleLine } from './pricing';
 
 export const isWebSerialSupported = () => {
   return 'serial' in navigator;
@@ -96,7 +97,8 @@ export const printReceiptWebSerial = async (sale: Sale, profile?: StoreProfile) 
   // Items
   for (const item of sale.items) {
     cmds += item.name + NEWLINE;
-    const priceLine = `${item.qty} x ${rp(item.price)}`;
+    const label = describeSaleLine(item);
+    const priceLine = `${label.qtyText} x ${label.priceText}`;
     const totalLine = rp(item.total);
     cmds += formatLine(priceLine, totalLine) + NEWLINE;
   }

@@ -50,8 +50,8 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
     return Object.values(groups);
   }, [logs]);
 
-  const filteredItems = useMemo(() => items.filter(i => 
-    i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+  const filteredItems = useMemo(() => items.filter(i => !i.isBundle).filter(i =>
+    i.name.toLowerCase().includes(searchTerm.toLowerCase()) ||  
     i.code.toLowerCase().includes(searchTerm.toLowerCase()) ||
     i.barcode.includes(searchTerm)
   ), [items, searchTerm]);
@@ -109,7 +109,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
     // Semua barang, agar petugas gudang tinggal mengisi kolom Stok Fisik.
     downloadCsv(`template_opname_${new Date().toISOString().slice(0, 10)}.csv`, [
       ['Kode Barang', 'Barcode', 'Nama Barang', 'Stok Sistem', 'Stok Fisik'],
-      ...items.map(i => [i.code, i.barcode, i.name, i.stock, '']),
+      ...items.filter(i => !i.isBundle).map(i => [i.code, i.barcode, i.name, i.stock, '']),
     ]);
   };
 

@@ -155,11 +155,23 @@ export interface PurchaseOrder {
 export interface SaleItem {
   itemId: string;
   name: string;
+  /** Jumlah dalam satuan dasar (dipakai untuk stok & retur). */
   qty: number;
+  /** Harga per satuan dasar. */
   price: number;
-  /** Harga pokok saat transaksi terjadi. Jangan dihitung ulang dari master barang. */
+  /** Harga pokok per satuan dasar saat transaksi terjadi. Jangan dihitung ulang dari master barang. */
   costPrice?: number;
   total: number;
+  /** Satuan yang dijual, mis. "Dus (12)". Kosong = satuan dasar. */
+  unitName?: string;
+  /** Jumlah dalam satuan yang dijual (mis. 2 Dus). */
+  unitQty?: number;
+  /** Harga per satuan yang dijual. */
+  unitPrice?: number;
+  /** Isi satuan yang dijual dalam satuan dasar (mis. 12). */
+  conversion?: number;
+  /** Barang paket: stok komponen yang dikurangi oleh baris ini (total, satuan dasar). */
+  components?: { itemId: string; name: string; qty: number }[];
 }
 
 export interface Sale {
@@ -185,6 +197,10 @@ export interface Sale {
   operatorId?: string;
   status?: 'COMPLETED' | 'VOID';
   cashSessionId?: string;
+  voidedAt?: string;
+  voidedBy?: string;
+  voidReason?: string;
+  updatedAt?: string;
 }
 
 export interface ReturnItem {
@@ -241,7 +257,7 @@ export interface InventoryMovement {
   id: string;
   itemId: string;
   itemName: string;
-  type: 'SALE' | 'RETURN' | 'PURCHASE_RECEIPT' | 'STOCK_OPNAME';
+  type: 'SALE' | 'RETURN' | 'PURCHASE_RECEIPT' | 'STOCK_OPNAME' | 'SALE_VOID';
   direction: 'IN' | 'OUT' | 'ADJUSTMENT';
   quantity: number;
   previousStock: number;
@@ -266,6 +282,7 @@ export interface AuditLog {
     | 'ITEM_UPDATED'
     | 'ITEM_DELETED'
     | 'SALE_COMPLETED'
+    | 'SALE_VOIDED'
     | 'RETURN_COMPLETED'
     | 'PO_CREATED'
     | 'PO_RECEIVED'
