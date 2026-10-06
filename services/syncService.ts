@@ -1,5 +1,6 @@
 import { getEnvConfig, getResolvedOpenRouterApiKey, getResolvedOpenRouterModel, getResolvedSupabaseAnonKey, getResolvedSupabaseBucket, getResolvedSupabaseUrl, hasEnvCloudConfig } from './appConfig';
 import { normalizeCloudProfile } from './cloudProfiles';
+import { CLOUD_AUTH_REQUIRED, getSupabaseAuthHeaders, isCloudAuthErrorResponse } from './cloudAuth';
 
 const STORAGE_CONFIG_KEY = 'HGROUP_CLOUD_CONFIG';
 const STORAGE_DB_LIST_KEY = 'HGROUP_SAVED_DB_LIST';
@@ -256,7 +257,7 @@ export const pushConfigToCloud = async (config: CloudConfig) => {
   const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
     method: 'POST',
     headers: {
-      ...getSupabaseHeaders(anonKey, 'application/json'),
+      ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'application/json')),
       'x-upsert': 'true',
     },
     body: payload,
@@ -483,6 +484,7 @@ export const withCloudInventoryLock = async <T>(
   const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
   let acquired = false;
   let unreachable = false;
+  let authDenied = false;
 
   for (let i = 0; i < maxRetries; i += 1) {
     const payload = JSON.stringify({
@@ -495,7 +497,7 @@ export const withCloudInventoryLock = async <T>(
       const createRes = await fetchWithTimeout(lockUrl, {
         method: 'POST',
         headers: {
-          ...getSupabaseHeaders(anonKey, 'application/json'),
+          ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'application/json')),
           'x-upsert': 'false',
         },
         body: payload,
@@ -505,9 +507,13 @@ export const withCloudInventoryLock = async <T>(
         acquired = true;
         break;
       }
+      if (await isCloudAuthErrorResponse(createRes)) {
+        authDenied = true; // RLS menolak: perangkat belum login cloud toko
+        break;
+      }
 
       // Check if existing lock is expired — if so, force overwrite
-      const lockDataRes = await fetchWithTimeout(lockUrl, { headers: getSupabaseHeaders(anonKey) });
+      const lockDataRes = await fetchWithTimeout(lockUrl, { headers: await getSupabaseAuthHeaders(baseUrl, anonKey) });
       if (lockDataRes.ok) {
         const lockRaw = await lockDataRes.text().catch(() => '');
         try {
@@ -515,7 +521,7 @@ export const withCloudInventoryLock = async <T>(
           const expiresAt = new Date(lockData?.expiresAt || 0).getTime();
           if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < Date.now()) {
             // Lock expired — force delete and retry
-            await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+            await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: await getSupabaseAuthHeaders(baseUrl, anonKey) }).catch(() => undefined);
             continue; // retry immediately
           }
         } catch { /* ignore parse error */ }
@@ -528,12 +534,13 @@ export const withCloudInventoryLock = async <T>(
     await sleep(retryMs);
   }
 
+  if (authDenied) throw new Error(`${CLOUD_AUTH_REQUIRED}::Perangkat belum login ke cloud toko. Transaksi disimpan lokal.`);
   if (!acquired) throw new Error(unreachable ? 'Cloud tidak terjangkau (offline). Transaksi disimpan lokal.' : 'Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
   try {
     return await task();
   } finally {
     if (acquired) {
-      await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+      await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: await getSupabaseAuthHeaders(baseUrl, anonKey) }).catch(() => undefined);
     }
   }
 };
@@ -563,13 +570,16 @@ export const pushToCloud = async (data: any) => {
   const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
     method: 'POST',
     headers: {
-      ...getSupabaseHeaders(anonKey, 'text/plain'),
+      ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'text/plain')),
       'x-upsert': 'true',
     },
     body: encodedData,
   });
 
-  if (!response.ok) throw new Error(`SUPABASE_PUSH_FAILED_${response.status}`);
+  if (!response.ok) {
+    if (await isCloudAuthErrorResponse(response)) throw new Error(`${CLOUD_AUTH_REQUIRED}::SUPABASE_PUSH_DENIED_${response.status}`);
+    throw new Error(`SUPABASE_PUSH_FAILED_${response.status}`);
+  }
   return response.json().catch(() => ({ success: true }));
 };
 
@@ -596,10 +606,12 @@ export const pullFromCloud = async () => {
 
   const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
   const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
-    headers: getSupabaseHeaders(anonKey),
+    headers: await getSupabaseAuthHeaders(baseUrl, anonKey),
   });
   if (!response.ok) {
+    // Bucket private menyembunyikan objek dari yang tidak berhak (tampak "not found"), jadi cek not_found dulu.
     if (await isMissingObjectResponse(response)) return null; // workspace baru, belum ada data
+    if (await isCloudAuthErrorResponse(response)) throw new Error(`${CLOUD_AUTH_REQUIRED}::SUPABASE_PULL_DENIED_${response.status}`);
     throw new Error(`SUPABASE_PULL_FAILED_${response.status}`);
   }
   const encodedData = await response.text().catch(() => '');

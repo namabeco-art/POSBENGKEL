@@ -28,12 +28,14 @@ interface LayoutProps {
   onManualSync: () => void;
   lastSyncTime?: string | null;
   syncError?: boolean;
+  /** Cloud menolak perangkat ini (belum login cloud toko). */
+  cloudAuthRequired?: boolean;
 }
 
 const Layout: React.FC<LayoutProps> = ({ 
   children, activeTab, setActiveTab, currentUser, onLogout, 
   items, sales, accounts, floatingMessages, onUpdateMessages, 
-  isSyncing, onManualSync, lastSyncTime, syncError
+  isSyncing, onManualSync, lastSyncTime, syncError, cloudAuthRequired = false
 }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -241,6 +243,16 @@ const Layout: React.FC<LayoutProps> = ({
             <div className="md:hidden"><SyncBadge /></div>
           </div>
         </header>
+
+        {cloudAuthRequired && (
+          <div className="px-4 md:px-6 py-2.5 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 flex flex-wrap items-center gap-2" role="alert">
+            <AlertCircle size={14} className="shrink-0" />
+            <span>Data perangkat ini <b>belum terkirim ke cloud</b>: cloud toko menolak perangkat yang belum login.</span>
+            {canAccessTab(currentUser, 'settings')
+              ? <button onClick={() => setActiveTab('settings')} className="underline font-semibold">Hubungkan di Pengaturan</button>
+              : <span>Minta owner menghubungkan perangkat ini.</span>}
+          </div>
+        )}
 
         {/* Page Content */}
         <div className={`flex-1 overflow-y-auto scrollbar-thin ${activeTab === 'pos' ? '' : 'p-4 md:p-6'}`}>

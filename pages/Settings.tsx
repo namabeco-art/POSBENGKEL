@@ -12,6 +12,7 @@ import {
 import { parseOpenRouterError, requestOpenRouterReply } from '../services/aiService';
 import { StoreProfile } from '../types';
 import { isThermalPrinterEnabled, isWebSerialSupported, setThermalPrinterEnabled } from '../services/thermalPrinterService';
+import CloudConnectPanel from '../components/CloudConnectPanel';
 
 interface SettingsProps {
   onCloudConfigChange?: () => void;
@@ -19,9 +20,11 @@ interface SettingsProps {
   onImportBackup?: (file: File) => Promise<void> | void;
   storeProfile?: StoreProfile;
   onSaveStoreProfile?: (profile: StoreProfile) => void;
+  cloudAuthRequired?: boolean;
+  onCloudConnected?: () => void | Promise<void>;
 }
 
-const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup, onImportBackup, storeProfile, onSaveStoreProfile }) => {
+const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup, onImportBackup, storeProfile, onSaveStoreProfile, cloudAuthRequired = false, onCloudConnected }) => {
   const [profileForm, setProfileForm] = useState<StoreProfile>({
     name: storeProfile?.name || '',
     address: storeProfile?.address || '',
@@ -161,6 +164,19 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
           </p>
         )}
       </div>
+
+      {/* Keamanan cloud: login perangkat ke akun cloud toko */}
+      {hasCloudDb && cloudConfig.enabled && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-3">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Keamanan Cloud</h3>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Setelah menjalankan <code>supabase/setup.sql</code>, data toko hanya bisa dibaca perangkat yang login dengan akun cloud toko. Lihat README bagian "Mengamankan Cloud".
+            </p>
+          </div>
+          <CloudConnectPanel authRequired={cloudAuthRequired} onConnected={onCloudConnected} />
+        </div>
+      )}
 
       {/* Profil toko & struk */}
       {onSaveStoreProfile && (

@@ -29,6 +29,10 @@ Bisa dipakai langsung tanpa internet (mode lokal) atau disinkronkan antar perang
 - **Tutup shift**: kas seharusnya = modal awal + penjualan tunai + pelunasan tunai − refund retur tunai − pengeluaran. Selisih ditampilkan saat shift ditutup.
 - **Stok opname massal**: Stok Opname → Template → isi kolom *Stok Fisik* → Import. Perubahan tercatat di kartu stok.
 - **Profil toko & printer**: Pengaturan → Profil Toko & Struk (nama/alamat/kaki struk) dan opsi cetak langsung ke printer thermal USB (Chrome/Edge).
+- **Jual per satuan besar**: Barang → edit → *Satuan Jual* → tambah mis. "Dus (12)" dengan harga sendiri. Di kasir, pilih satuan pada baris keranjang. Stok tetap dihitung dalam satuan dasar; harga Dus ikut naik/turun saat harga Level 1 diubah lewat update massal.
+- **Barang paket**: stok paket dihitung dari stok komponennya; saat paket terjual, stok komponen yang berkurang (dan kembali saat retur/void).
+- **Void transaksi**: Penjualan → detail faktur → *VOID* (perlu izin `sale.void`, default Owner/Manager). Untuk salah input di shift yang masih berjalan; stok, kas/bank, piutang, dan poin dikembalikan. Faktur dari shift yang sudah ditutup atau yang sudah diretur harus lewat menu Retur.
+- **Baca daftar harga supplier (OCR)**: Media → upload foto price list. Model default memakai Gemini Flash terbaru di OpenRouter (bisa diganti lewat `VITE_OPENROUTER_VISION_MODEL`). Tanpa cloud, teks hasil baca tetap disimpan di perangkat untuk AI.
 
 ## Cara Pakai (5 Menit)
 
@@ -75,10 +79,22 @@ Jika punya 2+ komputer/tablet yang perlu data sama:
 2. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY`
 3. Set `VITE_CLOUD_ENABLED=true`
 
-### Catatan Sinkronisasi & Keamanan Cloud
+### Catatan Sinkronisasi
 - Perubahan dari beberapa perangkat digabung per bagian data (harga, stok, profil), jadi harga baru dari owner dan penjualan kasir yang terjadi bersamaan sama-sama tersimpan.
-- Batasan: jika dua perangkat sama-sama **offline** lalu menjual barang yang sama, stok bisa selisih — lakukan stok opname berkala.
-- Data cloud disimpan sebagai satu file di Supabase Storage dan dibaca dengan *anon key* yang ikut terbawa di aplikasi. Jadikan bucket **private** dan batasi akses dengan kebijakan RLS; jangan bagikan URL aplikasi ke publik. Untuk keamanan penuh dibutuhkan login Supabase Auth (belum tersedia).
+- Stok digabung dari kartu stok: bila dua kasir sama-sama **offline** dan menjual barang yang sama, stok akhir tetap benar setelah keduanya online (mis. 24 − 2 − 1 = 21). Hasil stok opname terakhir menjadi patokan.
+- Perangkat baru yang bergabung ke workspace memakai data toko dari cloud apa adanya (data contoh bawaan tidak ikut tercampur). Hubungkan perangkat ke cloud **sebelum** mulai bertransaksi.
+
+### Mengamankan Cloud (wajib sebelum dipakai sungguhan)
+Tanpa langkah ini, siapa pun yang tahu URL project dan *anon key* (keduanya ikut terbawa di aplikasi) bisa membaca seluruh data toko, termasuk hash password user.
+
+1. Supabase Dashboard → **SQL Editor** → jalankan isi file [`supabase/setup.sql`](supabase/setup.sql). Bucket menjadi private dan hanya akun anggota toko yang boleh membaca/menulis.
+2. Hapus policy lama di `storage.objects` yang memberi akses ke `anon`/`public` (perintah untuk melihatnya ada di bagian 5 file SQL).
+3. **Authentication → Users → Add user**: buat akun cloud toko (email + password kuat, centang *Auto Confirm*).
+4. Daftarkan akun itu ke Store ID toko dengan perintah `insert into public.pos_workspace_members ...` di bagian bawah file SQL.
+5. Di tiap perangkat: layar login atau **Pengaturan → Keamanan Cloud** → *Hubungkan ke Cloud* dengan email & password akun cloud toko (cukup sekali; token diperbarui otomatis). Login staf (admin/kasir) tetap seperti biasa.
+
+Perangkat yang belum terhubung tetap bisa bertransaksi secara lokal, tetapi datanya tidak terkirim; aplikasi menampilkan peringatan sampai perangkat dihubungkan. Jika perangkat hilang, ganti password akun cloud di Supabase.
+
 - Ganti password default `admin`/`kasir`/`gudang` sebelum dipakai.
 
 ## Pengujian

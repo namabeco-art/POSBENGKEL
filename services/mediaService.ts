@@ -1,17 +1,12 @@
 import { MediaAsset } from '../types';
 import { getResolvedSupabaseAnonKey, getResolvedSupabaseBucket, getResolvedSupabaseUrl } from './appConfig';
 import { getCloudConfig } from './syncService';
+import { getSupabaseAuthHeaders } from './cloudAuth';
 
 const sanitizeBaseUrl = (url: string) => url.replace(/\/+$/, '');
 
-const buildHeaders = (anonKey: string, contentType?: string) => {
-  const headers: Record<string, string> = {
-    apikey: anonKey,
-    Authorization: `Bearer ${anonKey}`,
-  };
-  if (contentType) headers['Content-Type'] = contentType;
-  return headers;
-};
+/** Header dengan token login perangkat (bila ada) agar lolos RLS bucket private. */
+const buildHeaders = (baseUrl: string, anonKey: string, contentType?: string) => getSupabaseAuthHeaders(baseUrl, anonKey, contentType);
 
 const createStoragePath = (storeId: string, fileName: string) => {
   const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
@@ -47,7 +42,7 @@ export const uploadMediaToSupabase = async (
   const uploadResponse = await fetch(uploadUrl, {
     method: 'POST',
     headers: {
-      ...buildHeaders(anonKey, file.type || 'application/octet-stream'),
+      ...(await buildHeaders(baseUrl, anonKey, file.type || 'application/octet-stream')),
       'x-upsert': 'false',
     },
     body: file,
@@ -60,7 +55,7 @@ export const uploadMediaToSupabase = async (
 
   const signedResponse = await fetch(`${baseUrl}/storage/v1/object/sign/${encodeURIComponent(bucket)}/${storagePath}`, {
     method: 'POST',
-    headers: buildHeaders(anonKey, 'application/json'),
+    headers: await buildHeaders(baseUrl, anonKey, 'application/json'),
     body: JSON.stringify({ expiresIn: 60 * 60 * 24 * 7 }),
   });
   const signedData = await signedResponse.json().catch(() => ({}));
@@ -95,7 +90,7 @@ export const refreshSupabaseSignedUrl = async (asset: MediaAsset): Promise<strin
 
   const signedResponse = await fetch(`${baseUrl}/storage/v1/object/sign/${encodeURIComponent(bucket)}/${asset.storagePath}`, {
     method: 'POST',
-    headers: buildHeaders(anonKey, 'application/json'),
+    headers: await buildHeaders(baseUrl, anonKey, 'application/json'),
     body: JSON.stringify({ expiresIn: 60 * 60 * 24 * 7 }),
   });
   const signedData = await signedResponse.json().catch(() => ({}));
@@ -112,6 +107,6 @@ export const deleteSupabaseMedia = async (asset: MediaAsset): Promise<void> => {
   if (!baseUrl || !anonKey || !bucket) return;
   await fetch(`${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${asset.storagePath}`, {
     method: 'DELETE',
-    headers: buildHeaders(anonKey),
+    headers: await buildHeaders(baseUrl, anonKey),
   }).catch(() => undefined);
 };

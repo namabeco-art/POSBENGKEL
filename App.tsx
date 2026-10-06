@@ -20,6 +20,14 @@ import { buildPriceChangeLogs, getItemCost, PRICE_HISTORY_LIMIT, syncUnitPrices 
 import { stampAppData } from './services/syncMeta';
 import { AUDIT_LOG_LIMIT } from './services/mergeService';
 import ErrorBoundary from './components/ErrorBoundary';
+import CloudConnectPanel from './components/CloudConnectPanel';
+import { isCloudAuthError, onCloudSessionChange } from './services/cloudAuth';
+
+/** Perangkat yang belum punya transaksi apa pun (data bawaan/contoh saja). */
+const hasLocalTransactions = (data: Partial<AppData>) => Boolean(
+  data.sales?.length || data.inventoryMovements?.length || data.purchaseOrders?.length || data.cashSessions?.length
+  || data.returns?.length || data.paymentRecords?.length || data.cashExpenses?.length,
+);
 
 /** Workspace (Store ID) pemilik data lokal di perangkat ini. */
 const DATA_WORKSPACE_KEY = 'POS_DATA_WORKSPACE';
@@ -80,6 +88,8 @@ const App: React.FC = () => {
   const [isSyncing, setIsSyncing] = useState(false);
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const [syncError, setSyncError] = useState(false);
+  /** Cloud menolak perangkat ini (RLS) — perangkat perlu login cloud toko. */
+  const [cloudAuthRequired, setCloudAuthRequired] = useState(false);
   
   const [isCloudActive, setIsCloudActive] = useState(hasCloudConfig());
   const [savedDbs, setSavedDbs] = useState<any[]>(getCloudProfiles());
@@ -194,17 +204,30 @@ const App: React.FC = () => {
       console.warn(`[Sync] Workspace berganti dari ${dataWorkspace} ke ${storeId}; data lokal diganti data cloud.`);
       return { ...local, ...remote } as AppData;
     }
+    // Perangkat baru yang belum pernah sinkron & belum punya transaksi: pakai data toko dari cloud apa adanya.
+    // Tanpa ini, data contoh bawaan (barang, pelanggan, user demo) ikut tercampur ke katalog toko.
+    if (!dataWorkspace && !hasLocalTransactions(local)) return { ...local, ...remote } as AppData;
     return mergeAppData(local, remote) as AppData;
+  }, []);
+
+  /** Tandai data perangkat ini sudah menyatu dengan workspace cloud aktif (dipanggil setelah push berhasil). */
+  const markWorkspaceSynced = useCallback(() => {
+    const storeId = getCloudConfig().storeId;
+    if (storeId) localStorage.setItem(DATA_WORKSPACE_KEY, storeId);
+    setCloudAuthRequired(false);
+  }, []);
+
+  /** Catat bila cloud menolak karena perangkat belum login (RLS). */
+  const noteCloudError = useCallback((error: unknown) => {
+    if (isCloudAuthError(error)) setCloudAuthRequired(true);
   }, []);
 
   /** Ambil data cloud lalu gabungkan dengan data lokal terbaru. */
   const pullAndMerge = useCallback(async (): Promise<boolean> => {
     const cloudData = await pullFromCloud();
-    if (!cloudData || typeof cloudData !== 'object') {
-      const storeId = getCloudConfig().storeId;
-      if (storeId) localStorage.setItem(DATA_WORKSPACE_KEY, storeId); // workspace baru: data lokal akan diunggah
-      return false;
-    }
+    // Kosong bisa berarti workspace baru ATAU bucket private menyembunyikan data dari perangkat yang belum login,
+    // jadi workspace baru ditandai tersinkron hanya setelah push pertama berhasil.
+    if (!cloudData || typeof cloudData !== 'object') return false;
     // Snapshot lokal diambil SETELAH request selesai agar perubahan selama menunggu jaringan tidak hilang.
     applyRemoteData(mergeWithRemote(buildDataSnapshot(), cloudData));
     return true;
@@ -231,16 +254,18 @@ const App: React.FC = () => {
       const remote = await pullFromCloud();
       const merged = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
       await pushToCloud(merged);
+      markWorkspaceSynced();
       if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), merged) as AppData);
       setLastSyncTime(new Date().toLocaleTimeString());
       setSyncError(false);
-    } catch {
+    } catch (error) {
       // Gagal sementara (offline/server sibuk): coba lagi nanti, data tetap aman di lokal.
-      schedulePush(PUSH_RETRY_MS);
+      noteCloudError(error);
+      schedulePush(isCloudAuthError(error) ? PUSH_RETRY_MS * 4 : PUSH_RETRY_MS);
     } finally {
       pushInFlight.current = false;
     }
-  }, [applyRemoteData, buildDataSnapshot, mergeWithRemote, schedulePush]);
+  }, [applyRemoteData, buildDataSnapshot, markWorkspaceSynced, mergeWithRemote, noteCloudError, schedulePush]);
   runCloudPushRef.current = runCloudPush;
 
   const handleManualRefresh = useCallback(async (showFeedback = true) => {
@@ -259,11 +284,22 @@ const App: React.FC = () => {
       if (showFeedback) alert("Database berhasil diperbarui dari Cloud!");
     } catch (e) {
       setSyncError(true);
-      if (showFeedback) alert("Gagal sinkronisasi Cloud. Periksa koneksi atau kredensial.");
+      noteCloudError(e);
+      if (showFeedback) alert(isCloudAuthError(e) ? 'Cloud menolak perangkat ini. Hubungkan perangkat ke cloud toko di Pengaturan.' : "Gagal sinkronisasi Cloud. Periksa koneksi atau kredensial.");
     } finally {
       setIsSyncing(false);
     }
   }, [pullAndMerge]);
+
+  const handleCloudConnected = useCallback(async () => {
+    setCloudAuthRequired(false);
+    await handleManualRefresh(false);
+    schedulePush(500);
+  }, [handleManualRefresh, schedulePush]);
+
+  useEffect(() => onCloudSessionChange(session => {
+    if (!session && hasCloudConfig()) setCloudAuthRequired(true);
+  }), []);
 
   const handleLogout = useCallback(() => {
     setCurrentUser(null);
@@ -455,6 +491,7 @@ const App: React.FC = () => {
       const remote = await pullFromCloud();
       const dataToSave = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
       await pushToCloud(dataToSave);
+      markWorkspaceSynced();
       if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), dataToSave) as AppData);
       lastPushTime.current = Date.now();
       setLastSyncTime(new Date().toLocaleTimeString());
@@ -472,11 +509,12 @@ const App: React.FC = () => {
       alert("Sinkronisasi manual berhasil dikirim ke Cloud!");
     } catch (e) {
       setSyncError(true);
-      alert("Gagal mengirim sinkronisasi manual.");
+      noteCloudError(e);
+      alert(isCloudAuthError(e) ? 'Cloud menolak perangkat ini. Hubungkan perangkat ke cloud toko di Pengaturan.' : "Gagal mengirim sinkronisasi manual.");
     } finally {
       setIsSyncing(false);
     }
-  }, [appendAuditLog, applyRemoteData, buildDataSnapshot, currentUser, mergeWithRemote]);
+  }, [appendAuditLog, applyRemoteData, buildDataSnapshot, currentUser, markWorkspaceSynced, mergeWithRemote, noteCloudError]);
 
   const switchDb = async (config: any) => {
     saveCloudConfig(config);
@@ -643,6 +681,7 @@ const App: React.FC = () => {
           await pushToCloud(nextCloud);
         });
         if (!nextCloud) throw new Error('Mutasi cloud tidak menghasilkan data.');
+        markWorkspaceSynced();
         // Gabungkan dengan perubahan lokal yang terjadi selama menunggu jaringan.
         const finalData = mergeAppData(buildDataSnapshot(), nextCloud) as AppData;
         applyRemoteData(finalData);
@@ -653,6 +692,7 @@ const App: React.FC = () => {
       } catch (error: any) {
         if (mutationError) throw mutationError;
         setSyncError(true);
+        noteCloudError(error);
         console.warn('[Sync] Cloud gagal; menggunakan penyimpanan lokal:', error?.message);
       } finally {
         setIsSyncing(false);
@@ -662,7 +702,7 @@ const App: React.FC = () => {
     const nextLocal = mutate(buildDataSnapshot());
     applyData(nextLocal); // subscriber menyimpan ke lokal & menjadwalkan push saat online
     return nextLocal;
-  }, [applyData, applyRemoteData, buildDataSnapshot, mergeWithRemote]);
+  }, [applyData, applyRemoteData, buildDataSnapshot, markWorkspaceSynced, mergeWithRemote, noteCloudError]);
 
   // HANDLERS WITH FUNCTIONAL UPDATES (PREV STATE SAFETY)
   const logPriceChanges = (before: Item[], after: Item[], source: PriceChangeSource, note?: string) => {
@@ -1701,6 +1741,12 @@ const App: React.FC = () => {
                 </button>
               </form>
 
+              {hasCloudConfig() && (
+                <div className="mt-5">
+                  <CloudConnectPanel compact authRequired={cloudAuthRequired} onConnected={handleCloudConnected} />
+                </div>
+              )}
+
               {/* Hint — only show if default password hasn't been changed */}
               {users.some(u => u.passwordHash === 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3') && (
               <div className="mt-6 flex items-center gap-3 p-3 bg-gradient-to-r from-slate-50 to-indigo-50/30 rounded-xl">
@@ -1741,7 +1787,7 @@ const App: React.FC = () => {
     }
 
     switch (activeTab) {
-      case 'settings': return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile} />;
+      case 'settings': return <Settings cloudAuthRequired={cloudAuthRequired} onCloudConnected={handleCloudConnected} onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile} />;
       case 'dashboard': return <Dashboard items={items} sales={activeSales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
       case 'master-items': return <MasterData type="items" items={items} priceHistory={priceHistory} onAddItem={addItem} onImportItems={importItems} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onAdjustStockBulk={canAdjustStock ? handleStockAdjustmentBulk : undefined} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
       case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
@@ -1799,7 +1845,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={activeSales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError}>
+    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={activeSales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError} cloudAuthRequired={cloudAuthRequired}>
       <ErrorBoundary key={activeTab} fallbackTitle="Halaman ini">
         <Suspense fallback={<PageLoadingFallback />}>
           {renderContent()}
