@@ -112,3 +112,44 @@ describe('sinkronisasi: merge antar perangkat', () => {
     expect(merged.priceHistory!.map(entry => entry.id)).toEqual(['P2', 'P1']);
   });
 });
+
+describe('sinkronisasi: rekonsiliasi stok dari kartu stok (offline)', () => {
+  const movement = (id: string, direction: 'IN' | 'OUT' | 'ADJUSTMENT', quantity: number, previousStock: number, newStock: number, createdAt: string) => ({
+    id, itemId: 'I1', itemName: 'Oli', type: direction === 'ADJUSTMENT' ? 'STOCK_OPNAME' as const : direction === 'OUT' ? 'SALE' as const : 'PURCHASE_RECEIPT' as const,
+    direction, quantity, previousStock, newStock, referenceNo: id, warehouseId: 'W1', operatorName: 'X', createdAt,
+  });
+  const base = movement('M0', 'IN', 24, 0, 24, '2026-10-06T07:00:00.000Z');
+
+  it('dua perangkat offline sama-sama menjual: stok = 24 - 2 - 1 = 21', () => {
+    const local = { items: [item({ stock: 22, fieldUpdatedAt: { stock: T2 }, updatedAt: T2 })], inventoryMovements: [movement('A1', 'OUT', 2, 24, 22, T2), base] };
+    const remote = { items: [item({ stock: 23, fieldUpdatedAt: { stock: T3 }, updatedAt: T3 })], inventoryMovements: [movement('B1', 'OUT', 1, 24, 23, T3), base] };
+    expect(mergeAppData(local, remote).items![0].stock).toBe(21);
+    expect(mergeAppData(remote, local).items![0].stock).toBe(21);
+  });
+
+  it('hanya cloud yang punya penjualan baru: pakai stok cloud', () => {
+    const local = { items: [item({ stock: 24 })], inventoryMovements: [base] };
+    const remote = { items: [item({ stock: 23, fieldUpdatedAt: { stock: T3 } })], inventoryMovements: [movement('B1', 'OUT', 1, 24, 23, T3), base] };
+    expect(mergeAppData(local, remote).items![0].stock).toBe(23);
+  });
+
+  it('opname setelah penjualan di perangkat lain: hasil hitung fisik jadi patokan', () => {
+    // Kasir offline menjual 1 pada T1; gudang menghitung fisik 20 pada T3 (sudah termasuk barang yang terjual).
+    const kasir = { items: [item({ stock: 23, fieldUpdatedAt: { stock: T1 } })], inventoryMovements: [movement('S1', 'OUT', 1, 24, 23, T1), base] };
+    const gudang = { items: [item({ stock: 20, fieldUpdatedAt: { stock: T3 } })], inventoryMovements: [movement('O1', 'ADJUSTMENT', 4, 24, 20, T3), base] };
+    expect(mergeAppData(kasir, gudang).items![0].stock).toBe(20);
+    expect(mergeAppData(gudang, kasir).items![0].stock).toBe(20);
+  });
+
+  it('penjualan sesudah opname tetap mengurangi hasil opname', () => {
+    const gudang = { items: [item({ stock: 20, fieldUpdatedAt: { stock: T1 } })], inventoryMovements: [movement('O1', 'ADJUSTMENT', 4, 24, 20, T1), base] };
+    const kasir = { items: [item({ stock: 22, fieldUpdatedAt: { stock: T3 } })], inventoryMovements: [movement('S1', 'OUT', 2, 24, 22, T3), base] };
+    expect(mergeAppData(gudang, kasir).items![0].stock).toBe(18);
+  });
+
+  it('penerimaan barang offline + penjualan di perangkat lain dijumlahkan', () => {
+    const gudang = { items: [item({ stock: 34, fieldUpdatedAt: { stock: T2 } })], inventoryMovements: [movement('P1', 'IN', 10, 24, 34, T2), base] };
+    const kasir = { items: [item({ stock: 21, fieldUpdatedAt: { stock: T3 } })], inventoryMovements: [movement('S1', 'OUT', 3, 24, 21, T3), base] };
+    expect(mergeAppData(gudang, kasir).items![0].stock).toBe(31);
+  });
+});

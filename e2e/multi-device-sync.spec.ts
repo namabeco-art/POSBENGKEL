@@ -30,7 +30,9 @@ const seedData = (): AppData => ({
 /** Server Supabase Storage palsu yang dipakai bersama oleh semua perangkat. */
 const createFakeCloud = () => {
   const objects = new Map<string, string>();
-  const handler = async (route: Route) => {
+  const offlineContexts = new Set<BrowserContext>();
+  const handler = (context: BrowserContext) => async (route: Route) => {
+    if (offlineContexts.has(context)) return route.abort('internetdisconnected');
     const request = route.request();
     const url = new URL(request.url());
     if (url.pathname.startsWith('/auth/v1/health')) return route.fulfill({ status: 200, body: '{}' });
@@ -55,7 +57,10 @@ const createFakeCloud = () => {
   return {
     objects,
     read: (): AppData => decode(objects.get(DATA_PATH)!),
-    attach: (context: BrowserContext) => context.route(`${SUPABASE}/**`, handler),
+    attach: (context: BrowserContext) => context.route(`${SUPABASE}/**`, handler(context)),
+    setOffline: (context: BrowserContext, offline: boolean) => {
+      if (offline) offlineContexts.add(context); else offlineContexts.delete(context);
+    },
   };
 };
 
@@ -83,10 +88,10 @@ const openDevice = async (browser: import('@playwright/test').Browser, cloud: Re
 
 const cloudItem = (cloud: ReturnType<typeof createFakeCloud>, id: string): Item | undefined => cloud.read().items.find(item => item.id === id);
 
-const sellOneOli = async (kasir: Page) => {
+const sellOneOli = async (kasir: Page, qty = 1) => {
   await kasir.getByRole('button', { name: 'Kasir', exact: true }).click();
   await kasir.getByPlaceholder('Cari barang / scan barcode...').fill('Oli Mesin');
-  await kasir.getByText('Oli Mesin 1L SAE 10W-40').first().click();
+  for (let i = 0; i < qty; i += 1) await kasir.getByText('Oli Mesin 1L SAE 10W-40').first().click();
   await kasir.getByRole('button', { name: /^bayar$/i }).click();
   await kasir.getByRole('button', { name: /SELESAI & SIMPAN/i }).click();
   await expect(kasir.getByText('TRANSAKSI BERHASIL')).toBeVisible();
@@ -157,4 +162,33 @@ test('barang yang dihapus owner tidak muncul lagi dari salinan perangkat kasir',
 
   await owner.context.close();
   await kasir.context.close();
+});
+
+test('dua kasir: satu offline menjual 2, satu online menjual 1 → stok akhir 21 di semua perangkat', async ({ browser }) => {
+  test.setTimeout(180_000);
+  const cloud = createFakeCloud();
+  cloud.objects.set(DATA_PATH, encode(seedData()));
+
+  const kasirA = await openDevice(browser, cloud, 'kasir');
+  const kasirB = await openDevice(browser, cloud, 'admin');
+
+  cloud.setOffline(kasirA.context, true);
+  await sellOneOli(kasirA.page, 2); // tersimpan lokal karena cloud tidak terjangkau
+  await sellOneOli(kasirB.page, 1);
+  await expect.poll(() => cloudItem(cloud, '1')!.stock).toBe(23);
+
+  cloud.setOffline(kasirA.context, false);
+  await kasirA.page.getByRole('button', { name: 'Sync' }).click();
+  // Push ulang otomatis setelah koneksi kembali membawa penjualan offline ke cloud.
+  await expect.poll(() => cloud.read().sales.length, { timeout: 40_000 }).toBe(2);
+  expect(cloudItem(cloud, '1')!.stock).toBe(21);
+
+  await kasirB.page.getByRole('button', { name: 'Sync' }).click();
+  for (const device of [kasirA, kasirB]) {
+    const local = await device.page.evaluate(() => JSON.parse(localStorage.getItem('HGROUP_ENTERPRISE_DATA') || '{}'));
+    expect(local.items.find((item: Item) => item.id === '1').stock).toBe(21);
+  }
+
+  await kasirA.context.close();
+  await kasirB.context.close();
 });

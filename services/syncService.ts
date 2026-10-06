@@ -444,6 +444,7 @@ export const withCloudInventoryLock = async <T>(
     const lockKey = `pos_lock:${storeId}:inventory`;
     const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
     let acquired = false;
+    let unreachable = false;
 
     for (let i = 0; i < maxRetries; i += 1) {
       try {
@@ -460,13 +461,13 @@ export const withCloudInventoryLock = async <T>(
           }
         }
       } catch {
-        // Network error — skip lock and proceed
+        unreachable = true; // jaringan putus — simpan lokal, sinkron nanti
         break;
       }
       await sleep(retryMs);
     }
 
-    if (!acquired) throw new Error('Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
+    if (!acquired) throw new Error(unreachable ? 'Cloud tidak terjangkau (offline). Transaksi disimpan lokal.' : 'Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
     try {
       return await task();
     } finally {
@@ -481,6 +482,7 @@ export const withCloudInventoryLock = async <T>(
   const lockUrl = buildStorageObjectUrl(baseUrl, bucket, lockPath);
   const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
   let acquired = false;
+  let unreachable = false;
 
   for (let i = 0; i < maxRetries; i += 1) {
     const payload = JSON.stringify({
@@ -519,14 +521,14 @@ export const withCloudInventoryLock = async <T>(
         } catch { /* ignore parse error */ }
       }
     } catch {
-      // Network error — skip lock and proceed
+      unreachable = true; // jaringan putus — simpan lokal, sinkron nanti
       break;
     }
 
     await sleep(retryMs);
   }
 
-  if (!acquired) throw new Error('Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
+  if (!acquired) throw new Error(unreachable ? 'Cloud tidak terjangkau (offline). Transaksi disimpan lokal.' : 'Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
   try {
     return await task();
   } finally {

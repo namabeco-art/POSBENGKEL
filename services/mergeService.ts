@@ -11,7 +11,7 @@
  *   from another device's stale copy.
  */
 
-import { AppData, DeletedRecord, StoreProfile } from '../types';
+import { AppData, DeletedRecord, InventoryMovement, Item, StoreProfile } from '../types';
 import { CUSTOMER_FIELD_GROUPS, ITEM_FIELD_GROUPS, mergeEntityByFieldGroups } from './syncMeta';
 import { PRICE_HISTORY_LIMIT } from './pricing';
 
@@ -98,6 +98,75 @@ const mergeByCode = <T extends EntityWithCode>(local: T[], remote: T[]): T[] => 
   return Array.from(merged.values());
 };
 
+/** Perubahan stok yang dihasilkan satu mutasi. Opname (ADJUSTMENT) dicatat sebagai selisih sebelum/sesudah. */
+export const movementDelta = (movement: InventoryMovement): number => {
+  if (movement.direction === 'OUT') return -movement.quantity;
+  if (movement.direction === 'IN') return movement.quantity;
+  return (movement.newStock ?? 0) - (movement.previousStock ?? 0);
+};
+
+/**
+ * Rekonsiliasi stok berbasis mutasi (kartu stok).
+ *
+ * Mutasi bersifat append-only dan digabung (union) dari semua perangkat, sedangkan angka stok di tiap
+ * perangkat sudah mencakup mutasinya sendiri. Jadi stok gabungan = stok satu sisi + mutasi yang hanya
+ * ada di sisi lain. Contoh: perangkat A offline menjual 2, perangkat B menjual 1 → 24 - 3 = 21,
+ * bukan 22 atau 23 seperti bila salah satu menimpa yang lain.
+ *
+ * Jika ada stok opname, hasil hitung fisik terakhir menjadi patokan: stok = hasil opname + semua
+ * mutasi yang terjadi sesudah opname tersebut.
+ */
+const reconcileStockWithMovements = (
+  mergedItems: Item[],
+  local: Partial<AppData>,
+  remote: Partial<AppData>,
+): Item[] => {
+  const localMovements = local.inventoryMovements || [];
+  const remoteMovements = remote.inventoryMovements || [];
+  const localIds = new Set(localMovements.map(movement => movement.id));
+  const remoteIds = new Set(remoteMovements.map(movement => movement.id));
+  const localOnly = new Map<string, InventoryMovement[]>();
+  const remoteOnly = new Map<string, InventoryMovement[]>();
+  localMovements.forEach(movement => {
+    if (remoteIds.has(movement.id)) return;
+    localOnly.set(movement.itemId, [...(localOnly.get(movement.itemId) || []), movement]);
+  });
+  remoteMovements.forEach(movement => {
+    if (localIds.has(movement.id)) return;
+    remoteOnly.set(movement.itemId, [...(remoteOnly.get(movement.itemId) || []), movement]);
+  });
+  if (localOnly.size === 0 && remoteOnly.size === 0) return mergedItems;
+
+  const localItems = new Map((local.items || []).map(item => [item.id, item]));
+  const remoteItems = new Map((remote.items || []).map(item => [item.id, item]));
+
+  return mergedItems.map(item => {
+    const localItem = localItems.get(item.id);
+    const remoteItem = remoteItems.get(item.id);
+    if (!localItem || !remoteItem) return item; // barang baru di satu sisi — tidak ada konflik
+    const onlyLocal = localOnly.get(item.id) || [];
+    const onlyRemote = remoteOnly.get(item.id) || [];
+    if (onlyLocal.length === 0 && onlyRemote.length === 0) return item;
+
+    // Patokan: opname terakhir (berdasarkan waktu) dari gabungan mutasi barang ini.
+    const allForItem = new Map<string, InventoryMovement>();
+    [...localMovements, ...remoteMovements].forEach(movement => {
+      if (movement.itemId === item.id) allForItem.set(movement.id, movement);
+    });
+    const sorted = Array.from(allForItem.values()).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
+    const anchorIndex = sorted.map(movement => movement.direction).lastIndexOf('ADJUSTMENT');
+
+    let stock: number;
+    if (anchorIndex >= 0) {
+      stock = sorted[anchorIndex].newStock + sorted.slice(anchorIndex + 1).reduce((sum, movement) => sum + movementDelta(movement), 0);
+    } else {
+      stock = remoteItem.stock + onlyLocal.reduce((sum, movement) => sum + movementDelta(movement), 0);
+    }
+    if (!Number.isFinite(stock) || stock === item.stock) return item;
+    return { ...item, stock };
+  });
+};
+
 const recordKey = (record: Pick<DeletedRecord, 'collection' | 'id'>) => `${record.collection}:${record.id}`;
 
 const mergeDeletedRecords = (local: DeletedRecord[] = [], remote: DeletedRecord[] = []): DeletedRecord[] => {
@@ -130,7 +199,7 @@ export const mergeAppData = (local: Partial<AppData>, remote: Partial<AppData>):
   return {
     // Mutable master data — newest change wins, field groups for high-contention entities.
     users: withoutDeleted('users', mergeMutable(local.users || [], remote.users || []), deleted),
-    items: withoutDeleted('items', mergeMutable(local.items || [], remote.items || [], ITEM_FIELD_GROUPS), deleted),
+    items: withoutDeleted('items', reconcileStockWithMovements(mergeMutable(local.items || [], remote.items || [], ITEM_FIELD_GROUPS), local, remote), deleted),
     customers: withoutDeleted('customers', mergeMutable(local.customers || [], remote.customers || [], CUSTOMER_FIELD_GROUPS), deleted),
     suppliers: withoutDeleted('suppliers', mergeMutable(local.suppliers || [], remote.suppliers || []), deleted),
     accounts: mergeByCode(local.accounts || [], remote.accounts || []),
