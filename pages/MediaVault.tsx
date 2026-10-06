@@ -2,7 +2,8 @@ import React, { useMemo, useState } from 'react';
 import { CheckCircle2, FileText, Loader2, RefreshCw, Trash2, Upload, XCircle, Eye, Sparkles } from 'lucide-react';
 import { MediaAsset, User } from '../types';
 import { deleteSupabaseMedia, isSupabaseMediaConfigured, refreshSupabaseSignedUrl, uploadMediaToSupabase } from '../services/mediaService';
-import { extractTextFromImage, fileToBase64 } from '../services/aiService';
+import { extractTextFromImage, fileToBase64, parseOpenRouterError } from '../services/aiService';
+import { createId } from '../services/idService';
 import { getResolvedOpenRouterApiKey } from '../services/appConfig';
 import { getCloudConfig } from '../services/syncService';
 
@@ -37,22 +38,23 @@ const MediaVault: React.FC<MediaVaultProps> = ({
     [mediaAssets],
   );
 
-  const readExtractedText = async (file: File): Promise<string> => {
+  /** Baca teks dari file. Mengembalikan pesan error OCR agar kegagalan tidak lagi diam-diam. */
+  const readExtractedText = async (file: File): Promise<{ text: string; error?: string }> => {
     // Text-based files: read directly
     const isTextFile = file.type.startsWith('text/') || file.name.match(/\.(txt|csv|json|md)$/i);
     if (isTextFile) {
       const content = await file.text();
-      return content.slice(0, MAX_TEXT_EXTRACT);
+      return { text: content.slice(0, MAX_TEXT_EXTRACT) };
     }
 
     // Images & PDFs: use AI Vision OCR
     const isImage = file.type.startsWith('image/');
     const isPdf = file.type === 'application/pdf' || file.name.endsWith('.pdf');
-    
+
     if (isImage) {
       const apiKey = getResolvedOpenRouterApiKey(getCloudConfig().openRouterApiKey)?.trim();
-      if (!apiKey) return '';
-      
+      if (!apiKey) return { text: '', error: 'API key OpenRouter belum diisi, teks gambar tidak dibaca.' };
+
       try {
         setOcrProgress(`Membaca teks dari ${file.name}...`);
         const base64 = await fileToBase64(file);
@@ -63,49 +65,71 @@ const MediaVault: React.FC<MediaVaultProps> = ({
           prompt: 'Extract ALL text from this price list image. Output product names, codes/SKU, and prices in a structured format. Preserve all numbers accurately.',
         });
         setOcrProgress('');
-        return extracted.slice(0, MAX_TEXT_EXTRACT);
-      } catch (e) {
+        return { text: extracted.slice(0, MAX_TEXT_EXTRACT) };
+      } catch (e: any) {
         setOcrProgress('');
         console.warn('OCR failed:', e);
-        return '';
+        const parsed = parseOpenRouterError(String(e?.message || ''));
+        return { text: '', error: `OCR gagal (${parsed.code}). ${parsed.detail || ''}`.trim() };
       }
     }
 
     // PDF: convert first page to image is not possible in browser without library
-    // For now, inform user to use image format
     if (isPdf) {
       setOcrProgress('');
-      return '[PDF detected — untuk hasil terbaik, foto/screenshot halaman price list dan upload sebagai gambar (JPG/PNG)]';
+      return { text: '', error: 'PDF belum bisa dibaca otomatis — foto/screenshot halaman price list lalu upload sebagai gambar (JPG/PNG).' };
     }
 
-    return '';
+    return { text: '' };
   };
 
   const handleUpload: React.ChangeEventHandler<HTMLInputElement> = async (event) => {
     const files = event.target.files;
     if (!files || files.length === 0) return;
-    if (!isSupabaseMediaConfigured()) {
-      setStatus({ type: 'error', message: 'Konfigurasi Supabase belum lengkap di Pengaturan API.' });
-      event.target.value = '';
-      return;
-    }
+
+    // Tanpa cloud: file asli tidak disimpan, tetapi teks hasil baca tetap bisa dipakai AI (disimpan lokal).
+    const cloudStorage = isSupabaseMediaConfigured();
 
     setIsUploading(true);
     setStatus({ type: 'idle', message: '' });
     try {
+      const warnings: string[] = [];
+      let saved = 0;
       for (const file of Array.from(files)) {
-        const extractedText = await readExtractedText(file);
-        const asset = await uploadMediaToSupabase(file, currentUser.name, {
+        const { text: extractedText, error } = await readExtractedText(file);
+        if (error) warnings.push(`${file.name}: ${error}`);
+        const meta = {
           supplierName: supplierName || undefined,
           effectiveDate: effectiveDate || undefined,
           category: category || 'OTHER',
           notes: notes || undefined,
           extractedText: extractedText || undefined,
           useAsKnowledge: true,
-        });
-        onAddMediaAsset(asset);
+        };
+        if (cloudStorage) {
+          onAddMediaAsset(await uploadMediaToSupabase(file, currentUser.name, meta));
+          saved += 1;
+        } else if (extractedText) {
+          onAddMediaAsset({
+            id: createId('MEDIA'),
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            size: file.size,
+            uploadedAt: new Date().toISOString(),
+            uploadedBy: currentUser.name,
+            ...meta,
+            sourceType: 'local',
+          });
+          saved += 1;
+        } else {
+          warnings.push(`${file.name}: tidak disimpan (cloud belum aktif dan teks tidak terbaca).`);
+        }
       }
-      setStatus({ type: 'success', message: `${files.length} file berhasil diunggah ke Supabase Storage.` });
+      const where = cloudStorage ? 'diunggah ke Supabase Storage' : 'disimpan sebagai teks di perangkat (cloud belum aktif, file asli tidak disimpan)';
+      setStatus({
+        type: warnings.length > 0 && saved === 0 ? 'error' : 'success',
+        message: `${saved} file ${where}.${warnings.length ? ` Perhatian: ${warnings.join(' | ')}` : ''}`,
+      });
     } catch (error: any) {
       setStatus({ type: 'error', message: error?.message || 'Upload media gagal.' });
     } finally {
@@ -116,7 +140,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
 
   const handleDelete = async (asset: MediaAsset) => {
     if (!window.confirm(`Hapus media "${asset.name}"?`)) return;
-    await deleteSupabaseMedia(asset);
+    if (asset.sourceType === 'supabase') await deleteSupabaseMedia(asset);
     onRemoveMediaAsset(asset.id);
   };
 
@@ -213,6 +237,9 @@ const MediaVault: React.FC<MediaVaultProps> = ({
                     {asset.category || 'OTHER'} • {asset.supplierName || 'Unknown supplier'} • {new Date(asset.uploadedAt).toLocaleString('id-ID')}
                   </div>
                   {asset.notes && <div className="text-[10px] font-bold text-slate-500 mt-1">Catatan: {asset.notes}</div>}
+                  <div className={`text-[10px] font-bold mt-1 ${asset.extractedText ? 'text-emerald-600' : 'text-amber-600'}`}>
+                    {asset.extractedText ? `Teks terbaca: ${asset.extractedText.length.toLocaleString('id-ID')} karakter` : 'Teks belum terbaca — AI tidak bisa memakai isi file ini'}
+                  </div>
                 </div>
                 <div className="flex items-center gap-2">
                   <button
@@ -221,22 +248,28 @@ const MediaVault: React.FC<MediaVaultProps> = ({
                   >
                     {asset.useAsKnowledge ? 'AI Source: ON' : 'AI Source: OFF'}
                   </button>
-                  <button
-                    onClick={() => handleOpenFile(asset)}
-                    className="px-3 py-1 rounded-lg text-[10px] font-black uppercase border border-blue-300 bg-blue-50 text-blue-700"
-                  >
-                    Buka
-                  </button>
-                  <button
-                    onClick={async () => {
-                      const newUrl = await refreshSupabaseSignedUrl(asset);
-                      if (newUrl) onPatchMediaAsset(asset.id, { signedUrl: newUrl });
-                    }}
-                    className="p-2 rounded-lg border border-slate-300 bg-white text-slate-600"
-                    title="Refresh URL"
-                  >
-                    <RefreshCw size={13} />
-                  </button>
+                  {asset.sourceType === 'supabase' ? (
+                    <>
+                      <button
+                        onClick={() => handleOpenFile(asset)}
+                        className="px-3 py-1 rounded-lg text-[10px] font-black uppercase border border-blue-300 bg-blue-50 text-blue-700"
+                      >
+                        Buka
+                      </button>
+                      <button
+                        onClick={async () => {
+                          const newUrl = await refreshSupabaseSignedUrl(asset);
+                          if (newUrl) onPatchMediaAsset(asset.id, { signedUrl: newUrl });
+                        }}
+                        className="p-2 rounded-lg border border-slate-300 bg-white text-slate-600"
+                        title="Refresh URL"
+                      >
+                        <RefreshCw size={13} />
+                      </button>
+                    </>
+                  ) : (
+                    <span className="px-3 py-1 rounded-lg text-[10px] font-black uppercase border border-slate-200 bg-white text-slate-500" title="File asli tidak disimpan; hanya teks hasil baca">Teks lokal</span>
+                  )}
                   <button onClick={() => handleDelete(asset)} className="p-2 rounded-lg border border-red-200 bg-red-50 text-red-600" title="Hapus">
                     <Trash2 size={13} />
                   </button>

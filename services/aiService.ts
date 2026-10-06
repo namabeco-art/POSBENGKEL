@@ -128,6 +128,18 @@ export const requestOpenRouterReply = async ({
 };
 
 /**
+ * Model vision untuk OCR, dicoba berurutan. `google/gemini-flash-1.5` (default lama) sudah tidak tersedia
+ * di OpenRouter (dicek Oktober 2026), sehingga OCR sebelumnya selalu gagal tanpa pemberitahuan.
+ * `~google/gemini-flash-latest` adalah alias OpenRouter yang selalu menunjuk Gemini Flash terbaru.
+ */
+export const VISION_MODEL_FALLBACKS = ['~google/gemini-flash-latest', 'google/gemini-2.5-flash-lite', 'google/gemini-2.5-flash'];
+
+export const getVisionModels = (preferred?: string): string[] => {
+  const fromEnv = (import.meta.env.VITE_OPENROUTER_VISION_MODEL || '').trim();
+  return Array.from(new Set([preferred, fromEnv, ...VISION_MODEL_FALLBACKS].filter((model): model is string => Boolean(model && model.trim()))));
+};
+
+/**
  * Extract text from an image using AI Vision model via OpenRouter.
  * Converts image file to base64 and sends to a vision-capable model.
  * Used for OCR on supplier price list PDFs/images.
@@ -137,7 +149,7 @@ export const extractTextFromImage = async ({
   imageBase64,
   mimeType,
   prompt = 'Extract ALL text from this image. Output the raw text content exactly as shown, preserving numbers and formatting. Focus on product names, codes, and prices.',
-  model = 'google/gemini-flash-1.5',
+  model,
   appName = 'POSHULIO OCR',
 }: {
   apiKey: string;
@@ -149,6 +161,21 @@ export const extractTextFromImage = async ({
 }): Promise<string> => {
   if (!apiKey) throw new Error('OPENROUTER_AUTH_ERROR::API key required for OCR');
 
+  let lastError: Error | null = null;
+  for (const candidate of getVisionModels(model)) {
+    try {
+      return await callVisionModel(apiKey, candidate, imageBase64, mimeType, prompt, appName);
+    } catch (error: any) {
+      const parsed = parseOpenRouterError(String(error?.message || ''));
+      // Masalah kunci/kredit tidak akan teratasi dengan ganti model.
+      if (parsed.code === 'OPENROUTER_AUTH_ERROR' || parsed.code === 'OPENROUTER_CREDIT_ERROR' || parsed.code === 'OPENROUTER_PAYMENT_REQUIRED') throw error;
+      lastError = new Error(`${parsed.code}::model=${candidate}${parsed.detail ? `; ${parsed.detail}` : ''}`);
+    }
+  }
+  throw lastError || new Error('OPENROUTER_UNKNOWN_ERROR::OCR gagal');
+};
+
+const callVisionModel = async (apiKey: string, model: string, imageBase64: string, mimeType: string, prompt: string, appName: string): Promise<string> => {
   const response = await withTimeout(fetch(OPENROUTER_URL, {
     method: 'POST',
     headers: {
