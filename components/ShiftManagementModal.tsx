@@ -107,7 +107,7 @@ const ShiftManagementModal: React.FC<ShiftManagementModalProps> = ({ currentUser
               }`}
             >
               {activeSession ? (
-                <><StopCircle size={18} /> TTP SHIFT KASIR</>
+                <><StopCircle size={18} /> TUTUP SHIFT KASIR</>
               ) : (
                 <><PlayCircle size={18} /> MULAI SHIFT BARU</>
               )}

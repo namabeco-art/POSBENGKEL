@@ -69,7 +69,7 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
         </div>
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
           <div className="flex items-center gap-2 mb-3"><ArrowDownLeft size={18} className="text-emerald-500"/><span className="text-xs font-medium text-slate-500">Pendapatan (MTD)</span></div>
-          <p className="text-2xl font-bold text-slate-800">Rp {sales.filter(s => { try { const p = s.date.split(' ')[0].split('/'); return +p[1] === new Date().getMonth() + 1; } catch { return false; } }).reduce((sum, s) => sum + s.total, 0).toLocaleString()}</p>
+          <p className="text-2xl font-bold text-slate-800">Rp {sales.filter(s => { try { const now = new Date(); if (s.createdAt) { const d = new Date(s.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); } const p = s.date.split(' ')[0].split('/'); return +p[1] === now.getMonth() + 1 && +p[2] === now.getFullYear(); } catch { return false; } }).reduce((sum, s) => sum + s.total, 0).toLocaleString('id-ID')}</p>
         </div>
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center cursor-pointer hover:border-indigo-300 transition-all group" onClick={() => setIsModalOpen(true)}>
           <div className="text-center">

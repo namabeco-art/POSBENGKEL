@@ -5,6 +5,8 @@ import { getResolvedOpenRouterApiKey, getResolvedOpenRouterModel } from '../serv
 import { getCloudConfig } from '../services/syncService';
 import { parseOpenRouterError, requestOpenRouterReply } from '../services/aiService';
 import ShiftManagementModal from '../components/ShiftManagementModal';
+import { hasPermission } from '../services/permissions';
+import { getBelowCostLevels, getMarginPercent, getSellPrice } from '../services/pricing';
 
 interface DashboardProps {
   items: Item[];
@@ -16,8 +18,12 @@ interface DashboardProps {
   cashSessions: CashSession[];
   currentUser: User;
   onOpenCashSession: (openingCash: number) => void;
-  onCloseCashSession: (closingCash: number, notes: string) => void;
+  onCloseCashSession: (closingCash: number, notes: string) => CashSession | null | void;
+  onNavigate?: (tab: string) => void;
 }
+
+/** Batas margin tipis untuk peringatan owner. */
+const THIN_MARGIN_PERCENT = 10;
 
 const StatCard: React.FC<{ icon: React.ReactNode, label: string, value: string, trend: string, color: string }> = ({
   icon, label, value, trend, color
@@ -34,7 +40,7 @@ const StatCard: React.FC<{ icon: React.ReactNode, label: string, value: string, 
   </div>
 );
 
-const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts, purchaseOrders, inventoryMovements, cashSessions, currentUser, onOpenCashSession, onCloseCashSession }) => {
+const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts, purchaseOrders, inventoryMovements, cashSessions, currentUser, onOpenCashSession, onCloseCashSession, onNavigate }) => {
   const [range, setRange] = useState<'today' | '7days' | '1month'>('7days');
   const [showShiftModal, setShowShiftModal] = useState(false);
   const [aiStrategy, setAiStrategy] = useState<string>('');
@@ -52,8 +58,8 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
       try {
         const parts = s.date.split(' ');
         const dateParts = parts[0].split('/');
-        // Format: DD/MM/YYYY
-        const saleDate = new Date(parseInt(dateParts[2]), parseInt(dateParts[1]) - 1, parseInt(dateParts[0]));
+        // createdAt (ISO) lebih andal; fallback ke format DD/MM/YYYY untuk data lama.
+        const saleDate = s.createdAt ? new Date(s.createdAt) : new Date(parseInt(dateParts[2]), parseInt(dateParts[1]) - 1, parseInt(dateParts[0]));
         
         if (range === 'today') {
           return saleDate.getTime() >= startOfToday.getTime();
@@ -96,6 +102,28 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
   );
 
   const lowStockItems = useMemo(() => items.filter(item => item.stock <= (item.reorderLevel || 10)).slice(0, 5), [items]);
+  const canSeeCost = hasPermission(currentUser, 'item.edit') || hasPermission(currentUser, 'report.view');
+  const lastClosedSession = useMemo(
+    () => cashSessions.filter(session => session.userId === currentUser.id && session.status === 'CLOSED')
+      .sort((a, b) => (b.closedAt || '').localeCompare(a.closedAt || ''))[0] || null,
+    [cashSessions, currentUser.id],
+  );
+
+  /** Peringatan harga untuk owner: harga jual ≤ modal, margin tipis, atau harga belum diatur. */
+  const priceAlerts = useMemo(() => {
+    const belowCost: { id: string; name: string; sell: number; cost: number }[] = [];
+    const thinMargin: { id: string; name: string; margin: number }[] = [];
+    const noPrice: { id: string; name: string }[] = [];
+    items.forEach(item => {
+      const sell = getSellPrice(item, 1);
+      if (sell <= 0) { noPrice.push({ id: item.id, name: item.name }); return; }
+      if (getBelowCostLevels(item).length > 0) { belowCost.push({ id: item.id, name: item.name, sell, cost: item.basePrice }); return; }
+      const margin = getMarginPercent(sell, item.basePrice);
+      if (item.basePrice > 0 && margin !== null && margin < THIN_MARGIN_PERCENT) thinMargin.push({ id: item.id, name: item.name, margin });
+    });
+    return { belowCost, thinMargin, noPrice };
+  }, [items]);
+  const priceAlertCount = priceAlerts.belowCost.length + priceAlerts.thinMargin.length + priceAlerts.noPrice.length;
   const payableSummary = useMemo(() => purchaseOrders.filter(po => !po.isPaid).reduce((sum, po) => sum + (po.total - (po.paidAmount || 0)), 0), [purchaseOrders]);
   const movementSummary = useMemo(() => inventoryMovements.slice(0, 5), [inventoryMovements]);
 
@@ -141,17 +169,8 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
     }
   }, [metrics, range]);
 
-  useEffect(() => {
-    fetchAiStrategy();
-  }, [fetchAiStrategy]);
-
-  useEffect(() => {
-    const handleFocus = () => {
-      fetchAiStrategy();
-    };
-    window.addEventListener('focus', handleFocus);
-    return () => window.removeEventListener('focus', handleFocus);
-  }, [fetchAiStrategy]);
+  // Analisis AI hanya dijalankan saat diminta — sebelumnya terpanggil setiap jendela fokus/
+  // setiap ada transaksi, menghabiskan kredit OpenRouter tanpa disadari.
 
   const renderAiContent = () => {
     if (aiStrategy === 'AI_MISSING') {
@@ -182,6 +201,17 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
       );
     }
     
+    if (!aiStrategy) {
+      return (
+        <div className="flex flex-col items-center py-8 text-center">
+          <p className="text-slate-400 text-[11px] font-bold max-w-sm">Klik tombol di bawah untuk meminta rekomendasi AI berdasarkan data periode ini.</p>
+          <button onClick={fetchAiStrategy} className="mt-5 flex items-center gap-2 px-6 py-2.5 bg-indigo-600 text-white text-[10px] font-black rounded-xl uppercase shadow-lg active:scale-95 transition-all">
+            <Sparkles size={14}/> Analisis Sekarang
+          </button>
+        </div>
+      );
+    }
+
     const points = aiStrategy.split('\n').filter(line => line.trim().startsWith('*'));
     if (points.length === 0) return <p className="text-slate-200 font-bold text-xs leading-relaxed">{aiStrategy}</p>;
 
@@ -243,6 +273,11 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
             <>
               <div className="text-[11px] font-bold text-slate-500 uppercase">Belum ada shift aktif</div>
               <div className="text-sm font-black text-slate-400">Siap berjualan hari ini?</div>
+              {lastClosedSession && (
+                <div className={`text-[11px] font-bold rounded-xl px-3 py-2 ${(lastClosedSession.shortageOrOverage || 0) < 0 ? 'bg-red-50 text-red-700' : 'bg-slate-50 text-slate-600'}`}>
+                  Shift terakhir ({new Date(lastClosedSession.closedAt || lastClosedSession.openedAt).toLocaleDateString('id-ID')}): selisih kas Rp {(lastClosedSession.shortageOrOverage || 0).toLocaleString('id-ID')}
+                </div>
+              )}
               <button onClick={() => setShowShiftModal(true)} className="w-full py-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-black text-xs uppercase tracking-widest mt-2 active:scale-95 transition-all shadow-md">Buka Shift Kasir</button>
             </>
           )}
@@ -253,7 +288,14 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
                activeSession={openCashSession || undefined} 
                onClose={() => setShowShiftModal(false)}
                onStartShift={(cash) => { onOpenCashSession(cash); setShowShiftModal(false); }}
-               onEndShift={(cash, notes) => { onCloseCashSession(cash, notes); setShowShiftModal(false); }}
+               onEndShift={(cash, notes) => {
+                 const closed = onCloseCashSession(cash, notes);
+                 setShowShiftModal(false);
+                 if (closed && typeof closed === 'object') {
+                   const diff = closed.shortageOrOverage || 0;
+                   alert(`Shift ditutup.\nKas seharusnya: Rp ${(closed.expectedCash || 0).toLocaleString('id-ID')}\nKas dihitung: Rp ${(closed.closingCash || 0).toLocaleString('id-ID')}\n${diff === 0 ? 'Kas sesuai.' : diff < 0 ? `KURANG Rp ${Math.abs(diff).toLocaleString('id-ID')}` : `LEBIH Rp ${diff.toLocaleString('id-ID')}`}`);
+                 }
+               }}
             />
           )}
         </div>
@@ -294,6 +336,41 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
           </div>
         </div>
       </div>
+
+      {canSeeCost && priceAlertCount > 0 && (
+        <div className="bg-white p-6 rounded-[2rem] border-2 border-amber-200 shadow-sm space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="text-amber-600" size={20} />
+              <div>
+                <h3 className="font-black text-slate-900 uppercase text-sm">Peringatan Harga</h3>
+                <p className="text-[11px] text-slate-500">Cek setelah harga supplier berubah agar tidak jual rugi.</p>
+              </div>
+            </div>
+            {onNavigate && <button onClick={() => onNavigate('master-items')} className="px-4 py-2 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-[11px] font-black uppercase">Kelola Harga</button>}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div className="bg-red-50 rounded-xl p-3">
+              <p className="text-xs font-black text-red-700 uppercase">Jual ≤ modal: {priceAlerts.belowCost.length}</p>
+              {priceAlerts.belowCost.slice(0, 4).map(entry => (
+                <p key={entry.id} className="text-[11px] text-red-700 mt-1 truncate">{entry.name} — jual Rp {entry.sell.toLocaleString('id-ID')} / modal Rp {entry.cost.toLocaleString('id-ID')}</p>
+              ))}
+            </div>
+            <div className="bg-amber-50 rounded-xl p-3">
+              <p className="text-xs font-black text-amber-700 uppercase">Margin &lt; {THIN_MARGIN_PERCENT}%: {priceAlerts.thinMargin.length}</p>
+              {priceAlerts.thinMargin.slice(0, 4).map(entry => (
+                <p key={entry.id} className="text-[11px] text-amber-700 mt-1 truncate">{entry.name} — {entry.margin.toFixed(1)}%</p>
+              ))}
+            </div>
+            <div className="bg-slate-50 rounded-xl p-3">
+              <p className="text-xs font-black text-slate-700 uppercase">Harga belum diatur: {priceAlerts.noPrice.length}</p>
+              {priceAlerts.noPrice.slice(0, 4).map(entry => (
+                <p key={entry.id} className="text-[11px] text-slate-600 mt-1 truncate">{entry.name}</p>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-white p-6 md:p-8 rounded-[2.5rem] border-2 border-slate-200 shadow-sm relative overflow-hidden">
         <div className="flex items-center justify-between mb-8">

@@ -175,3 +175,70 @@ describe('posOperations', () => {
     ).toThrow(/tidak mencukupi/i);
   });
 });
+
+describe('posOperations: validasi data rusak', () => {
+  const baseSale = (): Sale => ({
+    id: 'S9',
+    invoiceNo: 'INV-009',
+    date: '10/04/2026 10:00:00',
+    customerId: 'C1',
+    customerName: 'Retail',
+    items: [
+      { itemId: 'I1', name: 'Produk A', qty: 2, price: 1500, total: 3000 },
+      { itemId: 'I2', name: 'Produk B', qty: 1, price: 3000, total: 3000 },
+    ],
+    subtotal: 6000,
+    tax: 0,
+    total: 6000,
+    paymentType: 'TUNAI',
+    paymentMethod: 'TUNAI',
+    amountReceived: 6000,
+    changeAmount: 0,
+    operatorName: 'Owner',
+  });
+
+  it('menolak retur dengan qty kosong/NaN agar stok tidak menjadi NaN', () => {
+    const ret = {
+      id: 'R9',
+      returnNo: 'RET-009',
+      originalInvoiceNo: 'INV-009',
+      date: '-',
+      customerId: 'C1',
+      customerName: 'Retail',
+      items: [
+        { itemId: 'I1', name: 'Produk A', qty: 1, price: 1500, reason: 'Rusak' },
+        { itemId: 'I2', name: 'Produk B', qty: undefined as unknown as number, price: 3000, reason: 'cek' },
+      ],
+      totalReturn: 1500,
+      operatorName: 'Owner',
+    } as SaleReturn;
+    expect(() => completeReturn(makeItems(), [baseSale()], [], ret, makeUser())).toThrow(/tidak valid|melebihi/);
+  });
+
+  it('menolak penjualan dengan qty NaN', () => {
+    const sale = baseSale();
+    sale.items[0].qty = Number.NaN;
+    expect(() => completeSale(makeItems(), sale, makeUser())).toThrow(/tidak valid/);
+  });
+
+  it('melaporkan perubahan harga modal rata-rata saat menerima PO', () => {
+    const po: PurchaseOrder = {
+      id: 'PO-9',
+      date: '-',
+      dueDate: '-',
+      termOfPayment: 0,
+      discount: 0,
+      supplierId: 'S1',
+      supplierName: 'Supplier',
+      items: [{ itemId: 'I1', name: 'Produk A', orderedQty: 10, receivedQty: 0, cost: 1300 }],
+      subtotal: 13000,
+      total: 13000,
+      status: 'PENDING',
+      isPaid: false,
+    };
+    const result = receivePurchaseOrderStock(makeItems(), po, [{ itemId: 'I1', receivedQty: 10 }], makeUser());
+    // (10 x 1000 + 10 x 1300) / 20 = 1150
+    expect(result.items.find(i => i.id === 'I1')!.basePrice).toBe(1150);
+    expect(result.costChanges).toEqual([{ itemId: 'I1', itemName: 'Produk A', oldCost: 1000, newCost: 1150, purchaseCost: 1300 }]);
+  });
+});

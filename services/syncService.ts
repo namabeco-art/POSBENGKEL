@@ -64,6 +64,27 @@ const getUpstashHeaders = (token: string, contentType?: string) => {
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+export const CLOUD_REQUEST_TIMEOUT_MS = 12000;
+
+/** fetch dengan batas waktu — agar kasir tidak tertahan "MENYIMPAN..." saat jaringan menggantung. */
+const fetchWithTimeout = async (input: string, init: RequestInit = {}, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS) => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/** Supabase Storage mengembalikan 400/404 "not_found" untuk objek yang belum ada. */
+const isMissingObjectResponse = async (response: Response) => {
+  if (response.status === 404) return true;
+  if (response.status !== 400) return false;
+  const body = await response.clone().text().catch(() => '');
+  return /not[_ ]?found/i.test(body);
+};
+
 export const getCloudConfig = (): CloudConfig => {
   const envConfig = getEnvConfig();
   const firstEnvStore = envConfig.stores[0];
@@ -426,7 +447,7 @@ export const withCloudInventoryLock = async <T>(
 
     for (let i = 0; i < maxRetries; i += 1) {
       try {
-        const response = await fetch(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
+        const response = await fetchWithTimeout(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
           method: 'POST',
           headers: getUpstashHeaders(anonKey),
         });
@@ -450,7 +471,7 @@ export const withCloudInventoryLock = async <T>(
       return await task();
     } finally {
       if (acquired) {
-        await fetch(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
+        await fetchWithTimeout(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
       }
     }
   }
@@ -469,7 +490,7 @@ export const withCloudInventoryLock = async <T>(
     });
 
     try {
-      const createRes = await fetch(lockUrl, {
+      const createRes = await fetchWithTimeout(lockUrl, {
         method: 'POST',
         headers: {
           ...getSupabaseHeaders(anonKey, 'application/json'),
@@ -484,7 +505,7 @@ export const withCloudInventoryLock = async <T>(
       }
 
       // Check if existing lock is expired — if so, force overwrite
-      const lockDataRes = await fetch(lockUrl, { headers: getSupabaseHeaders(anonKey) });
+      const lockDataRes = await fetchWithTimeout(lockUrl, { headers: getSupabaseHeaders(anonKey) });
       if (lockDataRes.ok) {
         const lockRaw = await lockDataRes.text().catch(() => '');
         try {
@@ -492,7 +513,7 @@ export const withCloudInventoryLock = async <T>(
           const expiresAt = new Date(lockData?.expiresAt || 0).getTime();
           if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < Date.now()) {
             // Lock expired — force delete and retry
-            await fetch(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+            await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
             continue; // retry immediately
           }
         } catch { /* ignore parse error */ }
@@ -510,7 +531,7 @@ export const withCloudInventoryLock = async <T>(
     return await task();
   } finally {
     if (acquired) {
-      await fetch(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
+      await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: getSupabaseHeaders(anonKey) }).catch(() => undefined);
     }
   }
 };
@@ -527,7 +548,7 @@ export const pushToCloud = async (data: any) => {
 
   if (provider === 'upstash') {
     const key = `pos_state:${config.storeId}`;
-    const response = await fetch(`${baseUrl}/set/${key}`, {
+    const response = await fetchWithTimeout(`${baseUrl}/set/${key}`, {
       method: 'POST',
       headers: getUpstashHeaders(anonKey),
       body: encodedData,
@@ -537,7 +558,7 @@ export const pushToCloud = async (data: any) => {
   }
 
   const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
-  const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
+  const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
     method: 'POST',
     headers: {
       ...getSupabaseHeaders(anonKey, 'text/plain'),
@@ -561,20 +582,24 @@ export const pullFromCloud = async () => {
 
   if (provider === 'upstash') {
     const key = `pos_state:${config.storeId}`;
-    const response = await fetch(`${baseUrl}/get/${key}`, {
+    const response = await fetchWithTimeout(`${baseUrl}/get/${key}`, {
       headers: getUpstashHeaders(anonKey),
     });
-    if (!response.ok) return null;
+    // Jangan anggap error server sebagai "cloud kosong" — pemanggil bisa menimpa data cloud.
+    if (!response.ok) throw new Error(`UPSTASH_PULL_FAILED_${response.status}`);
     const body = await response.json();
     if (!body?.result) return null;
     return secureDecode(body.result);
   }
 
   const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
-  const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
+  const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
     headers: getSupabaseHeaders(anonKey),
   });
-  if (!response.ok) return null;
+  if (!response.ok) {
+    if (await isMissingObjectResponse(response)) return null; // workspace baru, belum ada data
+    throw new Error(`SUPABASE_PULL_FAILED_${response.status}`);
+  }
   const encodedData = await response.text().catch(() => '');
   if (!encodedData) return null;
   return secureDecode(encodedData);

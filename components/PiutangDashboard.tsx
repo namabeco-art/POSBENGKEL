@@ -4,18 +4,22 @@ import {
   Phone, MessageSquare, CheckCircle2, ArrowRight, Filter
 } from 'lucide-react';
 import { Customer, Sale } from '../types';
+import CustomerPaymentModal from './CustomerPaymentModal';
 
 interface PiutangDashboardProps {
   customers: Customer[];
   sales: Sale[];
+  onReceivePayment?: (customerId: string, amount: number, method: string, note?: string) => Promise<void>;
 }
 
 /**
  * Piutang (Receivables) Dashboard — #2
  * Shows customers with outstanding debt, aging analysis, and WhatsApp reminder.
  */
-const PiutangDashboard: React.FC<PiutangDashboardProps> = ({ customers, sales }) => {
+const PiutangDashboard: React.FC<PiutangDashboardProps> = ({ customers, sales, onReceivePayment }) => {
   const [searchTerm, setSearchTerm] = useState('');
+  const [payingCustomerId, setPayingCustomerId] = useState<string | null>(null);
+  const payingCustomer = payingCustomerId ? customers.find(customer => customer.id === payingCustomerId) : undefined;
   const [filter, setFilter] = useState<'all' | 'overdue' | 'high'>('all');
 
   const piutangData = useMemo(() => {
@@ -164,6 +168,14 @@ const PiutangDashboard: React.FC<PiutangDashboardProps> = ({ customers, sales })
               
               {/* Actions */}
               <div className="flex flex-col gap-2 shrink-0">
+                {onReceivePayment && (
+                  <button
+                    onClick={() => setPayingCustomerId(customer.id)}
+                    className="flex items-center gap-1.5 px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-semibold hover:bg-indigo-700 transition-all"
+                  >
+                    <DollarSign size={14}/> Bayar
+                  </button>
+                )}
                 {customer.phone && customer.phone !== '-' && (
                   <button
                     onClick={() => sendWhatsAppReminder(customer)}
@@ -183,6 +195,9 @@ const PiutangDashboard: React.FC<PiutangDashboardProps> = ({ customers, sales })
           </div>
         ))}
       </div>
+      {payingCustomer && onReceivePayment && (
+        <CustomerPaymentModal customer={payingCustomer} onSubmit={onReceivePayment} onClose={() => setPayingCustomerId(null)} />
+      )}
     </div>
   );
 };

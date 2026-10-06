@@ -69,14 +69,30 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
     }));
   };
 
+  /** Qty yang sudah pernah diretur (disetujui maupun menunggu) per barang untuk faktur terpilih. */
+  const alreadyReturned = useMemo(() => {
+    const map: Record<string, number> = {};
+    if (!selectedSale) return map;
+    returns
+      .filter(ret => ret.originalInvoiceNo === selectedSale.invoiceNo)
+      .forEach(ret => ret.items.forEach(line => { map[line.itemId] = (map[line.itemId] || 0) + line.qty; }));
+    return map;
+  }, [returns, selectedSale]);
+
+  /** Hanya baris dengan qty retur > 0 yang diproses — alasan saja (qty 0) diabaikan agar tidak menghasilkan NaN. */
+  const selectedReturnLines = useMemo(
+    () => Object.entries(returnItems).filter(([, data]) => Number.isFinite(data?.qty) && data.qty > 0),
+    [returnItems],
+  );
+
   const totalReturnAmount = useMemo(() => {
     if (!selectedSale) return 0;
     const paidRatio = selectedSale.subtotal > 0 ? selectedSale.total / selectedSale.subtotal : 1;
-    return (Object.entries(returnItems) as any).reduce((sum: number, [itemId, data]: any) => {
+    return selectedReturnLines.reduce((sum, [itemId, data]) => {
       const saleItem = selectedSale.items.find(i => i.itemId === itemId);
       return sum + Math.round(data.qty * (saleItem?.price || 0) * paidRatio);
     }, 0);
-  }, [selectedSale, returnItems]);
+  }, [selectedSale, selectedReturnLines]);
 
   const filteredReturns = useMemo(() => {
     return returns.filter(r => 
@@ -87,7 +103,7 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
   }, [returns, logSearch]);
 
   const handleSubmitReturn = async () => {
-    if (!selectedSale || Object.keys(returnItems).length === 0) return;
+    if (!selectedSale || selectedReturnLines.length === 0) return;
 
     const returnData: SaleReturn = {
       id: createId('RET'),
@@ -96,7 +112,7 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
       date: new Date().toLocaleDateString('id-ID') + ' ' + new Date().toLocaleTimeString('id-ID'),
       customerId: selectedSale.customerId,
       customerName: selectedSale.customerName,
-      items: (Object.entries(returnItems) as any).map(([itemId, data]: any) => ({
+      items: selectedReturnLines.map(([itemId, data]) => ({
         itemId,
         name: selectedSale.items.find(i => i.itemId === itemId)?.name || '',
         qty: data.qty,
@@ -226,16 +242,16 @@ const Returns: React.FC<ReturnsProps> = ({ sales, returns, currentUser, onComple
                          <div key={item.itemId} className="flex flex-col md:flex-row items-center justify-between p-4 md:p-5 bg-white border-2 border-slate-100 rounded-2xl md:rounded-3xl hover:border-orange-200 transition-all gap-4">
                             <div className="flex-1 min-w-0">
                                <div className="font-black text-slate-800 uppercase text-xs md:text-sm truncate">{item.name}</div>
-                               <div className="text-[9px] md:text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Terjual: {item.qty} PCS @ Rp {item.price.toLocaleString()}</div>
+                               <div className="text-[9px] md:text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Terjual: {item.qty} PCS @ Rp {item.price.toLocaleString('id-ID')}{alreadyReturned[item.itemId] ? ` • Sudah diretur: ${alreadyReturned[item.itemId]}` : ''}</div>
                             </div>
 
                             <div className="flex items-center gap-4 md:gap-8 w-full md:w-auto justify-between">
                                <div className="flex flex-col items-center gap-1.5">
                                   <span className="text-[8px] font-black text-slate-400 uppercase tracking-widest leading-none">Qty Retur</span>
                                   <div className="flex items-center bg-slate-100 p-1 rounded-xl border-2 border-slate-200 shadow-inner">
-                                     <button onClick={() => updateReturnQty(item.itemId, item.qty, -1)} className="p-1.5 text-slate-400 hover:text-red-500 transition-all"><Minus size={14}/></button>
+                                     <button onClick={() => updateReturnQty(item.itemId, Math.max(0, item.qty - (alreadyReturned[item.itemId] || 0)), -1)} className="p-1.5 text-slate-400 hover:text-red-500 transition-all"><Minus size={14}/></button>
                                      <span className="w-10 text-center font-black text-slate-900 text-sm md:text-lg">{returnItems[item.itemId]?.qty || 0}</span>
-                                     <button onClick={() => updateReturnQty(item.itemId, item.qty, 1)} className="p-1.5 text-slate-400 hover:text-blue-600 transition-all"><Plus size={14}/></button>
+                                     <button onClick={() => updateReturnQty(item.itemId, Math.max(0, item.qty - (alreadyReturned[item.itemId] || 0)), 1)} className="p-1.5 text-slate-400 hover:text-blue-600 transition-all"><Plus size={14}/></button>
                                   </div>
                                </div>
                                

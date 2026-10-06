@@ -1,33 +1,36 @@
 /**
  * Merge Service for Cloud Sync Conflict Resolution
- * 
- * Instead of last-write-wins, this service merges local and remote data
- * using timestamp-based conflict resolution per entity.
- * 
+ *
  * Strategy:
- * - For entities with `createdAt`: newer entries win, union of both sets
- * - For entities with `id`: merge by ID, keep the one with latest timestamp
- * - For arrays without timestamps: union by ID (no duplicates)
+ * - Append-only logs (sales, movements, payments, audit, price history): union by ID, newest first.
+ * - Mutable entities: the side with the newer `updatedAt` wins. Without timestamps (legacy data)
+ *   the remote copy wins, matching the previous behaviour.
+ * - Items & customers: merged per field group (stock / price / base, balance / base), so a price
+ *   change on one device and a sale on another device are both preserved.
+ * - Deleted records (tombstones) are unioned and filtered out, so deletions do not come back
+ *   from another device's stale copy.
  */
 
-import { AppData, Sale, SaleReturn, PurchaseOrder, InventoryMovement, AuditLog, PaymentRecord, CashSession, InventoryLog, ChatMessage, Account } from '../types';
+import { AppData, DeletedRecord, StoreProfile } from '../types';
+import { CUSTOMER_FIELD_GROUPS, ITEM_FIELD_GROUPS, mergeEntityByFieldGroups } from './syncMeta';
+import { PRICE_HISTORY_LIMIT } from './pricing';
 
-type EntityWithId = { id: string; createdAt?: string; [key: string]: any };
-type EntityWithCode = { code: string; [key: string]: any };
+type EntityWithId = { id: string; createdAt?: string; updatedAt?: string; [key: string]: any };
+type EntityWithCode = { code: string; updatedAt?: string; [key: string]: any };
+
+export const DELETED_RECORDS_LIMIT = 5000;
+export const AUDIT_LOG_LIMIT = 2000;
 
 /**
  * Merge two arrays of entities by ID, preferring the one with the latest createdAt.
- * If no createdAt, remote wins (cloud is source of truth for shared data).
  */
 const mergeById = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
   const merged = new Map<string, T>();
 
-  // Add all local entries
   for (const item of local) {
     merged.set(item.id, item);
   }
 
-  // Merge remote entries (newer wins)
   for (const item of remote) {
     const existing = merged.get(item.id);
     if (!existing) {
@@ -37,7 +40,6 @@ const mergeById = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
         merged.set(item.id, item);
       }
     }
-    // If no createdAt on either, keep local (already in map)
   }
 
   return Array.from(merged.values());
@@ -55,11 +57,14 @@ const mergeAppendOnly = <T extends EntityWithId>(local: T[], remote: T[]): T[] =
   });
 };
 
+const isLocalNewer = (local: { updatedAt?: string }, remote: { updatedAt?: string }) =>
+  (local.updatedAt || '') > (remote.updatedAt || '');
+
 /**
- * Merge mutable entities (items, customers, users) — latest update wins.
- * Uses a `lastModifiedAt` or `createdAt` field for comparison.
+ * Merge mutable entities — the newest `updatedAt` wins, remote wins on ties/legacy data.
+ * When field groups are given, each group is resolved independently.
  */
-const mergeMutable = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
+const mergeMutable = <T extends EntityWithId>(local: T[], remote: T[], groups?: Record<string, string[]>): T[] => {
   const merged = new Map<string, T>();
 
   for (const item of local) {
@@ -70,9 +75,9 @@ const mergeMutable = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
     const existing = merged.get(item.id);
     if (!existing) {
       merged.set(item.id, item);
-    } else {
-      // For mutable entities without explicit timestamp, remote wins
-      // (cloud is shared state, likely more up-to-date from other terminals)
+    } else if (groups) {
+      merged.set(item.id, mergeEntityByFieldGroups(existing, item, groups));
+    } else if (!isLocalNewer(existing, item)) {
       merged.set(item.id, item);
     }
   }
@@ -86,8 +91,32 @@ const mergeMutable = <T extends EntityWithId>(local: T[], remote: T[]): T[] => {
 const mergeByCode = <T extends EntityWithCode>(local: T[], remote: T[]): T[] => {
   const merged = new Map<string, T>();
   for (const item of local) merged.set(item.code, item);
-  for (const item of remote) merged.set(item.code, item); // remote wins
+  for (const item of remote) {
+    const existing = merged.get(item.code);
+    if (!existing || !isLocalNewer(existing, item)) merged.set(item.code, item);
+  }
   return Array.from(merged.values());
+};
+
+const recordKey = (record: Pick<DeletedRecord, 'collection' | 'id'>) => `${record.collection}:${record.id}`;
+
+const mergeDeletedRecords = (local: DeletedRecord[] = [], remote: DeletedRecord[] = []): DeletedRecord[] => {
+  const merged = new Map<string, DeletedRecord>();
+  [...remote, ...local].forEach(record => {
+    if (record?.collection && record?.id) merged.set(recordKey(record), record);
+  });
+  return Array.from(merged.values())
+    .sort((a, b) => (b.deletedAt || '').localeCompare(a.deletedAt || ''))
+    .slice(0, DELETED_RECORDS_LIMIT);
+};
+
+const withoutDeleted = <T extends { id: string }>(collection: string, entities: T[], deleted: Set<string>): T[] =>
+  deleted.size === 0 ? entities : entities.filter(entity => !deleted.has(`${collection}:${entity.id}`));
+
+const mergeStoreProfile = (local?: StoreProfile, remote?: StoreProfile): StoreProfile | undefined => {
+  if (!local) return remote;
+  if (!remote) return local;
+  return isLocalNewer(local, remote) ? local : remote;
 };
 
 /**
@@ -95,31 +124,38 @@ const mergeByCode = <T extends EntityWithCode>(local: T[], remote: T[]): T[] => 
  * Returns merged data that preserves changes from both sides.
  */
 export const mergeAppData = (local: Partial<AppData>, remote: Partial<AppData>): Partial<AppData> => {
-  return {
-    // Mutable master data — remote wins for shared entities
-    users: mergeMutable(local.users || [], remote.users || []),
-    items: mergeMutable(local.items || [], remote.items || []),
-    customers: mergeMutable(local.customers || [], remote.customers || []),
-    suppliers: mergeMutable(local.suppliers || [], remote.suppliers || []),
-    accounts: mergeByCode(local.accounts || [], remote.accounts || []),
-    branches: mergeMutable(local.branches || [], remote.branches || []),
+  const deletedRecords = mergeDeletedRecords(local.deletedRecords, remote.deletedRecords);
+  const deleted = new Set(deletedRecords.map(recordKey));
 
-    // Append-only transaction logs use union; mutable workflow documents prefer cloud state.
+  return {
+    // Mutable master data — newest change wins, field groups for high-contention entities.
+    users: withoutDeleted('users', mergeMutable(local.users || [], remote.users || []), deleted),
+    items: withoutDeleted('items', mergeMutable(local.items || [], remote.items || [], ITEM_FIELD_GROUPS), deleted),
+    customers: withoutDeleted('customers', mergeMutable(local.customers || [], remote.customers || [], CUSTOMER_FIELD_GROUPS), deleted),
+    suppliers: withoutDeleted('suppliers', mergeMutable(local.suppliers || [], remote.suppliers || []), deleted),
+    accounts: mergeByCode(local.accounts || [], remote.accounts || []),
+    branches: withoutDeleted('branches', mergeMutable(local.branches || [], remote.branches || []), deleted),
+
+    // Append-only transaction logs use union; mutable workflow documents use newest change.
     sales: mergeAppendOnly(local.sales || [], remote.sales || []),
     returns: mergeMutable(local.returns || [], remote.returns || []),
-    purchaseOrders: mergeMutable(local.purchaseOrders || [], remote.purchaseOrders || []),
+    purchaseOrders: withoutDeleted('purchaseOrders', mergeMutable(local.purchaseOrders || [], remote.purchaseOrders || []), deleted),
     inventoryMovements: mergeAppendOnly(local.inventoryMovements || [], remote.inventoryMovements || []),
-    auditLogs: mergeAppendOnly(local.auditLogs || [], remote.auditLogs || []).slice(0, 2000),
+    auditLogs: mergeAppendOnly(local.auditLogs || [], remote.auditLogs || []).slice(0, AUDIT_LOG_LIMIT),
     paymentRecords: mergeAppendOnly(local.paymentRecords || [], remote.paymentRecords || []),
     cashSessions: mergeMutable(local.cashSessions || [], remote.cashSessions || []),
-    cashExpenses: mergeAppendOnly(local.cashExpenses || [], remote.cashExpenses || []),
-    inventoryLogs: mergeAppendOnly(local.inventoryLogs || [], remote.inventoryLogs || []),
+    cashExpenses: withoutDeleted('cashExpenses', mergeAppendOnly(local.cashExpenses || [], remote.cashExpenses || []), deleted),
+    inventoryLogs: mergeAppendOnly((local.inventoryLogs || []) as any[], (remote.inventoryLogs || []) as any[]),
+    priceHistory: mergeAppendOnly(local.priceHistory || [], remote.priceHistory || []).slice(0, PRICE_HISTORY_LIMIT),
 
     // Promotions — merge by ID
-    promotions: mergeMutable(local.promotions || [], remote.promotions || []),
+    promotions: withoutDeleted('promotions', mergeMutable(local.promotions || [], remote.promotions || []), deleted),
 
     // Media assets — merge by ID
-    mediaAssets: mergeById(local.mediaAssets || [], remote.mediaAssets || []),
+    mediaAssets: withoutDeleted('mediaAssets', mergeById(local.mediaAssets || [], remote.mediaAssets || []), deleted),
+
+    deletedRecords,
+    storeProfile: mergeStoreProfile(local.storeProfile, remote.storeProfile),
 
     // AI state — keep local (per-device)
     aiUndoStack: local.aiUndoStack || remote.aiUndoStack || [],

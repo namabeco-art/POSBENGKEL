@@ -49,3 +49,35 @@ export const canAccessTab = (user: User | null | undefined, tabId: string): bool
 
 export const getAccessibleTabs = (user: User | null | undefined): string[] =>
   Object.keys(TAB_PERMISSION_MAP).filter(tabId => canAccessTab(user, tabId));
+
+/** Izin aksi detail (di luar akses menu) yang bisa diberikan per user. */
+export const ACTION_PERMISSIONS: Array<{ permission: PermissionKey; label: string; group: string }> = [
+  { permission: 'item.create', label: 'Tambah barang', group: 'Barang & Harga' },
+  { permission: 'item.edit', label: 'Ubah barang & harga', group: 'Barang & Harga' },
+  { permission: 'item.delete', label: 'Hapus barang', group: 'Barang & Harga' },
+  { permission: 'contact.create', label: 'Tambah kontak', group: 'Kontak' },
+  { permission: 'contact.edit', label: 'Ubah kontak', group: 'Kontak' },
+  { permission: 'contact.delete', label: 'Hapus kontak', group: 'Kontak' },
+  { permission: 'return.approve', label: 'Setujui retur (refund)', group: 'Transaksi' },
+  { permission: 'purchase.create', label: 'Buat PO', group: 'Pembelian' },
+  { permission: 'purchase.receive', label: 'Terima barang PO', group: 'Pembelian' },
+  { permission: 'purchase.pay', label: 'Bayar hutang supplier', group: 'Pembelian' },
+  { permission: 'stock.opname', label: 'Stok opname', group: 'Stok' },
+  { permission: 'stock.adjust', label: 'Penyesuaian stok', group: 'Stok' },
+  { permission: 'user.manage', label: 'Kelola user', group: 'Sistem' },
+];
+
+const ALL_PERMISSIONS: PermissionKey[] = Array.from(new Set([
+  ...MODULE_ACTIONS.map(module => module.permission),
+  ...ACTION_PERMISSIONS.map(action => action.permission),
+  'sale.void',
+] as PermissionKey[]));
+
+/** Preset izin saat membuat user baru berdasarkan role. */
+export const ROLE_PERMISSION_PRESETS: Record<string, PermissionKey[]> = {
+  OWNER: ALL_PERMISSIONS,
+  MANAGER: ALL_PERMISSIONS,
+  SUPERVISOR: ['dashboard.view', 'item.view', 'contact.view', 'sale.create', 'sale.view', 'return.create', 'return.approve', 'stock.view', 'stock.opname', 'purchase.view', 'purchase.receive', 'report.view'],
+  WAREHOUSE: ['dashboard.view', 'item.view', 'purchase.view', 'purchase.receive', 'stock.view', 'stock.opname'],
+  KASIR: ['dashboard.view', 'sale.create', 'sale.view', 'return.create', 'item.view'],
+};

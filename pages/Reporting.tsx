@@ -8,7 +8,7 @@ import {
   BarChart3, AlertCircle, Sparkles, Receipt, Hash, CreditCard, User as UserIcon, Wallet, Landmark,
   Notebook, Layers, ShieldCheck, RefreshCw, ArrowDownLeft, AlertTriangle
 } from 'lucide-react';
-import { Item, Customer, Supplier, Account, Sale, PurchaseOrder } from '../types';
+import { Item, Customer, Supplier, Account, Sale, PurchaseOrder, SaleReturn } from '../types';
 import { printSimpleReport, exportToExcel } from '../services/printService';
 import SmartStockDashboard from '../components/SmartStockDashboard';
 import PiutangDashboard from '../components/PiutangDashboard';
@@ -20,11 +20,13 @@ interface ReportingProps {
   suppliers: Supplier[];
   accounts: Account[];
   sales: Sale[];
+  returns?: SaleReturn[];
   purchaseOrders: PurchaseOrder[];
+  onReceiveCustomerPayment?: (customerId: string, amount: number, method: string, note?: string) => Promise<void>;
   onAnalyzeWithAI?: () => void;
 }
 
-const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, accounts, sales, purchaseOrders, onAnalyzeWithAI }) => {
+const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, accounts, sales, returns = [], purchaseOrders, onReceiveCustomerPayment, onAnalyzeWithAI }) => {
   const [activeReport, setActiveReport] = useState<'stok' | 'penjualan' | 'kas' | 'buku' | 'stok-pintar' | 'piutang' | 'profit'>('stok');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -36,14 +38,14 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
     return new Date(+parts[2], +parts[1] - 1, +parts[0]);
   };
 
-  // Helper to calculate profit for a sale
+  // Helper to calculate profit for a sale (setelah diskon transaksi)
   const calculateSaleProfit = (sale: Sale) => {
-    return sale.items.reduce((totalProfit, saleItem) => {
+    const cost = sale.items.reduce((totalCost, saleItem) => {
       const masterItem = items.find(i => i.id === saleItem.itemId);
       const costPrice = saleItem.costPrice ?? masterItem?.basePrice ?? 0;
-      const itemProfit = (saleItem.price - costPrice) * saleItem.qty;
-      return totalProfit + itemProfit;
+      return totalCost + costPrice * saleItem.qty;
     }, 0);
+    return sale.total - cost;
   };
 
   // 1. Data Aggregation for Stock Report
@@ -240,11 +242,11 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
       )}
 
       {activeReport === 'piutang' && (
-        <PiutangDashboard customers={customers} sales={sales} />
+        <PiutangDashboard customers={customers} sales={sales} onReceivePayment={onReceiveCustomerPayment} />
       )}
 
       {activeReport === 'profit' && (
-        <ProfitAnalysis items={items} sales={sales} />
+        <ProfitAnalysis items={items} sales={sales} returns={returns} />
       )}
 
       {/* Legacy Reports - Summary Row */}

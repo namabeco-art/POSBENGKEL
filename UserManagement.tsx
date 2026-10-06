@@ -8,7 +8,7 @@ import {
   Sparkles, Settings as SettingsIcon
 } from 'lucide-react';
 import { User, UserRole } from './types';
-import { MODULE_ACTIONS } from './services/permissions';
+import { ACTION_PERMISSIONS, MODULE_ACTIONS, ROLE_PERMISSION_PRESETS } from './services/permissions';
 
 type UserDraft = {
   id: string;
@@ -42,7 +42,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
     role: UserRole.KASIR 
   });
 
-  const [permissions, setPermissions] = useState<User['permissions']>(['dashboard.view']);
+  const [permissions, setPermissions] = useState<User['permissions']>([...ROLE_PERMISSION_PRESETS.KASIR]);
   const [schedule, setSchedule] = useState({
     enabled: false,
     startTime: '08:00',
@@ -93,7 +93,7 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
   const resetForm = () => {
     setEditingId(null);
     setFormData({ name: '', username: '', password: '', role: UserRole.KASIR });
-    setPermissions(['dashboard.view']);
+    setPermissions([...ROLE_PERMISSION_PRESETS.KASIR]);
     setSchedule({ enabled: false, startTime: '08:00', endTime: '17:00' });
   };
 
@@ -226,12 +226,17 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
                            </div>
                            <div className="space-y-2">
                              <label className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-1">{editingId ? 'Password Baru (kosongkan jika tidak diubah)' : 'Password'}</label>
-                             <input type="password" className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-bold text-slate-800 transition-all shadow-inner" placeholder={editingId ? '(tidak diubah)' : '••••••••'} value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
+                             <input type="password" required={!editingId} minLength={editingId ? undefined : 4} className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-bold text-slate-800 transition-all shadow-inner" placeholder={editingId ? '(tidak diubah)' : '••••••••'} value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} />
                            </div>
                         </div>
                         <div className="space-y-2">
                           <label className="text-[9px] md:text-[10px] font-black text-slate-400 uppercase tracking-widest block ml-1">Tingkatan Role</label>
-                          <select className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-black text-slate-800 transition-all cursor-pointer appearance-none shadow-inner" value={formData.role} onChange={e => setFormData({...formData, role: e.target.value as UserRole})}>
+                          <select className="w-full bg-slate-50 border-2 border-slate-100 rounded-2xl p-3.5 md:p-4 focus:border-blue-600 focus:bg-white outline-none font-black text-slate-800 transition-all cursor-pointer appearance-none shadow-inner" value={formData.role} onChange={e => {
+                            const role = e.target.value as UserRole;
+                            setFormData({...formData, role});
+                            // Akun baru: isi izin sesuai preset role (masih bisa diubah lewat checklist).
+                            if (!editingId) setPermissions([...(ROLE_PERMISSION_PRESETS[role] || ['dashboard.view'])]);
+                          }}>
                             <option value={UserRole.KASIR}>KASIR (Staf Operasional)</option>
                             <option value={UserRole.WAREHOUSE}>WAREHOUSE (Admin Gudang)</option>
                             <option value={UserRole.SUPERVISOR}>SUPERVISOR (Persetujuan)</option>
@@ -278,6 +283,18 @@ const UserManagement: React.FC<UserManagementProps> = ({ users, onAddUser, onUpd
                                </div>
                              )
                           })}
+                          <div className="space-y-3 md:space-y-4">
+                            <div className="text-[8px] md:text-[9px] font-black text-slate-400 uppercase tracking-[0.3em] flex items-center gap-3"><span>IZIN AKSI</span><div className="flex-1 h-px bg-slate-200"></div></div>
+                            <p className="text-[10px] text-slate-500 -mt-1">Contoh: staf yang boleh mengubah harga butuh menu "Master Barang" + izin "Ubah barang & harga".</p>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                              {ACTION_PERMISSIONS.map(action => (
+                                <label key={action.permission} className={`flex items-center gap-3 p-3 rounded-xl border-2 cursor-pointer text-left ${permissions.includes(action.permission) ? 'bg-indigo-50 border-indigo-300 text-indigo-800' : 'bg-white border-slate-200 text-slate-500'}`}>
+                                  <input type="checkbox" checked={permissions.includes(action.permission)} onChange={() => togglePermission(action.permission)} />
+                                  <span className="text-[11px] font-bold">{action.label}<span className="block text-[9px] font-medium text-slate-400">{action.group}</span></span>
+                                </label>
+                              ))}
+                            </div>
+                          </div>
                        </div>
                     </div>
                   </div>

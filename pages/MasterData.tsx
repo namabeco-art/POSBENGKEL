@@ -15,19 +15,40 @@ import {
   Wand2,
   TrendingUp
 } from 'lucide-react';
-import { Item, Customer, Supplier, BundleComponent } from '../types';
-import { hasCloudConfig } from '../services/syncService';
+import { Item, Customer, Supplier, BundleComponent, PriceChangeLog, PriceChangeSource } from '../types';
 import PriceManager from '../components/PriceManager';
+import CustomerPaymentModal from '../components/CustomerPaymentModal';
+import { createId } from '../services/idService';
+import { downloadCsv, findColumn, parseCsv } from '../services/csv';
+import { getMarginPercent, getSellPrice, parseRupiah } from '../services/pricing';
+
+const ITEM_CSV_HEADER = ['Kode', 'Nama', 'Kategori', 'Merk', 'Harga Dasar', 'Harga Level 1', 'Harga Level 2', 'Harga Level 3', 'Harga Level 4', 'Barcode', 'URL Gambar', 'Stok'];
+
+const SOURCE_LABEL: Record<PriceChangeSource, string> = {
+  MANUAL: 'Edit manual',
+  BULK: 'Update massal',
+  MARGIN: 'Hitung markup',
+  IMPORT: 'Import CSV',
+  AI: 'AI Consultant',
+  AI_UNDO: 'Undo AI',
+  PURCHASE: 'Penerimaan PO',
+  COST_REVIEW: 'Sesuaikan modal',
+};
 
 interface MasterDataProps {
   type: 'items' | 'contacts' | 'warehouses';
   items?: Item[];
+  priceHistory?: PriceChangeLog[];
   customers?: Customer[];
   suppliers?: Supplier[];
   onAddItem?: (item: Item) => void;
-  onAddItemsBulk?: (items: Item[]) => void;
+  /** Import CSV: kode yang sudah ada diperbarui, kode baru ditambahkan. */
+  onImportItems?: (items: Item[]) => { added: number; updated: number; errors: string[] };
   onUpdateItem?: (item: Item) => void;
-  onUpdateItemsBulk?: (updatedList: Item[]) => void;
+  onUpdateItemsBulk?: (patches: Array<Partial<Item> & { id: string }>, source?: PriceChangeSource, note?: string) => void;
+  /** Penyesuaian stok massal lewat opname (tercatat di kartu stok). */
+  onAdjustStockBulk?: (logs: any[]) => void;
+  onReceiveCustomerPayment?: (customerId: string, amount: number, method: string, note?: string) => Promise<void>;
   onAddCustomer?: (c: Customer) => void;
   onUpdateCustomer?: (c: Customer) => void;
   onAddSupplier?: (s: Supplier) => void;
@@ -43,12 +64,14 @@ interface MasterDataProps {
   canDelete?: boolean;
 }
 
-const MasterData: React.FC<MasterDataProps> = ({ 
-  type, items = [], customers = [], suppliers = [], 
-  onAddItem, onAddItemsBulk, onUpdateItem, onUpdateItemsBulk, onAddCustomer, onUpdateCustomer, onAddSupplier, onUpdateSupplier,
-  onDeleteItem, onDeleteCustomer, onDeleteSupplier, onManualPush,
+const MasterData: React.FC<MasterDataProps> = ({
+  type, items = [], priceHistory = [], customers = [], suppliers = [],
+  onAddItem, onImportItems, onUpdateItem, onUpdateItemsBulk, onAdjustStockBulk, onReceiveCustomerPayment,
+  onAddCustomer, onUpdateCustomer, onAddSupplier, onUpdateSupplier,
+  onDeleteItem, onDeleteCustomer, onDeleteSupplier,
   canCreate = true, canEdit = true, canDelete = true
 }) => {
+  const [payingCustomer, setPayingCustomer] = useState<Customer | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -212,18 +235,41 @@ const MasterData: React.FC<MasterDataProps> = ({
       return;
     }
 
-    const itemData: any = {
-      ...newItem,
-      memberPrices: [newItem.priceL1, newItem.priceL2, newItem.priceL3, newItem.priceL4],
-      warehouseId: 'W1',
-      imageUrl: newItem.imageUrl || 'https://images.unsplash.com/photo-1583258292688-d0213dc5a3a8?q=80&w=300&auto=format&fit=crop',
-      units: [{ name: 'Pcs', conversion: 1, price: newItem.priceL1 }]
+    const memberPrices = [newItem.priceL1, newItem.priceL2, newItem.priceL3, newItem.priceL4].map(value => Math.max(0, Math.round(value || 0)));
+    if (memberPrices[0] <= 0) {
+      alert('Harga Level 1 (harga jual eceran) wajib diisi. Level 2–4 boleh 0 = ikut harga Level 1.');
+      return;
+    }
+    const belowCostLevels = newItem.basePrice > 0
+      ? memberPrices.map((price, index) => ({ level: index + 1, price: price > 0 ? price : memberPrices[0] })).filter(entry => entry.price <= newItem.basePrice)
+      : [];
+    if (belowCostLevels.length > 0 && !window.confirm(`Harga jual Level ${belowCostLevels.map(entry => entry.level).join(', ')} tidak lebih tinggi dari harga modal Rp ${newItem.basePrice.toLocaleString('id-ID')} — barang akan dijual rugi. Tetap simpan?`)) {
+      return;
+    }
+
+    const existing = editingId ? items.find(i => i.id === editingId) : undefined;
+    // Pertahankan satuan lain (mis. Dus isi 12); hanya harga satuan dasar yang mengikuti Level 1.
+    const units = existing?.units?.length
+      ? existing.units.map(unit => (unit.conversion === 1 ? { ...unit, price: memberPrices[0] } : unit))
+      : [{ name: 'Pcs', conversion: 1, price: memberPrices[0] }];
+    const itemData = {
+      code: newItem.code,
+      name: newItem.name.trim(),
+      barcode: newItem.barcode,
+      category: newItem.category,
+      brand: newItem.brand,
+      basePrice: Math.max(0, Math.round(newItem.basePrice || 0)),
+      memberPrices,
+      units,
+      imageUrl: newItem.imageUrl.trim() || undefined,
+      isBundle: newItem.isBundle,
+      components: newItem.components,
     };
 
-    if (editingId && onUpdateItem) {
-      onUpdateItem({ id: editingId, ...itemData });
+    if (existing && onUpdateItem) {
+      onUpdateItem({ ...existing, ...itemData }); // stok tetap dari data terbaru (diatur lewat Stok Opname)
     } else if (onAddItem) {
-      onAddItem({ id: Math.random().toString(36).substr(2, 9), ...itemData });
+      onAddItem({ id: createId('ITEM'), ...itemData, stock: Math.max(0, newItem.stock || 0), warehouseId: 'W1', isActive: true });
     }
     setIsModalOpen(false);
     resetItemForm();
@@ -234,15 +280,17 @@ const MasterData: React.FC<MasterDataProps> = ({
     if (contactTab === 'customer') {
       if (editingId && onUpdateCustomer) {
         const existing = customers.find(c => c.id === editingId);
-        onUpdateCustomer({ id: editingId, ...newContact, currentDebt: existing?.currentDebt || 0 });
+        // Spread data terbaru agar piutang/poin yang berubah saat form terbuka tidak tertimpa.
+        if (existing) onUpdateCustomer({ ...existing, ...newContact });
       } else if (onAddCustomer) {
-        onAddCustomer({ id: Math.random().toString(36).substr(2, 9), ...newContact, currentDebt: 0 });
+        onAddCustomer({ id: createId('CUST'), ...newContact, currentDebt: 0 });
       }
     } else if (contactTab === 'supplier') {
       if (editingId && onUpdateSupplier) {
-        onUpdateSupplier({ id: editingId, name: newContact.name, phone: newContact.phone, address: newContact.address });
+        const existing = suppliers.find(s => s.id === editingId);
+        if (existing) onUpdateSupplier({ ...existing, name: newContact.name, phone: newContact.phone, address: newContact.address });
       } else if (onAddSupplier) {
-        onAddSupplier({ id: Math.random().toString(36).substr(2, 9), name: newContact.name, phone: newContact.phone, address: newContact.address });
+        onAddSupplier({ id: createId('SUP'), name: newContact.name, phone: newContact.phone, address: newContact.address });
       }
     }
     setIsModalOpen(false);
@@ -284,78 +332,102 @@ const MasterData: React.FC<MasterDataProps> = ({
   };
 
   const handleExport = () => {
-    const headers = "Kode,Nama,Kategori,Merk,Harga Dasar,Harga Level 1,Harga Level 2,Harga Level 3,Harga Level 4,Barcode,URL Gambar,Stok\n";
-    const rows = items.map(i => [
-      i.code, i.name, i.category, i.brand, i.basePrice, i.memberPrices[0], i.memberPrices[1], i.memberPrices[2], i.memberPrices[3], i.barcode, i.imageUrl, i.stock
-    ].join(",")).join("\n");
-    const blob = new Blob([headers + rows], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", "master_barang_ipos5.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsv(`master_barang_${new Date().toISOString().slice(0, 10)}.csv`, [
+      ITEM_CSV_HEADER,
+      ...items.map(i => [
+        i.code, i.name, i.category, i.brand, i.basePrice,
+        ...[0, 1, 2, 3].map(level => i.memberPrices[level] || 0),
+        i.barcode, i.imageUrl || '', i.stock,
+      ]),
+    ]);
   };
 
   const handleDownloadTemplate = () => {
-    const headers = "Kode,Nama,Kategori,Merk,Harga Dasar,Harga Level 1,Harga Level 2,Harga Level 3,Harga Level 4,Barcode,URL Gambar,Stok\n";
-    const example = "BRG-EXAMPLE,Contoh Produk,Sembako,Merk Contoh,1000,1200,1150,1100,1050,1234567890,https://example.com/img.jpg,100";
-    const blob = new Blob([headers + example], { type: 'text/csv;charset=utf-8;' });
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.setAttribute("download", "template_import_barang.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    downloadCsv('template_import_barang.csv', [
+      ITEM_CSV_HEADER,
+      ['BRG-EXAMPLE', 'Contoh Produk', 'Sembako', 'Merk Contoh', 1000, 1200, 1150, 1100, 1050, '1234567890', '', 100],
+    ]);
   };
 
   const handleImportClick = () => {
     fileInputRef.current?.click();
   };
 
+  /**
+   * Import CSV (pemisah koma/titik koma otomatis). Kode yang sudah ada → harga & data master diperbarui,
+   * kode baru → barang ditambahkan. Cocok untuk update harga massal: Export → ubah di Excel → Import.
+   */
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (e.target) e.target.value = '';
+    if (!file || !onImportItems) return;
 
     const reader = new FileReader();
     reader.onload = (event) => {
-      const text = event.target?.result as string;
-      const lines = text.split("\n");
-      const newItems: Item[] = [];
+      const rows = parseCsv(String(event.target?.result || ''));
+      if (rows.length < 2) {
+        alert('File kosong atau tidak sesuai template.');
+        return;
+      }
+      const header = rows[0];
+      const col = (names: string[], fallback: number) => {
+        const index = findColumn(header, names);
+        return index >= 0 ? index : fallback;
+      };
+      const idx = {
+        code: col(['Kode', 'Kode Barang', 'Code', 'SKU'], 0),
+        name: col(['Nama', 'Nama Barang', 'Name'], 1),
+        category: col(['Kategori', 'Category'], 2),
+        brand: col(['Merk', 'Brand'], 3),
+        base: col(['Harga Dasar', 'Harga Beli', 'Modal', 'HPP'], 4),
+        levels: [
+          col(['Harga Level 1', 'Harga Lv1', 'Lv1', 'Harga Jual'], 5),
+          col(['Harga Level 2', 'Harga Lv2', 'Lv2'], 6),
+          col(['Harga Level 3', 'Harga Lv3', 'Lv3'], 7),
+          col(['Harga Level 4', 'Harga Lv4', 'Lv4'], 8),
+        ],
+        barcode: col(['Barcode'], 9),
+        image: col(['URL Gambar', 'Gambar', 'Image'], 10),
+        stock: col(['Stok', 'Stock'], 11),
+      };
 
-      for (let i = 1; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const columns = line.split(",");
-        if (columns.length < 5) continue;
-
-        const code = columns[0];
-        const name = columns[1];
-        const category = columns[2];
-        const brand = columns[3];
-        const basePrice = parseInt(columns[4]) || 0;
-        const p1 = parseInt(columns[5]) || 0;
-        const p2 = parseInt(columns[6]) || 0;
-        const p3 = parseInt(columns[7]) || 0;
-        const p4 = parseInt(columns[8]) || 0;
-        const barcode = columns[9] || '';
-        const img = columns[10] || 'https://images.unsplash.com/photo-1583258292688-d0213dc5a3a8?q=80&w=300&auto=format&fit=crop';
-        const stock = parseInt(columns[11]) || 0;
-
-        newItems.push({
-          id: Math.random().toString(36).substr(2, 9),
-          code, barcode, name, category, brand, basePrice,
-          memberPrices: [p1, p2, p3, p4],
-          stock: stock, warehouseId: 'W1', imageUrl: img,
-          units: [{ name: 'Pcs', conversion: 1, price: p1 }]
+      const parsed: Item[] = [];
+      const skipped: string[] = [];
+      rows.slice(1).forEach((row, index) => {
+        const code = (row[idx.code] || '').trim();
+        const name = (row[idx.name] || '').trim();
+        if (!code || !name) {
+          skipped.push(`Baris ${index + 2}: kode/nama kosong`);
+          return;
+        }
+        const memberPrices = idx.levels.map(column => parseRupiah(row[column]) ?? 0);
+        parsed.push({
+          id: createId('ITEM'),
+          code,
+          name,
+          category: (row[idx.category] || '').trim() || 'Umum',
+          brand: (row[idx.brand] || '').trim(),
+          basePrice: parseRupiah(row[idx.base]) ?? 0,
+          memberPrices,
+          barcode: (row[idx.barcode] || '').trim(),
+          imageUrl: (row[idx.image] || '').trim() || undefined,
+          stock: Math.max(0, parseRupiah(row[idx.stock]) ?? 0),
+          warehouseId: 'W1',
+          isActive: true,
+          units: [{ name: 'Pcs', conversion: 1, price: memberPrices[0] }],
         });
-      }
+      });
 
-      if (newItems.length > 0 && onAddItemsBulk) {
-        onAddItemsBulk(newItems);
-        alert(`Berhasil mengimpor ${newItems.length} barang.`);
+      if (parsed.length === 0) {
+        alert(`Tidak ada baris yang bisa diimpor.\n${skipped.slice(0, 8).join('\n')}`);
+        return;
       }
-      if (e.target) e.target.value = '';
+      const result = onImportItems(parsed);
+      const errors = [...skipped, ...result.errors];
+      alert(
+        `Import selesai: ${result.added} barang baru, ${result.updated} barang diperbarui.`
+        + (errors.length ? `\n\n${errors.length} baris dilewati:\n${errors.slice(0, 8).join('\n')}` : ''),
+      );
     };
     reader.readAsText(file);
   };
@@ -376,16 +448,42 @@ const MasterData: React.FC<MasterDataProps> = ({
   };
 
   const handleBulkUpdate = () => {
-    if (selectedItemIds.length === 0 || !onUpdateItemsBulk) return;
-    
-    const updatedList = items.filter(item => selectedItemIds.includes(item.id)).map(item => ({
-      ...item,
-      category: bulkEditForm.category || item.category,
-      brand: bulkEditForm.brand || item.brand,
-      stock: item.stock + (bulkEditForm.stockChange || 0)
-    }));
+    if (selectedItemIds.length === 0) return;
+    const targets = items.filter(item => selectedItemIds.includes(item.id));
 
-    onUpdateItemsBulk(updatedList);
+    if ((bulkEditForm.category || bulkEditForm.brand) && onUpdateItemsBulk) {
+      onUpdateItemsBulk(
+        targets.map(item => ({
+          id: item.id,
+          ...(bulkEditForm.category ? { category: bulkEditForm.category } : {}),
+          ...(bulkEditForm.brand ? { brand: bulkEditForm.brand } : {}),
+        })),
+        'BULK',
+        'Edit massal kategori/merk',
+      );
+    }
+
+    // Perubahan stok massal dicatat sebagai opname agar muncul di kartu stok & audit.
+    if (bulkEditForm.stockChange && onAdjustStockBulk) {
+      const now = new Date();
+      const batchId = createId('SO');
+      const change = bulkEditForm.stockChange;
+      onAdjustStockBulk(targets.map((item, index) => {
+        const actualStock = Math.max(0, item.stock + change);
+        return {
+          id: `${batchId}-${index + 1}`,
+          date: now.toLocaleDateString('id-ID'),
+          createdAt: now.toISOString(),
+          itemId: item.id,
+          itemName: item.name,
+          systemStock: item.stock,
+          actualStock,
+          difference: actualStock - item.stock,
+          notes: `Edit massal stok (${change > 0 ? '+' : ''}${change})`,
+          status: 'SELESAI',
+        };
+      }));
+    }
     setSelectedItemIds([]);
     setIsBulkEditModalOpen(false);
     setBulkEditForm({ category: '', brand: '', stockChange: 0 });
@@ -550,7 +648,9 @@ const MasterData: React.FC<MasterDataProps> = ({
                   <td className="px-8 py-5 border-r border-slate-100">
                     <div className="flex items-center gap-5">
                       <div className="relative shrink-0">
-                        <img src={item.imageUrl} className="w-14 h-14 rounded-2xl object-cover border border-slate-300 shadow-sm" />
+                        {item.imageUrl
+                          ? <img src={item.imageUrl} alt="" className="w-14 h-14 rounded-2xl object-cover border border-slate-300 shadow-sm" />
+                          : <div className="w-14 h-14 rounded-2xl border border-slate-300 bg-slate-100 flex items-center justify-center text-slate-400"><Package size={22} /></div>}
                         <div className="absolute -bottom-1 -right-1 bg-white p-1 rounded-lg border border-slate-200">
                           {item.isBundle ? <Box size={12} className="text-orange-600"/> : <ShieldCheck size={12} className="text-blue-600"/>}
                         </div>
@@ -574,8 +674,22 @@ const MasterData: React.FC<MasterDataProps> = ({
                     </div>
                   </td>
                   <td className="px-8 py-5 border-r border-slate-100">
-                     <div className="font-bold text-slate-900 text-base tracking-tighter">Rp {item.memberPrices[0]?.toLocaleString()}</div>
-                     <div className="text-[10px] font-bold text-slate-500 uppercase">Beli: Rp {item.basePrice.toLocaleString()}</div>
+                     {(() => {
+                       const sellPrice = getSellPrice(item, 1);
+                       const margin = getMarginPercent(sellPrice, item.basePrice);
+                       const isLoss = item.basePrice > 0 && sellPrice > 0 && sellPrice <= item.basePrice;
+                       return (
+                         <>
+                           <div className="font-bold text-slate-900 text-base tracking-tighter">{sellPrice > 0 ? `Rp ${sellPrice.toLocaleString('id-ID')}` : <span className="text-red-600 text-sm">Belum diatur</span>}</div>
+                           <div className="text-[10px] font-bold text-slate-500 uppercase">Modal: Rp {item.basePrice.toLocaleString('id-ID')}</div>
+                           {margin !== null && item.basePrice > 0 && (
+                             <div className={`mt-1 inline-block text-[10px] font-bold px-2 py-0.5 rounded ${isLoss ? 'bg-red-100 text-red-700' : margin < 10 ? 'bg-amber-100 text-amber-700' : 'bg-emerald-50 text-emerald-700'}`}>
+                               {isLoss ? 'RUGI ' : 'Margin '}{margin.toFixed(1)}%
+                             </div>
+                           )}
+                         </>
+                       );
+                     })()}
                   </td>
                   <td className="px-8 py-5 text-right border-r border-slate-100">
                     <div className={`font-bold text-xl tracking-tighter ${item.stock < 10 ? 'text-red-600' : 'text-emerald-700'}`}>{item.stock}</div>
@@ -584,7 +698,7 @@ const MasterData: React.FC<MasterDataProps> = ({
                   <td className="px-8 py-5">
                     <div className="flex justify-center gap-2">
                       {canEdit && <button onClick={() => handleEditItemClick(item)} className="p-3 text-slate-600 hover:text-blue-700 hover:bg-blue-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Edit2 size={18} /></button>}
-                      {canDelete && <button onClick={() => onDeleteItem && onDeleteItem(item.id)} className="p-3 text-slate-600 hover:text-red-700 hover:bg-red-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Trash2 size={18} /></button>}
+                      {canDelete && <button onClick={() => onDeleteItem && window.confirm(`Hapus barang "${item.name}"? Riwayat transaksi lama tetap tersimpan.`) && onDeleteItem(item.id)} className="p-3 text-slate-600 hover:text-red-700 hover:bg-red-100 rounded-xl transition-all shadow-sm border border-slate-200 active:scale-90"><Trash2 size={18} /></button>}
                     </div>
                   </td>
                 </tr>
@@ -660,10 +774,13 @@ const MasterData: React.FC<MasterDataProps> = ({
                        {dynamicBrands.map(b => <option key={b} value={b}>{b}</option>)}
                     </select>
                  </div>
+                 {onAdjustStockBulk && (
                  <div className="space-y-2">
                     <label className="text-[11px] font-black text-slate-500 uppercase tracking-widest ml-1">Tambah/Kurang Stok (Misal: 10 atau -5)</label>
                     <input type="number" className="w-full p-4 bg-slate-50 border-2 border-slate-200 rounded-2xl font-bold outline-none focus:border-orange-500" value={bulkEditForm.stockChange} onChange={e => setBulkEditForm({...bulkEditForm, stockChange: parseInt(e.target.value) || 0})} />
+                    <p className="text-[11px] text-slate-500 ml-1">Dicatat sebagai stok opname di kartu stok.</p>
                  </div>
+                 )}
               </div>
 
               <div className="mt-10 flex gap-4">
@@ -745,15 +862,20 @@ const MasterData: React.FC<MasterDataProps> = ({
                         <td className="px-8 py-5 text-right border-r border-slate-100">
                            <div className="flex flex-col items-end gap-1">
                               <span className="bg-emerald-600 text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-sm">Level {(contact as Customer).level}</span>
-                              <div className="font-bold text-slate-900 text-base tracking-tighter">Rp {(contact as Customer).currentDebt.toLocaleString()}</div>
+                              <div className={`font-bold text-base tracking-tighter ${(contact as Customer).currentDebt > 0 ? 'text-red-600' : 'text-slate-900'}`}>Piutang: Rp {(contact as Customer).currentDebt.toLocaleString('id-ID')}</div>
                               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Limit: Rp {(contact as Customer).creditLimit.toLocaleString()}</div>
                            </div>
                         </td>
                      )}
                      <td className="px-8 py-5 text-center">
                         <div className="flex justify-center gap-2">
+                           {contactTab === 'customer' && onReceiveCustomerPayment && (contact as Customer).currentDebt > 0 && (
+                             <button onClick={() => setPayingCustomer(contact as Customer)} className="px-3 py-2 text-xs font-bold text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-xl transition-all active:scale-90" title="Terima pembayaran piutang">
+                               <CreditCard size={16} className="inline mr-1"/>Bayar
+                             </button>
+                           )}
                            {canEdit && <button onClick={() => handleEditContactClick(contact)} className="p-3 text-slate-700 hover:text-blue-700 hover:bg-blue-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Edit2 size={18}/></button>}
-                           {canDelete && <button onClick={() => contactTab === 'customer' ? (onDeleteCustomer && onDeleteCustomer(contact.id)) : (onDeleteSupplier && onDeleteSupplier(contact.id))} className="p-3 text-slate-700 hover:text-red-700 hover:bg-red-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Trash2 size={18}/></button>}
+                           {canDelete && <button onClick={() => window.confirm(`Hapus ${contactTab === 'customer' ? 'pelanggan' : 'supplier'} "${contact.name}"?`) && (contactTab === 'customer' ? (onDeleteCustomer && onDeleteCustomer(contact.id)) : (onDeleteSupplier && onDeleteSupplier(contact.id)))} className="p-3 text-slate-700 hover:text-red-700 hover:bg-red-100 border border-slate-200 rounded-xl transition-all active:scale-90"><Trash2 size={18}/></button>}
                         </div>
                      </td>
                   </tr>
@@ -907,15 +1029,45 @@ const MasterData: React.FC<MasterDataProps> = ({
                            <input type="number" required disabled={newItem.isBundle} className={`w-full bg-white border border-slate-300 rounded-2xl p-4 font-bold text-slate-900 outline-none focus:border-slate-500 ${newItem.isBundle ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : ''}`} value={newItem.basePrice} onChange={e => !newItem.isBundle && setNewItem({...newItem, basePrice: parseInt(e.target.value) || 0})} />
                         </div>
                         <div className="col-span-2 md:col-span-1">
-                           <label className="text-[11px] font-bold text-blue-700 uppercase tracking-widest block mb-2">Stok Saat Ini</label>
-                           <input type="number" className="w-full bg-white border border-slate-300 rounded-2xl p-4 font-bold text-slate-900 outline-none focus:border-blue-500" value={newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
+                           <label className="text-[11px] font-bold text-blue-700 uppercase tracking-widest block mb-2">{editingId ? 'Stok Saat Ini' : 'Stok Awal'}</label>
+                           <input type="number" min={0} disabled={!!editingId} className={`w-full border border-slate-300 rounded-2xl p-4 font-bold outline-none focus:border-blue-500 ${editingId ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white text-slate-900'}`} value={editingId ? (items.find(i => i.id === editingId)?.stock ?? newItem.stock) : newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
+                           {editingId && <p className="text-[10px] text-slate-500 mt-1">Ubah stok lewat menu Stok Opname agar tercatat di kartu stok.</p>}
                         </div>
                       </div>
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-                        {[1, 2, 3, 4].map(l => (
-                          <div key={l}><label className="text-[11px] font-bold text-slate-700 uppercase block mb-1">Harga Level {l}</label><input type="number" className="w-full bg-white border border-slate-300 rounded-xl p-3 font-bold text-xs outline-none focus:border-blue-600 shadow-inner" value={newItem[`priceL${l}` as keyof typeof newItem] as number} onChange={e => setNewItem({...newItem, [`priceL${l}`]: parseInt(e.target.value) || 0})} /></div>
-                        ))}
+                        {[1, 2, 3, 4].map(l => {
+                          const value = newItem[`priceL${l}` as keyof typeof newItem] as number;
+                          const effective = value > 0 ? value : newItem.priceL1;
+                          const margin = getMarginPercent(effective, newItem.basePrice);
+                          const isLoss = newItem.basePrice > 0 && effective > 0 && effective <= newItem.basePrice;
+                          return (
+                            <div key={l}>
+                              <label className="text-[11px] font-bold text-slate-700 uppercase block mb-1">Harga Level {l}{l === 1 ? ' *' : ''}</label>
+                              <input type="number" min={0} required={l === 1} placeholder={l === 1 ? 'Wajib' : 'Ikut L1'} className={`w-full bg-white border rounded-xl p-3 font-bold text-xs outline-none focus:border-blue-600 shadow-inner ${isLoss ? 'border-red-400' : 'border-slate-300'}`} value={value || ''} onChange={e => setNewItem({...newItem, [`priceL${l}`]: parseInt(e.target.value) || 0})} />
+                              {margin !== null && newItem.basePrice > 0 && (
+                                <p className={`text-[10px] font-bold mt-1 ${isLoss ? 'text-red-600' : margin < 10 ? 'text-amber-600' : 'text-emerald-600'}`}>{isLoss ? 'Rugi' : 'Margin'} {margin.toFixed(1)}%</p>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
+                      <p className="text-[11px] text-slate-500">Harga Level 2–4 yang dikosongkan otomatis memakai harga Level 1.</p>
+                      {editingId && priceHistory.some(entry => entry.itemId === editingId) && (
+                        <div className="bg-white rounded-2xl border border-slate-200 p-4">
+                          <p className="text-[11px] font-bold text-slate-700 uppercase tracking-widest mb-2">Riwayat Harga Terakhir</p>
+                          <div className="space-y-1.5">
+                            {priceHistory.filter(entry => entry.itemId === editingId).slice(0, 5).map(entry => (
+                              <div key={entry.id} className="flex justify-between gap-3 text-[11px] text-slate-600">
+                                <span>{new Date(entry.createdAt).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })} • {SOURCE_LABEL[entry.source] || entry.source} • {entry.operatorName}</span>
+                                <span className="font-semibold text-slate-800 whitespace-nowrap">
+                                  Jual Rp {(entry.oldMemberPrices[0] || 0).toLocaleString('id-ID')} → {(entry.newMemberPrices[0] || 0).toLocaleString('id-ID')}
+                                  {entry.oldBasePrice !== entry.newBasePrice && ` • Modal ${entry.oldBasePrice.toLocaleString('id-ID')} → ${entry.newBasePrice.toLocaleString('id-ID')}`}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                    </div>
                    <button type="submit" className="w-full py-6 bg-blue-700 text-white font-bold text-xl rounded-3xl shadow-2xl shadow-blue-500/30 hover:bg-blue-800 transition-all uppercase tracking-tight active:scale-95">{editingId ? 'Update' : 'Simpan'} Master Barang</button>
                 </form>
@@ -945,8 +1097,17 @@ const MasterData: React.FC<MasterDataProps> = ({
       {isPriceManagerOpen && type === 'items' && onUpdateItemsBulk && (
         <PriceManager
           items={items}
+          priceHistory={priceHistory}
           onUpdateItemsBulk={onUpdateItemsBulk}
           onClose={() => setIsPriceManagerOpen(false)}
+        />
+      )}
+
+      {payingCustomer && onReceiveCustomerPayment && (
+        <CustomerPaymentModal
+          customer={customers.find(c => c.id === payingCustomer.id) || payingCustomer}
+          onSubmit={onReceiveCustomerPayment}
+          onClose={() => setPayingCustomer(null)}
         />
       )}
     </div>

@@ -49,7 +49,8 @@ const openDatabase = (): Promise<IDBDatabase> => {
 export const saveAppDataIndexedDB = async (data: AppData): Promise<void> => {
   try {
     const db = await openDatabase();
-    return new Promise((resolve, reject) => {
+    // `await` agar kegagalan put tertangkap catch di bawah (bukan unhandled rejection).
+    return await new Promise((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);
       const request = store.put(data, DATA_KEY);

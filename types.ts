@@ -65,6 +65,7 @@ export interface User {
   isActive: boolean;
   lastLoginAt?: string;
   sessionPolicy?: SessionPolicy;
+  updatedAt?: string;
 }
 
 export interface Unit {
@@ -97,6 +98,10 @@ export interface Item {
   imageUrl?: string;
   isBundle?: boolean;
   components?: BundleComponent[];
+  /** Waktu perubahan terakhir (dipakai untuk merge sinkronisasi antar perangkat). */
+  updatedAt?: string;
+  /** Waktu perubahan per kelompok field: base (data master), stock, price. */
+  fieldUpdatedAt?: Partial<Record<'base' | 'stock' | 'price', string>>;
 }
 
 export interface Customer {
@@ -108,6 +113,9 @@ export interface Customer {
   currentDebt: number;
   level: number; // Support levels 1 - 4
   rewardPoints?: number; // Accumulate loyalty points
+  updatedAt?: string;
+  /** Waktu perubahan per kelompok field: base (profil) dan balance (piutang/poin). */
+  fieldUpdatedAt?: Partial<Record<'base' | 'balance', string>>;
 }
 
 export interface Supplier {
@@ -115,6 +123,7 @@ export interface Supplier {
   name: string;
   phone: string;
   address: string;
+  updatedAt?: string;
 }
 
 export interface PurchaseOrderItem {
@@ -140,6 +149,7 @@ export interface PurchaseOrder {
   isPaid: boolean;
   paidAmount?: number;
   paymentNotes?: string[];
+  updatedAt?: string;
 }
 
 export interface SaleItem {
@@ -198,6 +208,11 @@ export interface SaleReturn {
   operatorName: string;
   operatorId?: string;
   status?: 'PENDING' | 'APPROVED';
+  approvedAt?: string;
+  approvedBy?: string;
+  /** Shift kasir tempat uang refund dikeluarkan (diisi saat retur disetujui). */
+  cashSessionId?: string;
+  updatedAt?: string;
 }
 
 export interface Warehouse {
@@ -211,6 +226,7 @@ export interface Branch {
   name: string;
   address: string;
   isHeadOffice: boolean;
+  updatedAt?: string;
 }
 
 export interface Account {
@@ -218,6 +234,7 @@ export interface Account {
   name: string;
   type: 'ASSET' | 'LIABILITY' | 'EQUITY' | 'INCOME' | 'EXPENSE';
   balance: number;
+  updatedAt?: string;
 }
 
 export interface InventoryMovement {
@@ -254,12 +271,14 @@ export interface AuditLog {
     | 'PO_RECEIVED'
     | 'PO_PAID'
     | 'STOCK_ADJUSTED'
+    | 'PRICE_CHANGED'
+    | 'CUSTOMER_PAYMENT'
     | 'SYNC_PUSH'
     | 'SYNC_PULL'
     | 'SETTINGS_UPDATED';
   actorId?: string;
   actorName: string;
-  entityType: 'AUTH' | 'USER' | 'ITEM' | 'SALE' | 'RETURN' | 'PURCHASE_ORDER' | 'INVENTORY' | 'SYNC' | 'SETTINGS';
+  entityType: 'AUTH' | 'USER' | 'ITEM' | 'SALE' | 'RETURN' | 'PURCHASE_ORDER' | 'INVENTORY' | 'SYNC' | 'SETTINGS' | 'CUSTOMER';
   entityId?: string;
   entityLabel?: string;
   details: string;
@@ -281,7 +300,9 @@ export interface CashSession {
   cashExpenses?: number;
   shortageOrOverage?: number;
   closingNotes?: string;
+  customerCashPayments?: number;
   status: 'OPEN' | 'CLOSED';
+  updatedAt?: string;
 }
 
 export interface CashExpense {
@@ -299,13 +320,16 @@ export interface CashExpense {
 export interface PaymentRecord {
   id: string;
   referenceNo: string;
-  referenceType: 'SALE' | 'PURCHASE_ORDER' | 'RETURN';
+  referenceType: 'SALE' | 'PURCHASE_ORDER' | 'RETURN' | 'CUSTOMER_PAYMENT';
   amount: number;
   method: string;
   direction: 'IN' | 'OUT';
   createdAt: string;
   operatorName: string;
   operatorId?: string;
+  customerId?: string;
+  cashSessionId?: string;
+  note?: string;
 }
 
 export interface PromotionCampaign {
@@ -319,6 +343,41 @@ export interface PromotionCampaign {
   isActive: boolean;
   createdBy?: string;
   notes?: string;
+  updatedAt?: string;
+}
+
+export type PriceChangeSource = 'MANUAL' | 'BULK' | 'MARGIN' | 'IMPORT' | 'AI' | 'AI_UNDO' | 'PURCHASE' | 'COST_REVIEW';
+
+/** Riwayat perubahan harga per barang — membantu owner melacak harga yang cepat berubah. */
+export interface PriceChangeLog {
+  id: string;
+  itemId: string;
+  itemCode: string;
+  itemName: string;
+  oldBasePrice: number;
+  newBasePrice: number;
+  oldMemberPrices: number[];
+  newMemberPrices: number[];
+  source: PriceChangeSource;
+  note?: string;
+  operatorId?: string;
+  operatorName: string;
+  createdAt: string;
+}
+
+/** Penanda data yang dihapus, agar tidak "hidup lagi" saat sinkronisasi antar perangkat. */
+export interface DeletedRecord {
+  collection: string;
+  id: string;
+  deletedAt: string;
+}
+
+export interface StoreProfile {
+  name: string;
+  address?: string;
+  phone?: string;
+  receiptFooter?: string;
+  updatedAt?: string;
 }
 
 export interface AIPriceUpdateDraft {
@@ -362,12 +421,16 @@ export interface InventoryLog {
   id: string;
   itemId: string;
   itemName: string;
-  previousStock: number;
+  previousStock?: number;
+  systemStock?: number;
   actualStock: number;
+  difference?: number;
+  date?: string;
   notes: string;
-  operatorName: string;
+  operatorName?: string;
   operatorId?: string;
-  createdAt: string;
+  createdAt?: string;
+  status?: string;
 }
 
 export interface ChatMessage {
@@ -399,6 +462,9 @@ export interface AppData {
   branches: Branch[];
   aiConsultantHistory: ChatMessage[];
   floatingChatHistory: ChatMessage[];
+  priceHistory?: PriceChangeLog[];
+  deletedRecords?: DeletedRecord[];
+  storeProfile?: StoreProfile;
   openRouterApiKey?: string;
   aiModel?: string;
   supabaseUrl?: string;

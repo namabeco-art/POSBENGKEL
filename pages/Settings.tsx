@@ -10,14 +10,38 @@ import {
   getCloudConfig, saveCloudConfig, smartTestConnection, pushConfigToCloud
 } from '../services/syncService';
 import { parseOpenRouterError, requestOpenRouterReply } from '../services/aiService';
+import { StoreProfile } from '../types';
+import { isThermalPrinterEnabled, isWebSerialSupported, setThermalPrinterEnabled } from '../services/thermalPrinterService';
 
 interface SettingsProps {
   onCloudConfigChange?: () => void;
   onExportBackup?: () => void;
   onImportBackup?: (file: File) => Promise<void> | void;
+  storeProfile?: StoreProfile;
+  onSaveStoreProfile?: (profile: StoreProfile) => void;
 }
 
-const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup, onImportBackup }) => {
+const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup, onImportBackup, storeProfile, onSaveStoreProfile }) => {
+  const [profileForm, setProfileForm] = useState<StoreProfile>({
+    name: storeProfile?.name || '',
+    address: storeProfile?.address || '',
+    phone: storeProfile?.phone || '',
+    receiptFooter: storeProfile?.receiptFooter || '',
+  });
+  const [thermalEnabled, setThermalEnabled] = useState(isThermalPrinterEnabled());
+
+  const handleSaveProfile = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!onSaveStoreProfile) return;
+    if (!profileForm.name.trim()) return alert('Nama toko wajib diisi.');
+    onSaveStoreProfile({
+      name: profileForm.name.trim(),
+      address: profileForm.address?.trim() || undefined,
+      phone: profileForm.phone?.trim() || undefined,
+      receiptFooter: profileForm.receiptFooter?.trim() || undefined,
+    });
+    alert('Profil toko disimpan. Struk berikutnya memakai data ini.');
+  };
   const [cloudConfig, setCloudConfig] = useState<any>(getCloudConfig());
   const [aiStatus, setAiStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [cloudStatus, setCloudStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
@@ -137,6 +161,42 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
           </p>
         )}
       </div>
+
+      {/* Profil toko & struk */}
+      {onSaveStoreProfile && (
+        <form onSubmit={handleSaveProfile} className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800">Profil Toko & Struk</h3>
+            <p className="text-xs text-slate-400 mt-0.5">Ditampilkan di kepala/kaki struk. Tersinkron ke semua perangkat.</p>
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <label className="block text-xs font-medium text-slate-500">Nama toko *
+              <input className="mt-1 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 outline-none focus:border-indigo-500" value={profileForm.name} onChange={e => setProfileForm({ ...profileForm, name: e.target.value })} placeholder="Toko Sumber Rejeki" />
+            </label>
+            <label className="block text-xs font-medium text-slate-500">Telepon
+              <input className="mt-1 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 outline-none focus:border-indigo-500" value={profileForm.phone} onChange={e => setProfileForm({ ...profileForm, phone: e.target.value })} placeholder="0812..." />
+            </label>
+            <label className="block text-xs font-medium text-slate-500 md:col-span-2">Alamat
+              <input className="mt-1 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 outline-none focus:border-indigo-500" value={profileForm.address} onChange={e => setProfileForm({ ...profileForm, address: e.target.value })} />
+            </label>
+            <label className="block text-xs font-medium text-slate-500 md:col-span-2">Catatan kaki struk
+              <input className="mt-1 w-full px-4 py-2.5 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-800 outline-none focus:border-indigo-500" value={profileForm.receiptFooter} onChange={e => setProfileForm({ ...profileForm, receiptFooter: e.target.value })} placeholder="Barang yang sudah dibeli tidak dapat ditukar" />
+            </label>
+          </div>
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pt-2 border-t border-slate-100">
+            <label className={`flex items-center gap-2 text-xs ${isWebSerialSupported() ? 'text-slate-700' : 'text-slate-400'}`}>
+              <input
+                type="checkbox"
+                disabled={!isWebSerialSupported()}
+                checked={thermalEnabled}
+                onChange={e => { setThermalPrinterEnabled(e.target.checked); setThermalEnabled(e.target.checked); }}
+              />
+              Cetak langsung ke printer thermal USB (perangkat ini){!isWebSerialSupported() && ' — butuh Chrome/Edge desktop'}
+            </label>
+            <button type="submit" className="px-5 py-2.5 bg-slate-900 text-white rounded-xl text-sm font-semibold">Simpan Profil</button>
+          </div>
+        </form>
+      )}
 
       {/* Section 1: AI Setup */}
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
@@ -366,7 +426,15 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
           </button>
           <input type="file" ref={fileInputRef} className="hidden" accept="application/json" onChange={async e => {
             const file = e.target.files?.[0];
-            if (file && onImportBackup) { await onImportBackup(file); alert('Backup berhasil diimport!'); }
+            e.target.value = '';
+            if (!file || !onImportBackup) return;
+            if (!window.confirm('Import backup akan MENGGANTI data di perangkat ini. Lanjutkan?')) return;
+            try {
+              await onImportBackup(file);
+              alert('Backup berhasil diimport!');
+            } catch (error: any) {
+              alert(`Import gagal: ${error?.message || 'file tidak valid'}`);
+            }
           }} />
         </div>
       </div>

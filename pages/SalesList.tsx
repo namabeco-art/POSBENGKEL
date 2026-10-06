@@ -28,7 +28,7 @@ interface SalesListProps {
 const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
-  const [filterType, setFilterType] = useState<'SEMUA' | 'TUNAI' | 'NON-TUNAI'>('SEMUA');
+  const [filterType, setFilterType] = useState<'SEMUA' | 'TUNAI' | 'NON-TUNAI' | 'KREDIT'>('SEMUA');
   
   // Date filter states
   const [startDate, setStartDate] = useState('');
@@ -127,7 +127,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
 
          <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-100">
             <div className="flex bg-slate-200/50 p-1 rounded-xl border border-slate-300 shadow-inner overflow-x-auto scrollbar-hide max-w-full">
-               {['SEMUA', 'TUNAI', 'NON-TUNAI'].map(type => (
+               {['SEMUA', 'TUNAI', 'NON-TUNAI', 'KREDIT'].map(type => (
                  <button
                    key={type}
                    onClick={() => setFilterType(type as any)}

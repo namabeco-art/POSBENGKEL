@@ -10,20 +10,23 @@ interface LaporanPajakProps {
 }
 
 const PAJAK_UMKM_RATE = 0.005; // 0.5% dari omzet bruto
-const BATAS_OMZET_TAHUNAN = 500_000_000; // Rp 500jt batas UMKM
+const BATAS_OMZET_TAHUNAN = 4_800_000_000; // Rp 4,8 miliar: batas peredaran bruto skema PPh Final UMKM
+const OMZET_TIDAK_KENA_PAJAK_OP = 500_000_000; // WP Orang Pribadi: Rp 500 juta pertama per tahun tidak dikenai PPh
 
 /**
- * Laporan Pajak UMKM Sederhana
- * PPh Final UMKM = 0.5% x Omzet Bruto (PP 55/2022)
- * Berlaku untuk UMKM dengan omzet ≤ Rp 500jt/tahun
+ * Laporan Pajak UMKM Sederhana — PPh Final 0,5% x omzet bruto (PP 55/2022).
+ * Skema berlaku untuk peredaran bruto s.d. Rp 4,8 miliar/tahun; untuk wajib pajak orang pribadi,
+ * omzet s.d. Rp 500 juta per tahun pajak tidak dikenai PPh. Ini perkiraan — konfirmasi ke konsultan/KPP.
  */
 const LaporanPajak: React.FC<LaporanPajakProps> = ({ sales }) => {
   const currentYear = new Date().getFullYear();
   const [selectedYear, setSelectedYear] = useState(currentYear);
+  const [isPersonalTaxpayer, setIsPersonalTaxpayer] = useState(true);
 
   // Parse sales by month
   const monthlyData = useMemo(() => {
     const months: { month: number; label: string; omzet: number; pajak: number; count: number }[] = [];
+    let cumulativeOmzet = 0;
 
     for (let m = 0; m < 12; m++) {
       const monthSales = sales.filter(sale => {
@@ -35,17 +38,22 @@ const LaporanPajak: React.FC<LaporanPajakProps> = ({ sales }) => {
       });
 
       const omzet = monthSales.reduce((sum, s) => sum + s.total, 0);
+      // WP orang pribadi: hanya omzet kumulatif di atas Rp 500 juta yang dikenai 0,5%.
+      const threshold = isPersonalTaxpayer ? OMZET_TIDAK_KENA_PAJAK_OP : 0;
+      const taxableBefore = Math.max(0, cumulativeOmzet - threshold);
+      cumulativeOmzet += omzet;
+      const taxableAfter = Math.max(0, cumulativeOmzet - threshold);
       months.push({
         month: m,
         label: new Date(selectedYear, m).toLocaleDateString('id-ID', { month: 'long' }),
         omzet,
-        pajak: Math.round(omzet * PAJAK_UMKM_RATE),
+        pajak: Math.round((taxableAfter - taxableBefore) * PAJAK_UMKM_RATE),
         count: monthSales.length,
       });
     }
 
     return months;
-  }, [sales, selectedYear]);
+  }, [sales, selectedYear, isPersonalTaxpayer]);
 
   const yearSummary = useMemo(() => {
     const totalOmzet = monthlyData.reduce((sum, m) => sum + m.omzet, 0);
@@ -73,7 +81,11 @@ const LaporanPajak: React.FC<LaporanPajakProps> = ({ sales }) => {
         <Info size={18} className="text-blue-500 shrink-0 mt-0.5" />
         <div>
           <p className="text-sm font-medium text-blue-800">PPh Final UMKM (PP 55/2022)</p>
-          <p className="text-xs text-blue-600 mt-1">Tarif 0.5% dari omzet bruto per bulan. Berlaku untuk usaha dengan omzet ≤ Rp 500jt/tahun. Setor paling lambat tanggal 15 bulan berikutnya.</p>
+          <p className="text-xs text-blue-600 mt-1">Tarif 0,5% dari omzet bruto per bulan untuk usaha dengan omzet s.d. Rp 4,8 miliar/tahun. Wajib pajak orang pribadi: omzet s.d. Rp 500 juta per tahun tidak dikenai pajak. Angka di bawah adalah perkiraan — konfirmasi ke konsultan pajak/KPP.</p>
+          <label className="mt-2 flex items-center gap-2 text-xs text-blue-800">
+            <input type="checkbox" checked={isPersonalTaxpayer} onChange={e => setIsPersonalTaxpayer(e.target.checked)} />
+            Usaha atas nama pribadi (orang pribadi) — terapkan omzet tidak kena pajak Rp 500 juta
+          </label>
         </div>
       </div>
 
@@ -109,7 +121,7 @@ const LaporanPajak: React.FC<LaporanPajakProps> = ({ sales }) => {
           <div className="flex items-center gap-1.5">
             {yearSummary.isUnderLimit ? <CheckCircle2 size={16} className="text-emerald-600"/> : <AlertTriangle size={16} className="text-amber-600"/>}
             <p className={`text-sm font-bold ${yearSummary.isUnderLimit ? 'text-emerald-700' : 'text-amber-700'}`}>
-              {yearSummary.isUnderLimit ? 'Di bawah limit' : 'Mendekati limit'}
+              {yearSummary.isUnderLimit ? 'Di bawah Rp 4,8 M' : 'Melebihi Rp 4,8 M'}
             </p>
           </div>
         </div>
@@ -150,6 +162,8 @@ const LaporanPajak: React.FC<LaporanPajakProps> = ({ sales }) => {
                       <span className="text-slate-300 text-xs">—</span>
                     ) : m.omzet === 0 && isPast ? (
                       <span className="px-2 py-0.5 bg-slate-100 text-slate-400 rounded-full text-[10px] font-medium">Nihil</span>
+                    ) : isPast && m.pajak === 0 ? (
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-700 rounded-full text-[10px] font-medium">Tidak terutang</span>
                     ) : isPast ? (
                       <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-[10px] font-medium">Perlu setor</span>
                     ) : (

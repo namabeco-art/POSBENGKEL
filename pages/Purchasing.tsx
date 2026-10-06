@@ -7,8 +7,10 @@ import {
   Building2,
   Truck
 } from 'lucide-react';
-import { PurchaseOrder, Supplier, Item, User } from '../types';
+import { PurchaseOrder, Supplier, Item, User, PriceChangeSource } from '../types';
 import { printPurchaseOrder } from '../services/printService';
+import CostChangeReview from '../components/CostChangeReview';
+import type { CostChange } from '../services/posOperations';
 import { createDocumentNo } from '../services/idService';
 import { hasPermission } from '../services/permissions';
 
@@ -18,11 +20,14 @@ interface PurchasingProps {
   items: Item[];
   currentUser: User;
   onAddPO: (po: PurchaseOrder) => Promise<void>;
-  onReceivePO: (poId: string, updatedItems: { itemId: string, receivedQty: number }[]) => Promise<void>;
+  onReceivePO: (poId: string, updatedItems: { itemId: string, receivedQty: number }[]) => Promise<CostChange[] | void>;
   onPayPO: (poId: string, amount?: number, note?: string, method?: string) => Promise<void>;
+  /** Jika tersedia, setelah penerimaan barang user ditawari menyesuaikan harga jual mengikuti modal baru. */
+  onUpdateItemsBulk?: (patches: Array<Partial<Item> & { id: string }>, source?: PriceChangeSource, note?: string) => void;
 }
 
-const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, items, currentUser, onAddPO, onReceivePO, onPayPO }) => {
+const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, items, currentUser, onAddPO, onReceivePO, onPayPO, onUpdateItemsBulk }) => {
+  const [costReview, setCostReview] = useState<{ referenceNo: string; changes: CostChange[] } | null>(null);
   const [activeSubTab, setActiveSubTab] = useState('po');
   const [isNewPOModalOpen, setIsNewPOModalOpen] = useState(false);
   const [selectedPOToReceive, setSelectedPOToReceive] = useState<PurchaseOrder | null>(null);
@@ -85,7 +90,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     if (!selectedSupplier || poDraftItems.length === 0) return;
 
     const subtotal = poDraftItems.reduce((s, p) => s + (p.qty * p.cost), 0);
-    const total = subtotal * (1 - (discountPercent / 100));
+    const total = Math.round(subtotal * (1 - (discountPercent / 100)));
     
     const today = new Date();
     const due = new Date(today);
@@ -689,9 +694,13 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                 <button disabled={isSaving} onClick={async () => {
                   setIsSaving(true);
                   try {
-                    await onReceivePO(selectedPOToReceive.id, receiptUpdates);
+                    const receivedPoId = selectedPOToReceive.id;
+                    const costChanges = await onReceivePO(receivedPoId, receiptUpdates);
                     setSelectedPOToReceive(null);
                     setActiveSubTab('receive');
+                    if (onUpdateItemsBulk && Array.isArray(costChanges) && costChanges.length > 0) {
+                      setCostReview({ referenceNo: receivedPoId, changes: costChanges });
+                    }
                   } catch (error: any) {
                     alert(error?.message || 'Penerimaan PO gagal.');
                   } finally {
@@ -703,6 +712,16 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
              </div>
           </div>
         </div>
+      )}
+
+      {costReview && onUpdateItemsBulk && (
+        <CostChangeReview
+          changes={costReview.changes}
+          items={items}
+          referenceNo={costReview.referenceNo}
+          onApply={onUpdateItemsBulk}
+          onClose={() => setCostReview(null)}
+        />
       )}
 
       {/* DETAIL PO MODAL - REFINED AS PROFESSIONAL INVOICE */}

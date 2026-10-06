@@ -3,18 +3,19 @@ import {
   TrendingUp, TrendingDown, DollarSign, Package, Calendar,
   Search, ArrowUpRight, ArrowDownRight
 } from 'lucide-react';
-import { Item, Sale } from '../types';
+import { Item, Sale, SaleReturn } from '../types';
 
 interface ProfitAnalysisProps {
   items: Item[];
   sales: Sale[];
+  returns?: SaleReturn[];
 }
 
 /**
  * Profit Analysis — #5
  * Shows profit per item and per transaction with margin calculation.
  */
-const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
+const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales, returns = [] }) => {
   const [view, setView] = useState<'items' | 'transactions'>('items');
   const [searchTerm, setSearchTerm] = useState('');
   const [dateRange, setDateRange] = useState<'7d' | '30d' | 'all'>('30d');
@@ -39,13 +40,15 @@ const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
     const profitMap: Record<string, { itemId: string; name: string; category: string; totalRevenue: number; totalCost: number; totalQty: number }> = {};
 
     filteredSales.forEach(sale => {
+      // Diskon transaksi dibagi proporsional ke tiap barang agar laba per barang tidak dilebih-lebihkan.
+      const paidRatio = sale.subtotal > 0 ? sale.total / sale.subtotal : 1;
       sale.items.forEach(si => {
         const masterItem = items.find(i => i.id === si.itemId);
         const cost = si.costPrice ?? masterItem?.basePrice ?? 0;
         if (!profitMap[si.itemId]) {
           profitMap[si.itemId] = { itemId: si.itemId, name: si.name, category: masterItem?.category || '', totalRevenue: 0, totalCost: 0, totalQty: 0 };
         }
-        profitMap[si.itemId].totalRevenue += si.total;
+        profitMap[si.itemId].totalRevenue += si.total * paidRatio;
         profitMap[si.itemId].totalCost += cost * si.qty;
         profitMap[si.itemId].totalQty += si.qty;
       });
@@ -74,13 +77,31 @@ const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
     });
   }, [filteredSales, items]);
 
+  /** Retur yang disetujui atas faktur dalam periode: mengurangi omzet dan modal (barang kembali ke stok). */
+  const returnSummary = useMemo(() => {
+    const invoiceMap = new Map(filteredSales.map(sale => [sale.invoiceNo, sale]));
+    let revenue = 0;
+    let cost = 0;
+    returns.filter(ret => ret.status === 'APPROVED').forEach(ret => {
+      const origin = invoiceMap.get(ret.originalInvoiceNo);
+      if (!origin) return;
+      revenue += ret.totalReturn;
+      ret.items.forEach(line => {
+        const saleLine = origin.items.find(si => si.itemId === line.itemId);
+        const unitCost = saleLine?.costPrice ?? items.find(i => i.id === line.itemId)?.basePrice ?? 0;
+        cost += unitCost * line.qty;
+      });
+    });
+    return { revenue, cost };
+  }, [filteredSales, returns, items]);
+
   const summary = useMemo(() => {
-    const totalRevenue = filteredSales.reduce((sum, s) => sum + s.total, 0);
-    const totalCost = transactionProfits.reduce((sum, t) => sum + t.totalCost, 0);
+    const totalRevenue = filteredSales.reduce((sum, s) => sum + s.total, 0) - returnSummary.revenue;
+    const totalCost = transactionProfits.reduce((sum, t) => sum + t.totalCost, 0) - returnSummary.cost;
     const totalProfit = totalRevenue - totalCost;
     const avgMargin = totalRevenue > 0 ? Math.round((totalProfit / totalRevenue) * 100) : 0;
     return { totalRevenue, totalCost, totalProfit, avgMargin, transactionCount: filteredSales.length };
-  }, [filteredSales, transactionProfits]);
+  }, [filteredSales, transactionProfits, returnSummary]);
 
   const filteredItemProfits = useMemo(() => {
     if (!searchTerm) return itemProfits;
@@ -93,8 +114,9 @@ const ProfitAnalysis: React.FC<ProfitAnalysisProps> = ({ items, sales }) => {
       {/* Summary Cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
-          <p className="text-xs text-slate-500 mb-1">Total Omzet</p>
+          <p className="text-xs text-slate-500 mb-1">Omzet Bersih</p>
           <p className="text-xl font-bold text-slate-800">Rp {(summary.totalRevenue / 1000000).toFixed(1)}jt</p>
+          {returnSummary.revenue > 0 && <p className="text-[11px] text-slate-400 mt-0.5">sudah dikurangi retur Rp {returnSummary.revenue.toLocaleString('id-ID')}</p>}
         </div>
         <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm">
           <p className="text-xs text-slate-500 mb-1">Total Modal</p>

@@ -14,6 +14,22 @@ Bisa dipakai langsung tanpa internet (mode lokal) atau disinkronkan antar perang
 - **AI Consultant** — Tanya AI soal bisnis (opsional, perlu API key)
 - **Offline First** — Data tersimpan di browser, tetap jalan tanpa internet
 
+## Harga yang Cepat Berubah
+
+- **Kelola Harga** (Barang → Kelola Harga): naik/turun massal per kategori/merk/pilihan (persen atau rupiah), pilih yang diubah (modal, jual, atau keduanya), pembulatan Rp 100/500/1.000, hitung otomatis dari markup per kategori, dan preview yang menandai barang yang akan dijual rugi.
+- **Update harga lewat Excel**: Barang → Export, ubah harga di Excel, lalu Import. Kode yang sudah ada diperbarui (stok tidak disentuh), kode baru ditambahkan. Pemisah koma maupun titik koma (Excel Indonesia) didukung.
+- **Riwayat harga per barang**: siapa, kapan, dan dari mana (edit manual, update massal, import, penerimaan PO, AI). Tersinkron ke semua perangkat.
+- **Tinjau harga setelah terima barang**: jika harga modal rata-rata berubah karena harga supplier naik/turun, sistem menampilkan margin yang tergerus dan menawarkan penyesuaian harga jual sekali klik (markup dipertahankan).
+- **Peringatan Harga** di Dashboard: barang yang dijual ≤ modal, margin < 10%, atau harga belum diatur.
+- **Kasir selalu memakai harga terbaru**: harga di keranjang ikut berubah bila owner mengubah harga, dan kasir diberi tahu. Barang tanpa harga tidak bisa dijual. Harga Level 2–4 yang dikosongkan otomatis memakai harga Level 1.
+
+## Operasional Lainnya
+
+- **Pelunasan piutang**: Kontak → tombol *Bayar* pada pelanggan, atau Laporan → Piutang. Pembayaran tunai masuk ke rekap shift kasir.
+- **Tutup shift**: kas seharusnya = modal awal + penjualan tunai + pelunasan tunai − refund retur tunai − pengeluaran. Selisih ditampilkan saat shift ditutup.
+- **Stok opname massal**: Stok Opname → Template → isi kolom *Stok Fisik* → Import. Perubahan tercatat di kartu stok.
+- **Profil toko & printer**: Pengaturan → Profil Toko & Struk (nama/alamat/kaki struk) dan opsi cetak langsung ke printer thermal USB (Chrome/Edge).
+
 ## Cara Pakai (5 Menit)
 
 ### 1. Install
@@ -58,6 +74,19 @@ Jika punya 2+ komputer/tablet yang perlu data sama:
 1. Buat project gratis di [supabase.com](https://supabase.com)
 2. Isi `VITE_SUPABASE_URL` dan `VITE_SUPABASE_ANON_KEY`
 3. Set `VITE_CLOUD_ENABLED=true`
+
+### Catatan Sinkronisasi & Keamanan Cloud
+- Perubahan dari beberapa perangkat digabung per bagian data (harga, stok, profil), jadi harga baru dari owner dan penjualan kasir yang terjadi bersamaan sama-sama tersimpan.
+- Batasan: jika dua perangkat sama-sama **offline** lalu menjual barang yang sama, stok bisa selisih — lakukan stok opname berkala.
+- Data cloud disimpan sebagai satu file di Supabase Storage dan dibaca dengan *anon key* yang ikut terbawa di aplikasi. Jadikan bucket **private** dan batasi akses dengan kebijakan RLS; jangan bagikan URL aplikasi ke publik. Untuk keamanan penuh dibutuhkan login Supabase Auth (belum tersedia).
+- Ganti password default `admin`/`kasir`/`gudang` sebelum dipakai.
+
+## Pengujian
+
+```bash
+npm run test:ci    # typecheck + unit test + build
+npm run test:e2e   # simulasi operasional di browser (Playwright)
+```
 
 ## Build untuk Production
 

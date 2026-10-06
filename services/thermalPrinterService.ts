@@ -1,7 +1,24 @@
-import { Sale } from '../types';
+import { Sale, StoreProfile } from '../types';
 
 export const isWebSerialSupported = () => {
   return 'serial' in navigator;
+};
+
+const THERMAL_PRINTER_KEY = 'POS_THERMAL_PRINTER';
+
+/** Cetak langsung ke printer thermal (Web Serial) hanya jika diaktifkan di perangkat ini. */
+export const isThermalPrinterEnabled = () => {
+  try {
+    return isWebSerialSupported() && localStorage.getItem(THERMAL_PRINTER_KEY) === 'on';
+  } catch {
+    return false;
+  }
+};
+
+export const setThermalPrinterEnabled = (enabled: boolean) => {
+  try {
+    localStorage.setItem(THERMAL_PRINTER_KEY, enabled ? 'on' : 'off');
+  } catch { /* storage penuh/diblokir */ }
 };
 
 // Common ESC/POS Commands
@@ -25,9 +42,8 @@ export const connectThermalPrinter = async () => {
   try {
     if (!cachedPort) {
       // @ts-ignore
-      cachedPort = await navigator.serial.requestPort({
-        filters: [{ usbVendorId: 0x04b8 }] // Epson & standard thermal printers vendor ID. We can make it empty to allow all.
-      });
+      // Tanpa filter vendor: printer thermal murah (bukan Epson) memakai vendor ID beragam.
+      cachedPort = await navigator.serial.requestPort();
     }
     
     if (cachedPort.readable === null && cachedPort.writable === null) {
@@ -49,8 +65,11 @@ const formatLine = (left: string, right: string, maxLength: number = 32) => {
   return left + ' ' + right;
 };
 
-export const printReceiptWebSerial = async (sale: Sale, companyName = "HULIO RETAIL") => {
+const rp = (value: number) => Math.round(value || 0).toLocaleString('id-ID');
+
+export const printReceiptWebSerial = async (sale: Sale, profile?: StoreProfile) => {
   if (!isWebSerialSupported()) throw new Error('Web Serial API tidak didukung');
+  const companyName = profile?.name?.trim() || 'POS HULIO';
 
   const port = await connectThermalPrinter();
   const writer = port.writable.getWriter();
@@ -62,6 +81,8 @@ export const printReceiptWebSerial = async (sale: Sale, companyName = "HULIO RET
   cmds += INIT;
   cmds += CENTER;
   cmds += BOLD_ON + companyName.toUpperCase() + BOLD_OFF + NEWLINE;
+  if (profile?.address) cmds += profile.address + NEWLINE;
+  if (profile?.phone) cmds += profile.phone + NEWLINE;
   cmds += 'Struk Penjualan' + NEWLINE;
   cmds += '--------------------------------' + NEWLINE;
   
@@ -75,20 +96,20 @@ export const printReceiptWebSerial = async (sale: Sale, companyName = "HULIO RET
   // Items
   for (const item of sale.items) {
     cmds += item.name + NEWLINE;
-    const priceLine = `${item.qty} x ${item.price}`;
-    const totalLine = `${item.total}`;
+    const priceLine = `${item.qty} x ${rp(item.price)}`;
+    const totalLine = rp(item.total);
     cmds += formatLine(priceLine, totalLine) + NEWLINE;
   }
   cmds += '--------------------------------' + NEWLINE;
   
   // Totals
-  cmds += formatLine('Subtotal', sale.subtotal.toString()) + NEWLINE;
+  cmds += formatLine('Subtotal', rp(sale.subtotal)) + NEWLINE;
   if (sale.discountAmount && sale.discountAmount > 0) {
-    cmds += formatLine('Diskon', '-' + sale.discountAmount.toString()) + NEWLINE;
+    cmds += formatLine('Diskon', '-' + rp(sale.discountAmount)) + NEWLINE;
   }
-  cmds += BOLD_ON + formatLine('TOTAL', sale.total.toString()) + BOLD_OFF + NEWLINE;
-  cmds += formatLine(sale.paymentType, sale.amountReceived.toString()) + NEWLINE;
-  cmds += formatLine('KEMBALI', sale.changeAmount.toString()) + NEWLINE;
+  cmds += BOLD_ON + formatLine('TOTAL', rp(sale.total)) + BOLD_OFF + NEWLINE;
+  cmds += formatLine(sale.paymentMethod || sale.paymentType, rp(sale.amountReceived)) + NEWLINE;
+  cmds += formatLine('KEMBALI', rp(sale.changeAmount)) + NEWLINE;
   
   // Footer
   cmds += CENTER;
@@ -97,8 +118,7 @@ export const printReceiptWebSerial = async (sale: Sale, companyName = "HULIO RET
       cmds += `Anda mendapat ${sale.pointsEarned} Poin!` + NEWLINE;
   }
   cmds += 'Terima Kasih atas Kunjungan Anda' + NEWLINE;
-  cmds += 'Barang yang sudah dibeli' + NEWLINE;
-  cmds += 'tidak dapat ditukar/dikembalikan' + NEWLINE;
+  if (profile?.receiptFooter) cmds += profile.receiptFooter + NEWLINE;
   
   // Cut paper
   cmds += NEWLINE + NEWLINE + NEWLINE;

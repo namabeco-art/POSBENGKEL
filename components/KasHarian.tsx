@@ -32,7 +32,8 @@ const localDateKey = (value: string): string => {
 const KasHarian: React.FC<KasHarianProps> = ({ openingCash, salesCashToday, entries, onAddEntry, onDeleteEntry }) => {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({ description: '', amount: 0, category: 'lainnya' });
-  const [filterDate, setFilterDate] = useState(new Date().toISOString().slice(0, 10));
+  // Tanggal lokal (WIB/WITA/WIT), bukan UTC — sebelum jam 07.00 WIB toISOString() masih "kemarin".
+  const [filterDate, setFilterDate] = useState(() => localDateKey(new Date().toISOString()));
   const [isSaving, setIsSaving] = useState(false);
 
   const todayStr = new Date().toLocaleDateString('id-ID');

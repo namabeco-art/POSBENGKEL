@@ -27,10 +27,11 @@ import {
   PackageX,
   ChevronLeft
 } from 'lucide-react';
-import { Item, User, Customer, Sale, PromotionCampaign } from '../types';
+import { Item, User, Customer, Sale, PromotionCampaign, CashSession, StoreProfile } from '../types';
 import { printReceipt } from '../services/printService';
-import { printReceiptWebSerial, isWebSerialSupported } from '../services/thermalPrinterService';
+import { printReceiptWebSerial, isThermalPrinterEnabled } from '../services/thermalPrinterService';
 import { createDocumentNo, createId } from '../services/idService';
+import { getSellPrice } from '../services/pricing';
 
 interface CartItem {
   id: string;
@@ -44,10 +45,15 @@ interface SalesPOSProps {
   items: Item[];
   customers: Customer[];
   promotions: PromotionCampaign[];
+  cashSessions?: CashSession[];
+  storeProfile?: StoreProfile;
   onCompleteSale: (sale: Sale) => Promise<Sale>;
+  onNavigate?: (tab: string) => void;
 }
 
-const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, promotions, onCompleteSale }) => {
+const formatRp = (value: number) => `Rp ${Math.round(value || 0).toLocaleString('id-ID')}`;
+
+const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, promotions, cashSessions = [], storeProfile, onCompleteSale, onNavigate }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Semua');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -62,6 +68,12 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
   const [promoName, setPromoName] = useState<string>('NONE');
   const [manualDiscount, setManualDiscount] = useState<number>(0);
   const [isSaving, setIsSaving] = useState(false);
+  /** Pemberitahuan harga/stok yang berubah saat barang sudah di keranjang (mis. owner update harga). */
+  const [cartNotices, setCartNotices] = useState<string[]>([]);
+  const hasOpenShift = useMemo(
+    () => cashSessions.some(session => session.userId === currentUser.id && session.status === 'OPEN'),
+    [cashSessions, currentUser.id],
+  );
   
   // Pagination State
   const [currentPage, setCurrentPage] = useState(1);
@@ -152,12 +164,38 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     };
   }, []);
 
+  // Keranjang selalu mengikuti harga & stok master terbaru. Harga di toko bisa berubah kapan saja
+  // (owner update harga / sinkron dari perangkat lain) — kasir diberi tahu jika ada yang berubah.
   useEffect(() => {
-    setCart(prev => prev.map(c => ({
-      ...c,
-      selectedPrice: c.item.memberPrices[selectedCustomer.level - 1] || c.item.memberPrices[0]
-    })));
-  }, [selectedCustomer]);
+    // Saat menyimpan/menampilkan struk, stok baru saja berkurang karena transaksi ini sendiri — jangan sentuh keranjang.
+    if (isSaving || showSuccessModal) return;
+    setCart(prev => {
+      if (prev.length === 0) return prev;
+      const notices: string[] = [];
+      let changed = false;
+      const next = prev.flatMap(c => {
+        const latest = items.find(item => item.id === c.id);
+        if (!latest) {
+          notices.push(`${c.item.name} dihapus dari master barang dan dikeluarkan dari keranjang.`);
+          changed = true;
+          return [];
+        }
+        const price = getSellPrice(latest, selectedCustomer.level);
+        const qty = Math.min(c.qty, Math.max(0, latest.stock));
+        if (price !== c.selectedPrice && latest === c.item) {
+          // Ganti level pelanggan: tidak perlu notifikasi.
+        } else if (price !== c.selectedPrice) {
+          notices.push(`Harga ${latest.name} berubah: ${formatRp(c.selectedPrice)} → ${formatRp(price)}.`);
+        }
+        if (qty !== c.qty) notices.push(`Stok ${latest.name} tinggal ${latest.stock}; qty disesuaikan.`);
+        if (latest === c.item && price === c.selectedPrice && qty === c.qty) return [c];
+        changed = true;
+        return qty > 0 ? [{ ...c, item: latest, selectedPrice: price, qty }] : [];
+      });
+      if (notices.length > 0) setCartNotices(current => [...notices, ...current].slice(0, 5));
+      return changed ? next : prev;
+    });
+  }, [items, selectedCustomer.level, isSaving, showSuccessModal]);
 
   useEffect(() => {
     if (promoName !== 'NONE' && !selectedPromo) {
@@ -170,9 +208,13 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       alert(`Stok ${item.name} habis!`);
       return;
     }
+    const price = getSellPrice(item, selectedCustomer.level);
+    if (price <= 0) {
+      alert(`Harga jual ${item.name} belum diatur (Rp 0). Minta admin/owner mengisi harga di Master Barang.`);
+      return;
+    }
     setCart(prevCart => {
       const existing = prevCart.find(c => c.id === item.id);
-      const price = item.memberPrices?.[selectedCustomer.level - 1] ?? item.memberPrices?.[0] ?? item.basePrice;
       if (existing) {
         if (existing.qty + 1 > item.stock) {
           alert("Jumlah melebihi stok yang tersedia!");
@@ -328,21 +370,26 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     setPromoName('NONE');
     setManualDiscount(0);
     setLastCompletedSale(null);
+    setCartNotices([]);
+    // Transaksi berikutnya kembali ke pelanggan umum & tunai — mencegah salah tagih ke pelanggan sebelumnya.
+    setSelectedCustomer(UMUM_CUSTOMER);
+    setPaymentType('TUNAI');
+    inputRef.current?.focus();
   };
 
   const handlePrint = async () => {
-    if (lastCompletedSale) {
-      if (isWebSerialSupported()) {
-        try {
-          await printReceiptWebSerial(lastCompletedSale);
-        } catch (err: any) {
-          console.error("Direct print failed:", err);
-          printReceipt(lastCompletedSale);
-        }
-      } else {
-        printReceipt(lastCompletedSale);
+    if (!lastCompletedSale) return;
+    // Printer thermal langsung (Web Serial) hanya jika diaktifkan di Pengaturan; default cetak via browser.
+    if (isThermalPrinterEnabled()) {
+      try {
+        await printReceiptWebSerial(lastCompletedSale, storeProfile);
+        return;
+      } catch (err: any) {
+        console.error("Direct print failed:", err);
+        alert(`Printer thermal gagal: ${err?.message || 'tidak terhubung'}. Mencetak lewat browser.`);
       }
     }
+    printReceipt(lastCompletedSale, storeProfile);
   };
 
   const CartContent = (isMobile: boolean) => (
@@ -419,6 +466,24 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
        </div>
 
        <div className="flex-1 overflow-y-auto p-3 md:p-4 space-y-2 scrollbar-thin bg-white relative z-10 min-h-0">
+         {!hasOpenShift && (
+           <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800 flex items-start gap-2" role="status">
+             <AlertTriangle size={14} className="shrink-0 mt-0.5" />
+             <div>
+               <p className="font-semibold">Shift kasir belum dibuka</p>
+               <p>Penjualan tunai tidak akan masuk rekap setoran kas.{onNavigate && <> <button type="button" onClick={() => onNavigate('dashboard')} className="underline font-semibold">Buka shift di Dashboard</button></>}</p>
+             </div>
+           </div>
+         )}
+         {cartNotices.length > 0 && (
+           <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-xs text-blue-800 space-y-1" role="status">
+             <div className="flex items-center justify-between">
+               <p className="font-semibold">Harga/stok diperbarui</p>
+               <button type="button" onClick={() => setCartNotices([])} className="text-blue-500 hover:text-blue-700" aria-label="Tutup pemberitahuan"><X size={14}/></button>
+             </div>
+             {cartNotices.map((notice, index) => <p key={index}>• {notice}</p>)}
+           </div>
+         )}
          {cart.length === 0 ? (
            <div className="h-full flex flex-col items-center justify-center text-slate-300">
              <ShoppingCart size={32} className="mb-2 opacity-30" />
@@ -453,7 +518,10 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                          />
                          <button type="button" onClick={() => updateQty(c.id, 1)} className="w-9 h-9 flex items-center justify-center hover:bg-slate-200 text-slate-600 active:bg-slate-300"><Plus size={14}/></button>
                       </div>
-                      <p className="font-semibold text-slate-900 text-sm">Rp {(c.qty * c.selectedPrice).toLocaleString()}</p>
+                      <div className="text-right">
+                        <p className="font-semibold text-slate-900 text-sm">{formatRp(c.qty * c.selectedPrice)}</p>
+                        <p className="text-[10px] text-slate-400">@ {formatRp(c.selectedPrice)}</p>
+                      </div>
                    </div>
                 </div>
              </div>
@@ -466,18 +534,18 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
           <div className="space-y-1.5">
              <div className="flex justify-between items-center text-xs text-slate-400">
                 <span>Subtotal</span>
-                <span>Rp {subtotal.toLocaleString()}</span>
+                <span>Rp {subtotal.toLocaleString('id-ID')}</span>
              </div>
              {(promoDiscount + appliedManualDiscount) > 0 && (
                <div className="flex justify-between items-center text-xs text-emerald-400">
                  <span>Diskon</span>
-                 <span>- Rp {(promoDiscount + appliedManualDiscount).toLocaleString()}</span>
+                 <span>- Rp {(promoDiscount + appliedManualDiscount).toLocaleString('id-ID')}</span>
                </div>
              )}
              <div className="pt-2 border-t border-white/10 flex justify-between items-end">
                 <div>
                    <p className="text-[11px] text-indigo-300 font-medium">Total</p>
-                   <p className="text-2xl font-bold tracking-tight">Rp {total.toLocaleString()}</p>
+                   <p className="text-2xl font-bold tracking-tight">Rp {total.toLocaleString('id-ID')}</p>
                 </div>
              </div>
           </div>
@@ -551,8 +619,9 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
             {currentItems.length > 0 ? (
               <div className={viewMode === 'grid' ? "grid grid-cols-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-4 gap-4 md:gap-6" : "space-y-3"}>
                 {currentItems.map(item => {
-                  const appliedPrice = item.memberPrices[selectedCustomer.level - 1] || item.memberPrices[0];
+                  const appliedPrice = getSellPrice(item, selectedCustomer.level);
                   const isOutOfStock = item.stock <= 0;
+                  const hasNoPrice = appliedPrice <= 0;
                   return (
                     <button 
                       key={item.id} 
@@ -562,7 +631,11 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                       className={`group flex transition-all active:scale-95 border-2 ${isOutOfStock ? 'opacity-60 cursor-not-allowed grayscale' : ''} ${viewMode === 'grid' ? "flex-col bg-white rounded-[1.5rem] md:rounded-[2rem] border-transparent overflow-hidden hover:border-blue-500 hover:shadow-xl shadow-sm" : "bg-white p-4 rounded-2xl border-transparent items-center gap-6 hover:border-blue-500 shadow-sm"}`}
                     >
                       <div className={`${viewMode === 'grid' ? 'w-full h-32 md:h-40' : 'w-20 h-20 md:w-24 md:h-24'} bg-slate-100 flex-shrink-0 relative overflow-hidden`}>
-                        <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" />
+                        {item.imageUrl ? (
+                          <img src={item.imageUrl} alt={item.name} className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-700" />
+                        ) : (
+                          <div className="w-full h-full flex items-center justify-center text-slate-300"><ShoppingBag size={32} /></div>
+                        )}
                         <div className={`absolute top-2 right-2 md:top-3 md:right-3 backdrop-blur-md text-white text-[9px] md:text-[10px] font-bold px-2 py-0.5 md:px-3 md:py-1 rounded-full shadow-lg ${isOutOfStock ? 'bg-red-600' : 'bg-slate-900/80'}`}>
                           {isOutOfStock ? 'HABIS' : item.stock}
                         </div>
@@ -583,7 +656,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                         <div className="flex items-center justify-between border-t border-slate-50 pt-2 md:pt-3 mt-2 md:mt-4">
                           <div className="flex flex-col">
                             <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase tracking-tighter">LV {selectedCustomer.level}</span>
-                            <div className={`font-bold text-sm md:text-lg tracking-tight leading-none ${isOutOfStock ? 'text-slate-400' : 'text-blue-700'}`}>Rp {appliedPrice.toLocaleString()}</div>
+                            <div className={`font-bold text-sm md:text-lg tracking-tight leading-none ${isOutOfStock || hasNoPrice ? 'text-slate-400' : 'text-blue-700'}`}>{hasNoPrice ? 'Harga belum diatur' : formatRp(appliedPrice)}</div>
                           </div>
                           <div className={`p-2 md:p-2 bg-slate-50 rounded-lg text-slate-400 transition-all border border-slate-200 ${!isOutOfStock ? 'group-hover:bg-blue-600 group-hover:text-white' : ''}`}><Plus size={16}/></div>
                         </div>
@@ -668,7 +741,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
               <div className="flex-1 overflow-y-auto scrollbar-hide space-y-4 md:space-y-4">
                 <div className="bg-slate-100 p-5 md:p-6 rounded-2xl md:rounded-2xl text-center border-2 border-slate-200 shadow-inner">
                    <div className="text-slate-400 font-bold text-[10px] md:text-[11px] uppercase tracking-[0.2em] mb-1 md:mb-1">Total Tagihan</div>
-                   <div className="text-3xl md:text-3xl font-bold text-slate-900 tracking-tighter leading-none">Rp {total.toLocaleString()}</div>
+                   <div className="text-3xl md:text-3xl font-bold text-slate-900 tracking-tighter leading-none">Rp {total.toLocaleString('id-ID')}</div>
                 </div>
 
                 <div className="grid grid-cols-2 gap-3">
@@ -723,27 +796,32 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                           onChange={(e) => setAmountReceived(parseInt(e.target.value) || 0)}
                         />
                         <div className="absolute right-3 md:right-4 top-1/2 -translate-y-1/2 flex gap-2 md:gap-2">
+                           <button
+                             type="button"
+                             onClick={() => setAmountReceived(total)}
+                             className="px-3 md:px-3 py-2 md:py-2 bg-emerald-600 text-white border-2 border-emerald-600 rounded-xl md:rounded-xl text-[10px] md:text-[11px] font-bold hover:bg-emerald-700 active:scale-95 transition-all shadow-md"
+                           >PAS</button>
                            {[50000, 100000].map(val => (
-                              <button 
-                                key={val} 
+                              <button
+                                key={val}
                                 type="button"
                                 onClick={() => setAmountReceived(val)}
                                 className="px-3 md:px-3 py-2 md:py-2 bg-slate-900 text-white border-2 border-slate-900 rounded-xl md:rounded-xl text-[10px] md:text-[11px] font-bold hover:bg-blue-600 hover:border-blue-700 active:scale-95 transition-all shadow-md"
-                              >+{val/1000}K</button>
+                              >{val/1000}K</button>
                            ))}
                         </div>
                       </div>
                       {isAmountShort && (
                         <div className="flex items-center gap-2 text-red-600 px-3 py-2 bg-red-100/50 rounded-xl border border-red-200 animate-pulse">
                           <AlertTriangle size={16}/>
-                          <span className="text-[10px] md:text-[11px] font-bold uppercase tracking-widest leading-none">UANG KURANG Rp {(total - amountReceived).toLocaleString()}</span>
+                          <span className="text-[10px] md:text-[11px] font-bold uppercase tracking-widest leading-none">UANG KURANG Rp {(total - amountReceived).toLocaleString('id-ID')}</span>
                         </div>
                       )}
                     </div>
                     {!isAmountShort && (
                       <div className="bg-emerald-50 p-4 md:p-4 rounded-2xl border-2 border-emerald-400 flex justify-between items-center shadow-inner animate-in fade-in zoom-in duration-500">
                          <span className="text-[11px] md:text-sm font-bold text-emerald-600 uppercase tracking-widest">KEMBALIAN</span>
-                         <span className="text-xl md:text-xl font-black text-emerald-700 tracking-tighter">Rp {changeAmount.toLocaleString()}</span>
+                         <span className="text-xl md:text-xl font-black text-emerald-700 tracking-tighter">Rp {changeAmount.toLocaleString('id-ID')}</span>
                       </div>
                     )}
                   </div>

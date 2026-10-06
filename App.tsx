@@ -1,6 +1,6 @@
 import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
 import Layout from './components/Layout';
-import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashExpense, CashSession, Customer, InventoryMovement, Item, MediaAsset, PaymentRecord, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, Supplier, User, UserRole, Account } from './types';
+import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashExpense, CashSession, Customer, InventoryLog, InventoryMovement, Item, MediaAsset, PaymentRecord, PriceChangeSource, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, StoreProfile, Supplier, User, UserRole, Account } from './types';
 import { mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, mockBranches, mockPromotions } from './store';
 import { ShieldCheck, User as UserIcon, Key, Clock, AlertCircle, Info, CloudLightning, RefreshCw, Loader2, Link2, CheckCircle2, X, Plus, Store, ChevronRight, Globe, Lock, Trash2, Settings2, Database, HardDrive, Server, QrCode, Terminal, Activity, ChevronDown, Search, Cloud, Monitor, MapPin, ShieldEllipsis } from 'lucide-react';
 import { pullFromCloud, pushToCloud, getCloudConfig, hasCloudConfig, applyActivationCode, saveCloudConfig, withCloudInventoryLock } from './services/syncService';
@@ -8,14 +8,33 @@ import { clearSessionLocal, loadAppDataLocal, loadSessionLocal, saveAppDataLocal
 import { hashPassword, sanitizeUserSession, verifyPassword } from './services/authService';
 import { canAccessTab, getAccessibleTabs, hasPermission } from './services/permissions';
 import { getLoginLockoutRemaining, recordFailedLogin, resetLoginAttempts } from './services/rateLimiter';
-import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem } from './services/posOperations';
+import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem, type CostChange } from './services/posOperations';
 import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from './services/cloudProfiles';
 import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
 import { mergeAppData } from './services/mergeService';
 import { loadAppDataIndexedDB, saveAppDataIndexedDB } from './services/indexedDbService';
-import { createId } from './services/idService';
-import { postCashExpenseAccounts, postPurchaseOrderAccounts, postPurchasePaymentAccounts, postReturnAccounts, postSaleAccounts, reverseCashExpenseAccounts } from './services/accountingService';
+import { createDocumentNo, createId } from './services/idService';
+import { postCashExpenseAccounts, postCustomerPaymentAccounts, postPurchaseOrderAccounts, postPurchasePaymentAccounts, postReturnAccounts, postSaleAccounts, reverseCashExpenseAccounts, reversePurchaseOrderAccounts } from './services/accountingService';
+import { buildPriceChangeLogs, PRICE_HISTORY_LIMIT } from './services/pricing';
+import { stampAppData } from './services/syncMeta';
+import { AUDIT_LOG_LIMIT } from './services/mergeService';
+import ErrorBoundary from './components/ErrorBoundary';
+
+/** Workspace (Store ID) pemilik data lokal di perangkat ini. */
+const DATA_WORKSPACE_KEY = 'POS_DATA_WORKSPACE';
+/** Jeda setelah perubahan terakhir sebelum dikirim ke cloud. */
+const PUSH_DEBOUNCE_MS = 4000;
+/** Jarak minimum antar push ke cloud. */
+const PUSH_MIN_INTERVAL_MS = 5000;
+/** Jeda percobaan ulang jika push gagal (offline / server sibuk). */
+const PUSH_RETRY_MS = 15000;
+
+/** Field barang yang boleh diubah lewat edit master — stok hanya berubah lewat transaksi/opname. */
+const toItemPatch = (item: Partial<Item>): Partial<Item> => {
+  const { stock: _stock, updatedAt: _updatedAt, fieldUpdatedAt: _fieldUpdatedAt, ...patch } = item as Item;
+  return patch;
+};
 
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 const MasterData = lazy(() => import('./pages/MasterData'));
@@ -80,6 +99,7 @@ const App: React.FC = () => {
     mediaAssets, setMediaAssets, aiUndoStack, setAiUndoStack,
     branches, aiConsultantHistory, setAiConsultantHistory,
     floatingChatHistory, setFloatingChatHistory,
+    priceHistory, appendPriceHistory, recordDeletion, storeProfile, setStoreProfile,
     applyData, appendAuditLog
   } = appStore;
 
@@ -130,6 +150,9 @@ const App: React.FC = () => {
       branches: state.branches,
       aiConsultantHistory: state.aiConsultantHistory,
       floatingChatHistory: state.floatingChatHistory,
+      priceHistory: state.priceHistory,
+      deletedRecords: state.deletedRecords,
+      storeProfile: state.storeProfile,
       openRouterApiKey: getCloudConfig().openRouterApiKey,
       aiModel: getCloudConfig().aiModel,
       supabaseUrl: (getCloudConfig() as any).supabaseUrl || '',
@@ -138,36 +161,109 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // Flag to prevent push/pull infinite loop
+  const isApplyingFromCloud = React.useRef(false);
+  const lastPushTime = React.useRef(0);
+  const pushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pushInFlight = React.useRef(false);
+
+  /**
+   * Terapkan data hasil merge dari cloud. Flag hanya aktif selama applyData berjalan
+   * (subscriber zustand dipanggil sinkron), sehingga perubahan lokal sesudahnya tetap tersimpan & terkirim.
+   */
+  const applyRemoteData = useCallback((data: AppData) => {
+    isApplyingFromCloud.current = true;
+    try {
+      applyData(data);
+    } finally {
+      isApplyingFromCloud.current = false;
+    }
+    saveAppDataLocal(data);
+    void saveAppDataIndexedDB(data);
+  }, [applyData]);
+
+  /**
+   * Gabungkan data lokal dengan data cloud. Jika data di perangkat ini milik workspace/toko lain
+   * (Workspace ID diganti di Pengaturan), data cloud dipakai apa adanya agar data dua toko tidak tercampur.
+   */
+  const mergeWithRemote = useCallback((local: AppData, remote: Partial<AppData>): AppData => {
+    const storeId = getCloudConfig().storeId || '';
+    const dataWorkspace = localStorage.getItem(DATA_WORKSPACE_KEY);
+    if (storeId) localStorage.setItem(DATA_WORKSPACE_KEY, storeId);
+    if (dataWorkspace && storeId && dataWorkspace !== storeId) {
+      console.warn(`[Sync] Workspace berganti dari ${dataWorkspace} ke ${storeId}; data lokal diganti data cloud.`);
+      return { ...local, ...remote } as AppData;
+    }
+    return mergeAppData(local, remote) as AppData;
+  }, []);
+
+  /** Ambil data cloud lalu gabungkan dengan data lokal terbaru. */
+  const pullAndMerge = useCallback(async (): Promise<boolean> => {
+    const cloudData = await pullFromCloud();
+    if (!cloudData || typeof cloudData !== 'object') {
+      const storeId = getCloudConfig().storeId;
+      if (storeId) localStorage.setItem(DATA_WORKSPACE_KEY, storeId); // workspace baru: data lokal akan diunggah
+      return false;
+    }
+    // Snapshot lokal diambil SETELAH request selesai agar perubahan selama menunggu jaringan tidak hilang.
+    applyRemoteData(mergeWithRemote(buildDataSnapshot(), cloudData));
+    return true;
+  }, [applyRemoteData, buildDataSnapshot, mergeWithRemote]);
+
+  const runCloudPushRef = React.useRef<() => Promise<void>>(async () => undefined);
+  const schedulePush = useCallback((delayMs: number) => {
+    if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
+    pushTimerRef.current = setTimeout(() => { void runCloudPushRef.current(); }, delayMs);
+  }, []);
+
+  /** Pull → merge → push, agar transaksi terminal lain yang belum diterima tidak tertimpa snapshot lama. */
+  const runCloudPush = useCallback(async () => {
+    if (!hasCloudConfig()) return;
+    const wait = PUSH_MIN_INTERVAL_MS - (Date.now() - lastPushTime.current);
+    if (wait > 0 || pushInFlight.current) {
+      // Jangan membuang perubahan — jadwalkan ulang.
+      schedulePush(Math.max(wait, 1000));
+      return;
+    }
+    pushInFlight.current = true;
+    lastPushTime.current = Date.now();
+    try {
+      const remote = await pullFromCloud();
+      const merged = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
+      await pushToCloud(merged);
+      if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), merged) as AppData);
+      setLastSyncTime(new Date().toLocaleTimeString());
+      setSyncError(false);
+    } catch {
+      // Gagal sementara (offline/server sibuk): coba lagi nanti, data tetap aman di lokal.
+      schedulePush(PUSH_RETRY_MS);
+    } finally {
+      pushInFlight.current = false;
+    }
+  }, [applyRemoteData, buildDataSnapshot, mergeWithRemote, schedulePush]);
+  runCloudPushRef.current = runCloudPush;
+
   const handleManualRefresh = useCallback(async (showFeedback = true) => {
     const config = getCloudConfig();
     if (!config.enabled) {
       if (showFeedback) alert("Fitur Cloud tidak aktif. Menggunakan database lokal.");
       return;
     }
-    
+
     setIsSyncing(true);
     setSyncError(false);
     try {
-      isApplyingFromCloud.current = true;
-      const cloudData = await pullFromCloud();
-      if (cloudData && typeof cloudData === 'object') {
-        const localData = buildDataSnapshot();
-        const merged = mergeAppData(localData, cloudData);
-        applyData(merged);
-        saveAppDataLocal(merged as AppData);
-        void saveAppDataIndexedDB(merged as AppData);
-      }
+      await pullAndMerge();
       setLastSyncTime(new Date().toLocaleTimeString());
       setSyncError(false);
       if (showFeedback) alert("Database berhasil diperbarui dari Cloud!");
-    } catch (e) { 
+    } catch (e) {
       setSyncError(true);
-      if (showFeedback) alert("Gagal sinkronisasi Cloud. Periksa koneksi atau kredensial."); 
+      if (showFeedback) alert("Gagal sinkronisasi Cloud. Periksa koneksi atau kredensial.");
     } finally {
       setIsSyncing(false);
-      setTimeout(() => { isApplyingFromCloud.current = false; }, 1500);
     }
-  }, [applyData, buildDataSnapshot]);
+  }, [pullAndMerge]);
 
   const handleLogout = useCallback(() => {
     setCurrentUser(null);
@@ -175,12 +271,7 @@ const App: React.FC = () => {
     clearSessionLocal();
   }, []);
 
-  // Flag to prevent push/pull infinite loop
-  const isApplyingFromCloud = React.useRef(false);
-  const lastPushTime = React.useRef(0);
-  const pushTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // AUTO-SAVE LOGIC (PERSISTENCE) — only save to localStorage
+  // AUTO-SAVE LOGIC (PERSISTENCE) + jadwal kirim ke cloud
   useEffect(() => {
     if (!isDataLoaded) return;
 
@@ -191,23 +282,7 @@ const App: React.FC = () => {
       void saveAppDataIndexedDB(snapshot);
 
       // Schedule a cloud push if cloud is active
-      if (hasCloudConfig()) {
-        if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
-        pushTimerRef.current = setTimeout(() => {
-          const now = Date.now();
-          if (now - lastPushTime.current < 5000) return;
-          if (isApplyingFromCloud.current) return;
-          lastPushTime.current = now;
-
-          pushToCloud(buildDataSnapshot()).then(() => {
-            setLastSyncTime(new Date().toLocaleTimeString());
-            setSyncError(false);
-          }).catch(() => {
-            // Don't immediately show error — transient failures are normal
-            // syncError will only be set by manual sync or after initial load failure
-          });
-        }, 4000);
-      }
+      if (hasCloudConfig()) schedulePush(PUSH_DEBOUNCE_MS);
     });
 
     const initialSnapshot = buildDataSnapshot();
@@ -217,35 +292,27 @@ const App: React.FC = () => {
       unsubscribe();
       if (pushTimerRef.current) clearTimeout(pushTimerRef.current);
     };
-  }, [buildDataSnapshot, isDataLoaded]);
+  }, [buildDataSnapshot, isDataLoaded, schedulePush]);
 
   // AUTO-PULL FROM CLOUD (every 30 seconds) — uses merge, not overwrite
   useEffect(() => {
     if (!isDataLoaded || !hasCloudConfig()) return;
 
     const interval = setInterval(async () => {
+      if (pushInFlight.current) return;
       try {
-        const cloudData = await pullFromCloud();
-        if (cloudData && typeof cloudData === 'object') {
-          isApplyingFromCloud.current = true;
-          const localData = buildDataSnapshot();
-          const merged = mergeAppData(localData, cloudData);
-          applyData(merged);
-          saveAppDataLocal(merged as AppData);
-          void saveAppDataIndexedDB(merged as AppData);
+        if (await pullAndMerge()) {
           setLastSyncTime(new Date().toLocaleTimeString());
           setSyncError(false);
-          setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
         }
       } catch {
         // Silent fail — don't set syncError for background pulls
         // Only manual sync should show error state
-        isApplyingFromCloud.current = false;
       }
     }, 30000);
 
     return () => clearInterval(interval);
-  }, [isDataLoaded, applyData, buildDataSnapshot]);
+  }, [isDataLoaded, pullAndMerge]);
 
   // INITIAL LOAD — fixed: load saved data FIRST, then find user from loaded data
   useEffect(() => {
@@ -278,21 +345,11 @@ const App: React.FC = () => {
         // 3. Then Refresh from Cloud (latest) with merge
         if (hasCloudConfig()) {
           try {
-            isApplyingFromCloud.current = true;
-            const cloudData = await pullFromCloud();
-            if (cloudData && typeof cloudData === 'object') {
-              const localData = buildDataSnapshot();
-              const merged = mergeAppData(localData, cloudData);
-              applyData(merged);
-              saveAppDataLocal(merged as AppData);
-              void saveAppDataIndexedDB(merged as AppData);
-            }
+            await pullAndMerge();
             setSyncError(false);
             setLastSyncTime(new Date().toLocaleTimeString());
           } catch {
             setSyncError(true);
-          } finally {
-            setTimeout(() => { isApplyingFromCloud.current = false; }, 1000);
           }
         }
       } catch (e) {
@@ -394,8 +451,12 @@ const App: React.FC = () => {
     setIsSyncing(true);
     try {
       const config = getCloudConfig();
-      const dataToSave = buildDataSnapshot();
+      // Gabungkan dulu dengan cloud agar transaksi terminal lain tidak tertimpa.
+      const remote = await pullFromCloud();
+      const dataToSave = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
       await pushToCloud(dataToSave);
+      if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), dataToSave) as AppData);
+      lastPushTime.current = Date.now();
       setLastSyncTime(new Date().toLocaleTimeString());
       if (currentUser) {
         appendAuditLog({
@@ -415,7 +476,7 @@ const App: React.FC = () => {
     } finally {
       setIsSyncing(false);
     }
-  }, [appendAuditLog, buildDataSnapshot, currentUser]);
+  }, [appendAuditLog, applyRemoteData, buildDataSnapshot, currentUser, mergeWithRemote]);
 
   const switchDb = async (config: any) => {
     saveCloudConfig(config);
@@ -505,8 +566,10 @@ const App: React.FC = () => {
   const importBackup = async (file: File) => {
     const content = await file.text();
     const parsed = JSON.parse(content) as Partial<AppData>;
-    applyData(parsed);
-    saveAppDataLocal({ ...buildDataSnapshot(), ...parsed } as AppData);
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.items) || !Array.isArray(parsed.users)) {
+      throw new Error('File bukan backup POS Hulio yang valid.');
+    }
+    applyData(parsed); // subscriber menyimpan ke localStorage + IndexedDB
   };
 
   const handleResetWorkspaceUsers = useCallback(async () => {
@@ -541,7 +604,9 @@ const App: React.FC = () => {
 
     setIsSyncing(true);
     try {
-      await pushToCloud(dataToSave);
+      const remote = await pullFromCloud();
+      const latest = remote ? { ...mergeWithRemote(buildDataSnapshot(), remote), users: useAppStore.getState().users } : dataToSave;
+      await pushToCloud(latest);
       setLastSyncTime(new Date().toLocaleTimeString());
       setSyncError(false);
       alert(`User default untuk workspace ${workspaceLabel} berhasil direset. Gunakan admin / 123.`);
@@ -551,16 +616,15 @@ const App: React.FC = () => {
     } finally {
       setIsSyncing(false);
     }
-  }, [buildDataSnapshot, recoveryPhraseInput, recoveryWorkspaceInput]);
+  }, [buildDataSnapshot, mergeWithRemote, recoveryPhraseInput, recoveryWorkspaceInput]);
 
   const runInventorySafeMutation = useCallback(async (
     mutator: (snapshot: AppData) => AppData,
   ): Promise<AppData> => {
-    const localSnapshot = buildDataSnapshot();
-    
-    // Prefer a locked cloud mutation; fall back to durable local storage when offline.
-    let cloudMutationError: unknown;
+    // Setiap entitas yang berubah diberi cap waktu agar merge antar perangkat memilih versi terbaru.
+    const mutate = (snapshot: AppData) => stampAppData(snapshot, mutator(snapshot));
 
+    // Prefer a locked cloud mutation; fall back to durable local storage when offline.
     if (hasCloudConfig()) {
       setIsSyncing(true);
       let mutationError: unknown;
@@ -568,9 +632,10 @@ const App: React.FC = () => {
         let nextCloud: AppData | null = null;
         await withCloudInventoryLock(async () => {
           const remote = await pullFromCloud();
-          const latest = remote ? mergeAppData(localSnapshot, remote) as AppData : localSnapshot;
+          const localSnapshot = buildDataSnapshot();
+          const latest = remote ? mergeWithRemote(localSnapshot, remote) : localSnapshot;
           try {
-            nextCloud = mutator(latest);
+            nextCloud = mutate(latest);
           } catch (error) {
             mutationError = error;
             throw error;
@@ -578,39 +643,54 @@ const App: React.FC = () => {
           await pushToCloud(nextCloud);
         });
         if (!nextCloud) throw new Error('Mutasi cloud tidak menghasilkan data.');
-        applyData(nextCloud);
-        saveAppDataLocal(nextCloud);
-        void saveAppDataIndexedDB(nextCloud);
+        // Gabungkan dengan perubahan lokal yang terjadi selama menunggu jaringan.
+        const finalData = mergeAppData(buildDataSnapshot(), nextCloud) as AppData;
+        applyRemoteData(finalData);
         setSyncError(false);
         setLastSyncTime(new Date().toLocaleTimeString());
         lastPushTime.current = Date.now();
-        return nextCloud;
+        return finalData;
       } catch (error: any) {
         if (mutationError) throw mutationError;
         setSyncError(true);
-        cloudMutationError = error;
         console.warn('[Sync] Cloud gagal; menggunakan penyimpanan lokal:', error?.message);
       } finally {
         setIsSyncing(false);
       }
     }
-    const nextLocal = mutator(localSnapshot);
-    applyData(nextLocal);
-    saveAppDataLocal(nextLocal);
-    void saveAppDataIndexedDB(nextLocal);
-    if (cloudMutationError) console.warn('[Sync] Transaksi disimpan lokal setelah cloud gagal.');
+    // Snapshot diambil ulang: percobaan cloud bisa memakan waktu dan data lokal mungkin sudah berubah.
+    const nextLocal = mutate(buildDataSnapshot());
+    applyData(nextLocal); // subscriber menyimpan ke lokal & menjadwalkan push saat online
     return nextLocal;
-  }, [applyData, buildDataSnapshot]);
+  }, [applyData, applyRemoteData, buildDataSnapshot, mergeWithRemote]);
 
   // HANDLERS WITH FUNCTIONAL UPDATES (PREV STATE SAFETY)
+  const logPriceChanges = (before: Item[], after: Item[], source: PriceChangeSource, note?: string) => {
+    if (!currentUser) return;
+    const logs = buildPriceChangeLogs(before, after, { source, note, operatorName: currentUser.name, operatorId: currentUser.id });
+    if (logs.length === 0) return;
+    appendPriceHistory(logs);
+    appendAuditLog({
+      id: createId('AUD'),
+      action: 'PRICE_CHANGED',
+      actorId: currentUser.id,
+      actorName: currentUser.name,
+      entityType: 'ITEM',
+      entityId: logs.length === 1 ? logs[0].itemId : undefined,
+      entityLabel: logs.length === 1 ? logs[0].itemName : `${logs.length} barang`,
+      details: `Harga ${logs.length} barang diubah (${source})${note ? `: ${note}` : ''}.`,
+      createdAt: new Date().toISOString(),
+    });
+  };
+
   const addItem = (item: Item) => {
     if (!hasPermission(currentUser, 'item.create')) return alert('Anda tidak memiliki izin menambah barang.');
     try {
-      validateUniqueItem(items, item);
+      validateUniqueItem(useAppStore.getState().items, item);
       setItems(prev => [...prev, item]);
       if (currentUser) {
         appendAuditLog({
-          id: `AUD-${Date.now()}`,
+          id: createId('AUD'),
           action: 'ITEM_CREATED',
           actorId: currentUser.id,
           actorName: currentUser.name,
@@ -625,54 +705,130 @@ const App: React.FC = () => {
       alert(error.message);
     }
   };
-  const addItemsBulk = (newItems: Item[]) => {
-    if (!hasPermission(currentUser, 'item.create')) return alert('Anda tidak memiliki izin menambah barang.');
-    try {
-      newItems.forEach(item => validateUniqueItem([...items, ...newItems.filter(candidate => candidate.id !== item.id)], item));
-      setItems(prev => [...prev, ...newItems]);
-    } catch (error: any) {
-      alert(error.message);
+
+  /**
+   * Import master barang dari CSV: kode yang sudah ada DIPERBARUI (nama, kategori, merk, barcode, harga),
+   * kode baru DITAMBAHKAN. Stok barang lama tidak disentuh — gunakan Stok Opname.
+   */
+  const importItems = (rows: Item[]): { added: number; updated: number; errors: string[] } => {
+    const canCreate = hasPermission(currentUser, 'item.create');
+    const canEdit = hasPermission(currentUser, 'item.edit');
+    const errors: string[] = [];
+    if (!canCreate && !canEdit) return { added: 0, updated: 0, errors: ['Anda tidak memiliki izin mengimpor barang.'] };
+
+    const before = useAppStore.getState().items;
+    let working = [...before];
+    const addedIds = new Set<string>();
+    const updatedIds = new Set<string>();
+
+    rows.forEach((row, index) => {
+      const line = index + 2; // +1 header, +1 nomor baris manusia
+      const existing = working.find(item => item.code.toLowerCase() === row.code.toLowerCase());
+      if (existing) {
+        if (!canEdit) { errors.push(`Baris ${line}: ${row.code} sudah ada (butuh izin edit barang).`); return; }
+        const next: Item = {
+          ...existing,
+          name: row.name || existing.name,
+          category: row.category || existing.category,
+          brand: row.brand ?? existing.brand,
+          barcode: row.barcode || existing.barcode,
+          imageUrl: row.imageUrl || existing.imageUrl,
+          basePrice: row.basePrice > 0 ? row.basePrice : existing.basePrice,
+          memberPrices: row.memberPrices.map((price, level) => (price > 0 ? price : existing.memberPrices[level] || 0)),
+        };
+        try { validateUniqueItem(working, next); } catch (error: any) { errors.push(`Baris ${line}: ${error.message}`); return; }
+        working = working.map(item => (item.id === existing.id ? next : item));
+        if (!addedIds.has(existing.id)) updatedIds.add(existing.id);
+      } else {
+        if (!canCreate) { errors.push(`Baris ${line}: ${row.code} belum ada (butuh izin tambah barang).`); return; }
+        try { validateUniqueItem(working, row); } catch (error: any) { errors.push(`Baris ${line}: ${error.message}`); return; }
+        working = [...working, row];
+        addedIds.add(row.id);
+      }
+    });
+
+    if (addedIds.size === 0 && updatedIds.size === 0) return { added: 0, updated: 0, errors };
+    const workingMap = new Map(working.map(item => [item.id, item]));
+    setItems(prev => [
+      ...prev.map(item => (updatedIds.has(item.id) ? { ...item, ...toItemPatch(workingMap.get(item.id)!) } : item)),
+      ...working.filter(item => addedIds.has(item.id)),
+    ]);
+    logPriceChanges(before.filter(item => updatedIds.has(item.id)), working.filter(item => updatedIds.has(item.id)), 'IMPORT', 'Import master barang');
+    if (currentUser) {
+      appendAuditLog({
+        id: createId('AUD'),
+        action: 'ITEM_UPDATED',
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        entityType: 'ITEM',
+        details: `Import master barang: ${addedIds.size} baru, ${updatedIds.size} diperbarui, ${errors.length} baris ditolak.`,
+        createdAt: new Date().toISOString(),
+      });
     }
+    return { added: addedIds.size, updated: updatedIds.size, errors };
   };
+
+  /** Edit master barang. Stok TIDAK ikut diubah dari form agar penjualan yang terjadi saat form terbuka tidak tertimpa. */
   const updateItem = (updated: Item) => {
     if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengubah barang.');
+    const current = useAppStore.getState().items;
+    const existing = current.find(item => item.id === updated.id);
+    if (!existing) return alert('Barang tidak ditemukan — mungkin sudah dihapus di perangkat lain.');
+    const patch = toItemPatch(updated);
+    const next = { ...existing, ...patch };
     try {
-      validateUniqueItem(items, updated);
-      setItems(prev => prev.map(i => i.id === updated.id ? updated : i));
-      if (currentUser) {
-        appendAuditLog({
-          id: `AUD-${Date.now()}`,
-          action: 'ITEM_UPDATED',
-          actorId: currentUser.id,
-          actorName: currentUser.name,
-          entityType: 'ITEM',
-          entityId: updated.id,
-          entityLabel: updated.name,
-          details: `Master barang ${updated.name} diperbarui.`,
-          createdAt: new Date().toISOString(),
-        });
-      }
+      validateUniqueItem(current, next);
     } catch (error: any) {
-      alert(error.message);
+      return alert(error.message);
+    }
+    setItems(prev => prev.map(item => (item.id === updated.id ? { ...item, ...patch } : item)));
+    logPriceChanges([existing], [next], 'MANUAL');
+    if (currentUser) {
+      appendAuditLog({
+        id: createId('AUD'),
+        action: 'ITEM_UPDATED',
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        entityType: 'ITEM',
+        entityId: updated.id,
+        entityLabel: updated.name,
+        details: `Master barang ${updated.name} diperbarui.`,
+        createdAt: new Date().toISOString(),
+      });
     }
   };
-  const updateItemsBulk = (updatedList: Item[]) => {
+
+  /** Update banyak barang sekaligus (harga massal, kategori/merk). Hanya field yang dikirim yang diubah; stok tidak disentuh. */
+  const updateItemsBulk = (patches: Array<Partial<Item> & { id: string }>, source: PriceChangeSource = 'BULK', note?: string) => {
     if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengubah barang.');
-    setItems(prev => {
-      const newItems = [...prev];
-      updatedList.forEach(updated => {
-        const idx = newItems.findIndex(i => i.id === updated.id);
-        if (idx !== -1) newItems[idx] = updated;
+    if (patches.length === 0) return;
+    const patchMap = new Map(patches.map(patch => [patch.id, toItemPatch(patch)]));
+    const before = useAppStore.getState().items.filter(item => patchMap.has(item.id));
+    setItems(prev => prev.map(item => {
+      const patch = patchMap.get(item.id);
+      return patch ? { ...item, ...patch } : item;
+    }));
+    const after = useAppStore.getState().items.filter(item => patchMap.has(item.id));
+    logPriceChanges(before, after, source, note);
+    if (currentUser) {
+      appendAuditLog({
+        id: createId('AUD'),
+        action: 'ITEM_UPDATED',
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        entityType: 'ITEM',
+        details: `${patches.length} master barang diperbarui sekaligus (${source}).`,
+        createdAt: new Date().toISOString(),
       });
-      return newItems;
-    });
+    }
   };
+
   const deleteItem = (id: string) => {
     if (!hasPermission(currentUser, 'item.delete')) return alert('Anda tidak memiliki izin menghapus barang.');
-    const target = items.find(item => item.id === id);
+    const target = useAppStore.getState().items.find(item => item.id === id);
     if (target && currentUser) {
       appendAuditLog({
-        id: `AUD-${Date.now()}`,
+        id: createId('AUD'),
         action: 'ITEM_DELETED',
         actorId: currentUser.id,
         actorName: currentUser.name,
@@ -684,14 +840,14 @@ const App: React.FC = () => {
       });
     }
     setItems(prev => prev.filter(i => i.id !== id));
+    recordDeletion('items', [id]);
   };
 
   const applyAIPriceUpdates = (updates: AIPriceUpdateDraft[]) => {
     if (!currentUser || updates.length === 0) return;
-    const beforeItems = items
-      .filter(item => updates.some(update => update.itemId === item.id))
-      .map(item => ({ ...item }));
+    if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengubah harga.');
     const updateMap = new Map(updates.map(update => [update.itemId, update]));
+    const beforeItems = useAppStore.getState().items.filter(item => updateMap.has(item.id));
     setItems(prev =>
       prev.map(item => {
         const draft = updateMap.get(item.id);
@@ -703,23 +859,16 @@ const App: React.FC = () => {
         };
       }),
     );
+    const afterItems = useAppStore.getState().items.filter(item => updateMap.has(item.id));
     setAiUndoStack(prev => [{
-      id: `UNDO-${Date.now()}`,
+      id: createId('UNDO'),
       actionType: 'PRICE_UPDATE' as const,
       label: `Undo perubahan harga (${updates.length} item)`,
       createdAt: new Date().toISOString(),
-      payload: { items: beforeItems },
+      // Simpan HANYA harga lama — undo tidak boleh mengembalikan stok/data lain yang sudah berubah.
+      payload: { prices: beforeItems.map(item => ({ id: item.id, basePrice: item.basePrice, memberPrices: [...item.memberPrices] })) },
     }, ...prev].slice(0, 3));
-
-    appendAuditLog({
-      id: `AUD-${Date.now()}`,
-      action: 'ITEM_UPDATED',
-      actorId: currentUser.id,
-      actorName: currentUser.name,
-      entityType: 'ITEM',
-      details: `AI Consultant mengeksekusi ${updates.length} perubahan harga barang dengan konfirmasi user.`,
-      createdAt: new Date().toISOString(),
-    });
+    logPriceChanges(beforeItems, afterItems, 'AI', 'AI Consultant (dikonfirmasi user)');
   };
 
   const createAIPromotions = (drafts: PromotionCampaign[]) => {
@@ -731,14 +880,14 @@ const App: React.FC = () => {
       return [...next, ...prev];
     });
     setAiUndoStack(prev => [{
-      id: `UNDO-${Date.now()}`,
+      id: createId('UNDO'),
       actionType: 'PROMO_CREATE' as const,
       label: `Undo pembuatan promo (${drafts.length} campaign)`,
       createdAt: new Date().toISOString(),
       payload: { promotionIds: createdIds },
     }, ...prev].slice(0, 3));
     appendAuditLog({
-      id: `AUD-${Date.now()}`,
+      id: createId('AUD'),
       action: 'SETTINGS_UPDATED',
       actorId: currentUser.id,
       actorName: currentUser.name,
@@ -748,14 +897,23 @@ const App: React.FC = () => {
     });
   };
 
-  const createAIPurchaseOrders = (drafts: PurchaseOrder[]) => {
+  const createAIPurchaseOrders = async (drafts: PurchaseOrder[]) => {
     if (!currentUser || drafts.length === 0) return;
-    const createdIds = drafts.map(item => item.id);
-    drafts.forEach(addPurchaseOrder);
+    const createdIds: string[] = [];
+    // Berurutan agar tiap PO tersimpan (dan error per PO terlihat), bukan hilang sebagai promise yang tidak ditangani.
+    for (const draft of drafts) {
+      try {
+        await addPurchaseOrder(draft);
+        createdIds.push(draft.id);
+      } catch (error: any) {
+        alert(`PO untuk ${draft.supplierName} gagal dibuat: ${error?.message || 'error tidak diketahui'}`);
+      }
+    }
+    if (createdIds.length === 0) return;
     setAiUndoStack(prev => [{
-      id: `UNDO-${Date.now()}`,
+      id: createId('UNDO'),
       actionType: 'PO_CREATE' as const,
-      label: `Undo draft PO (${drafts.length} dokumen)`,
+      label: `Undo draft PO (${createdIds.length} dokumen)`,
       createdAt: new Date().toISOString(),
       payload: { poIds: createdIds },
     }, ...prev].slice(0, 3));
@@ -767,24 +925,46 @@ const App: React.FC = () => {
     if (!target) return;
 
     if (target.actionType === 'PRICE_UPDATE') {
-      const restoreItems: Item[] = Array.isArray(target.payload?.items) ? target.payload.items : [];
-      const map = new Map(restoreItems.map(item => [item.id, item]));
-      setItems(prev => prev.map(item => map.get(item.id) || item));
+      // Format baru: payload.prices. Format lama: payload.items (objek barang penuh) — ambil harganya saja.
+      const restorePrices: Array<{ id: string; basePrice: number; memberPrices: number[] }> = Array.isArray(target.payload?.prices)
+        ? target.payload.prices
+        : Array.isArray(target.payload?.items)
+          ? target.payload.items.map((item: Item) => ({ id: item.id, basePrice: item.basePrice, memberPrices: item.memberPrices }))
+          : [];
+      const map = new Map(restorePrices.map(entry => [entry.id, entry]));
+      const beforeItems = useAppStore.getState().items.filter(item => map.has(item.id));
+      setItems(prev => prev.map(item => {
+        const restore = map.get(item.id);
+        return restore ? { ...item, basePrice: restore.basePrice, memberPrices: [...restore.memberPrices] } : item;
+      }));
+      logPriceChanges(beforeItems, useAppStore.getState().items.filter(item => map.has(item.id)), 'AI_UNDO', target.label);
     }
 
     if (target.actionType === 'PROMO_CREATE') {
       const ids: string[] = Array.isArray(target.payload?.promotionIds) ? target.payload.promotionIds : [];
       setPromotions(prev => prev.filter(item => !ids.includes(item.id)));
+      recordDeletion('promotions', ids);
     }
 
     if (target.actionType === 'PO_CREATE') {
       const ids: string[] = Array.isArray(target.payload?.poIds) ? target.payload.poIds : [];
-      setPurchaseOrders(prev => prev.filter(item => !ids.includes(item.id)));
+      const targets = useAppStore.getState().purchaseOrders.filter(po => ids.includes(po.id));
+      // Hanya PO yang belum diterima & belum dibayar yang boleh dibatalkan.
+      const removable = targets.filter(po => po.status === 'PENDING' && !(po.paidAmount && po.paidAmount > 0) && po.items.every(line => line.receivedQty === 0));
+      const removableIds = new Set(removable.map(po => po.id));
+      if (removable.length > 0) {
+        setPurchaseOrders(prev => prev.filter(po => !removableIds.has(po.id)));
+        setAccounts(prev => reversePurchaseOrderAccounts(prev, removable.reduce((sum, po) => sum + po.total, 0)));
+        recordDeletion('purchaseOrders', [...removableIds]);
+      }
+      if (removable.length < targets.length) {
+        alert(`${targets.length - removable.length} PO tidak dibatalkan karena sudah diterima atau dibayar.`);
+      }
     }
 
     setAiUndoStack(prev => prev.filter(entry => entry.id !== undoId));
     appendAuditLog({
-      id: `AUD-${Date.now()}`,
+      id: createId('AUD'),
       action: 'SETTINGS_UPDATED',
       actorId: currentUser.id,
       actorName: currentUser.name,
@@ -798,7 +978,7 @@ const App: React.FC = () => {
     setMediaAssets(prev => [asset, ...prev]);
     if (!currentUser) return;
     appendAuditLog({
-      id: `AUD-${Date.now()}`,
+      id: createId('AUD'),
       action: 'SETTINGS_UPDATED',
       actorId: currentUser.id,
       actorName: currentUser.name,
@@ -815,9 +995,10 @@ const App: React.FC = () => {
   const removeMediaAsset = (id: string) => {
     const target = mediaAssets.find(item => item.id === id);
     setMediaAssets(prev => prev.filter(item => item.id !== id));
+    recordDeletion('mediaAssets', [id]);
     if (!currentUser || !target) return;
     appendAuditLog({
-      id: `AUD-${Date.now()}`,
+      id: createId('AUD'),
       action: 'SETTINGS_UPDATED',
       actorId: currentUser.id,
       actorName: currentUser.name,
@@ -829,11 +1010,23 @@ const App: React.FC = () => {
 
   const addCustomer = (c: Customer) => hasPermission(currentUser, 'contact.create') ? setCustomers(prev => [...prev, c]) : alert('Anda tidak memiliki izin menambah kontak.');
   const updateCustomer = (updated: Customer) => hasPermission(currentUser, 'contact.edit') ? setCustomers(prev => prev.map(c => c.id === updated.id ? updated : c)) : alert('Anda tidak memiliki izin mengubah kontak.');
-  const deleteCustomer = (id: string) => hasPermission(currentUser, 'contact.delete') ? setCustomers(prev => prev.filter(c => c.id !== id)) : alert('Anda tidak memiliki izin menghapus kontak.');
+  const deleteCustomer = (id: string) => {
+    if (!hasPermission(currentUser, 'contact.delete')) return alert('Anda tidak memiliki izin menghapus kontak.');
+    const target = useAppStore.getState().customers.find(customer => customer.id === id);
+    if (target && target.currentDebt > 0) {
+      return alert(`${target.name} masih memiliki piutang Rp ${target.currentDebt.toLocaleString('id-ID')}. Lunasi dulu sebelum menghapus.`);
+    }
+    setCustomers(prev => prev.filter(c => c.id !== id));
+    recordDeletion('customers', [id]);
+  };
 
   const addSupplier = (s: Supplier) => hasPermission(currentUser, 'contact.create') ? setSuppliers(prev => [...prev, s]) : alert('Anda tidak memiliki izin menambah kontak.');
   const updateSupplier = (updated: Supplier) => hasPermission(currentUser, 'contact.edit') ? setSuppliers(prev => prev.map(s => s.id === updated.id ? updated : s)) : alert('Anda tidak memiliki izin mengubah kontak.');
-  const deleteSupplier = (id: string) => hasPermission(currentUser, 'contact.delete') ? setSuppliers(prev => prev.filter(s => s.id !== id)) : alert('Anda tidak memiliki izin menghapus kontak.');
+  const deleteSupplier = (id: string) => {
+    if (!hasPermission(currentUser, 'contact.delete')) return alert('Anda tidak memiliki izin menghapus kontak.');
+    setSuppliers(prev => prev.filter(s => s.id !== id));
+    recordDeletion('suppliers', [id]);
+  };
 
   const addUser = async (draft: UserDraft) => {
     if (!hasPermission(currentUser, 'user.manage')) return alert('Anda tidak memiliki izin mengelola user.');
@@ -841,11 +1034,15 @@ const App: React.FC = () => {
       alert('Username sudah digunakan.');
       return;
     }
-    const passwordHash = await hashPassword(draft.password || '123');
+    if (!draft.password || draft.password.length < 4) {
+      alert('Password akun baru wajib diisi (minimal 4 karakter).');
+      return;
+    }
+    const passwordHash = await hashPassword(draft.password);
     const newUser: User = {
       id: draft.id,
       name: draft.name,
-      username: draft.username,
+      username: draft.username.trim().toLowerCase(),
       passwordHash,
       role: draft.role,
       permissions: draft.permissions,
@@ -907,6 +1104,7 @@ const App: React.FC = () => {
     const activeManagers = users.filter(user => user.isActive && (user.role === 'OWNER' || user.role === 'MANAGER'));
     if (target?.isActive && (target.role === 'OWNER' || target.role === 'MANAGER') && activeManagers.length <= 1) return alert('Minimal satu Owner atau Manager aktif harus tersedia.');
     setUsers(prev => prev.filter(u => u.id !== id));
+    recordDeletion('users', [id]);
     if (target && currentUser) {
       appendAuditLog({
         id: `AUD-${Date.now()}`,
@@ -948,31 +1146,42 @@ const App: React.FC = () => {
     setCashSessions(prev => [session, ...prev]);
   };
 
-  const closeCashSession = (closingCash: number, closingNotes: string = '') => {
-    if (!currentUser) return;
+  const closeCashSession = (closingCash: number, closingNotes: string = ''): CashSession | null => {
+    if (!currentUser) return null;
     const openSession = getOpenCashSession(currentUser.id);
     if (!openSession) {
       alert('Tidak ada shift kasir terbuka.');
-      return;
+      return null;
     }
 
-    const sessionSales = sales.filter(sale => sale.cashSessionId === openSession.id);
+    const sessionSales = sales.filter(sale => sale.cashSessionId === openSession.id && sale.status !== 'VOID');
     const cashRefunds = returns
-      .filter(ret => ret.status === 'APPROVED' && (ret.createdAt || '') >= openSession.openedAt)
+      .filter(ret => ret.status === 'APPROVED')
       .reduce((sum, ret) => {
+        // Retur baru mencatat shift tempat uang refund dikeluarkan.
+        if (ret.cashSessionId) return sum + (ret.cashSessionId === openSession.id ? ret.totalReturn : 0);
+        // Data lama: perkiraan dari shift penjualan asal.
+        if ((ret.createdAt || '') < openSession.openedAt) return sum;
         const origin = sales.find(sale => sale.invoiceNo === ret.originalInvoiceNo);
         return sum + (origin?.cashSessionId === openSession.id && origin.paymentType === 'TUNAI' ? ret.totalReturn : 0);
       }, 0);
     const sessionExpenses = cashExpenses
       .filter(expense => expense.cashSessionId === openSession.id)
       .reduce((sum, expense) => sum + expense.amount, 0);
-    const expectedCash = openSession.openingCash + sessionSales.filter(sale => sale.paymentType === 'TUNAI').reduce((sum, sale) => sum + sale.total, 0) - cashRefunds - sessionExpenses;
+    const customerCashPayments = paymentRecords
+      .filter(payment => payment.referenceType === 'CUSTOMER_PAYMENT' && payment.cashSessionId === openSession.id)
+      .reduce((sum, payment) => sum + payment.amount, 0);
+    const expectedCash = openSession.openingCash
+      + sessionSales.filter(sale => sale.paymentType === 'TUNAI').reduce((sum, sale) => sum + sale.total, 0)
+      + customerCashPayments
+      - cashRefunds
+      - sessionExpenses;
     const nonCashSales = sessionSales.filter(sale => sale.paymentType === 'NON-TUNAI').reduce((sum, sale) => sum + sale.total, 0);
     const creditSales = sessionSales.filter(sale => sale.paymentType === 'KREDIT').reduce((sum, sale) => sum + sale.total, 0);
     const shortageOrOverage = closingCash - expectedCash;
 
-    setCashSessions(prev => prev.map(session => session.id === openSession.id ? {
-      ...session,
+    const closedSession: CashSession = {
+      ...openSession,
       closedAt: new Date().toISOString(),
       closingCash,
       expectedCash,
@@ -980,10 +1189,13 @@ const App: React.FC = () => {
       creditSales,
       cashRefunds,
       cashExpenses: sessionExpenses,
+      customerCashPayments,
       shortageOrOverage,
       closingNotes,
       status: 'CLOSED',
-    } : session));
+    };
+    setCashSessions(prev => prev.map(session => session.id === openSession.id ? closedSession : session));
+    return closedSession;
   };
 
   const addCashExpense = async (expense: CashExpense): Promise<void> => {
@@ -1012,12 +1224,15 @@ const App: React.FC = () => {
         ...snapshot,
         cashExpenses: snapshot.cashExpenses.filter(expense => expense.id !== id),
         accounts: reverseCashExpenseAccounts(snapshot.accounts, target.amount),
+        deletedRecords: [{ collection: 'cashExpenses', id, deletedAt: new Date().toISOString() }, ...(snapshot.deletedRecords || [])],
       };
     });
   };
 
   const addSale = async (sale: Sale): Promise<Sale> => {
     if (!currentUser || !hasPermission(currentUser, 'sale.create')) throw new Error('Anda tidak memiliki izin membuat penjualan.');
+    const zeroPriced = sale.items.find(line => !(line.price > 0));
+    if (zeroPriced) throw new Error(`Harga jual ${zeroPriced.name} masih Rp 0. Atur harga di Master Barang sebelum dijual.`);
     const next = await runInventorySafeMutation((snapshot) => {
       if (snapshot.sales.some(entry => entry.id === sale.id || entry.invoiceNo === sale.invoiceNo)) {
         throw new Error(`Faktur ${sale.invoiceNo} sudah tersimpan.`);
@@ -1055,7 +1270,7 @@ const App: React.FC = () => {
         accounts: postSaleAccounts(snapshot.accounts, preparedSale),
         inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
         paymentRecords: [result.payment, ...snapshot.paymentRecords],
-        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
     });
     const saved = next.sales.find(entry => entry.id === sale.id);
@@ -1088,11 +1303,18 @@ const App: React.FC = () => {
           details: `Retur ${preparedReturn.returnNo} dibuat dan menunggu approval.`,
           createdAt: new Date().toISOString(),
         };
-        return { ...snapshot, returns: [preparedReturn, ...snapshot.returns], auditLogs: [audit, ...snapshot.auditLogs].slice(0, 500) };
+        return { ...snapshot, returns: [preparedReturn, ...snapshot.returns], auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT) };
       }
       const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
       const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, preparedReturn, currentUser);
       const originSale = snapshot.sales.find(sale => sale.invoiceNo === preparedReturn.originalInvoiceNo)!;
+      const refundSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
+      const approvedReturn: SaleReturn = {
+        ...preparedReturn,
+        approvedAt: new Date().toISOString(),
+        approvedBy: currentUser.name,
+        cashSessionId: originSale.paymentType === 'TUNAI' ? refundSession?.id : undefined,
+      };
       const nextCustomers = originSale.paymentType === 'KREDIT'
         ? snapshot.customers.map(customer => customer.id === originSale.customerId
           ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - preparedReturn.totalReturn) }
@@ -1100,13 +1322,13 @@ const App: React.FC = () => {
         : snapshot.customers;
       return {
         ...snapshot,
-        returns: [preparedReturn, ...snapshot.returns],
+        returns: [approvedReturn, ...snapshot.returns],
         items: result.items,
         customers: nextCustomers,
         accounts: postReturnAccounts(snapshot.accounts, originSale, preparedReturn.totalReturn),
         inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
         paymentRecords: [result.payment, ...snapshot.paymentRecords],
-        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
     });
     return next.returns.find(entry => entry.id === ret.id) || preparedReturn;
@@ -1120,9 +1342,16 @@ const App: React.FC = () => {
           const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
           const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, { ...targetReturn, status: 'APPROVED' }, currentUser);
           const originSale = snapshot.sales.find(sale => sale.invoiceNo === targetReturn.originalInvoiceNo)!;
+          const refundSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
           return {
             ...snapshot,
-            returns: snapshot.returns.map(entry => entry.id === returnId ? { ...entry, status: 'APPROVED' } : entry),
+            returns: snapshot.returns.map(entry => entry.id === returnId ? {
+              ...entry,
+              status: 'APPROVED' as const,
+              approvedAt: new Date().toISOString(),
+              approvedBy: currentUser.name,
+              cashSessionId: originSale.paymentType === 'TUNAI' ? refundSession?.id : undefined,
+            } : entry),
             items: result.items,
             customers: originSale.paymentType === 'KREDIT'
               ? snapshot.customers.map(customer => customer.id === originSale.customerId ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - targetReturn.totalReturn) } : customer)
@@ -1130,7 +1359,7 @@ const App: React.FC = () => {
             accounts: postReturnAccounts(snapshot.accounts, originSale, targetReturn.totalReturn),
             inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
             paymentRecords: [result.payment, ...snapshot.paymentRecords],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
           };
         });
   };
@@ -1139,11 +1368,12 @@ const App: React.FC = () => {
     if (!currentUser || !hasPermission(currentUser, 'purchase.create')) throw new Error('Anda tidak memiliki izin membuat PO.');
     await runInventorySafeMutation(snapshot => {
       if (snapshot.purchaseOrders.some(entry => entry.id === po.id)) throw new Error(`PO ${po.id} sudah tersimpan.`);
-      if (po.total <= 0 || po.items.length === 0 || po.items.some(line => line.orderedQty <= 0 || line.cost < 0)) throw new Error('Data item PO tidak valid.');
+      if (!Number.isFinite(po.total) || po.total <= 0 || po.items.length === 0 || po.items.some(line => !(line.orderedQty > 0) || !(line.cost >= 0))) throw new Error('Data item PO tidak valid.');
+      const roundedPo = { ...po, subtotal: Math.round(po.subtotal), total: Math.round(po.total) };
       return {
         ...snapshot,
-        purchaseOrders: [po, ...snapshot.purchaseOrders],
-        accounts: postPurchaseOrderAccounts(snapshot.accounts, po.total),
+        purchaseOrders: [roundedPo, ...snapshot.purchaseOrders],
+        accounts: postPurchaseOrderAccounts(snapshot.accounts, roundedPo.total),
         auditLogs: [{
         id: createId('AUD'),
         action: 'PO_CREATED',
@@ -1154,7 +1384,7 @@ const App: React.FC = () => {
         entityLabel: po.id,
         details: `PO ${po.id} dibuat untuk supplier ${po.supplierName}.`,
         createdAt: new Date().toISOString(),
-        } as AuditLog, ...snapshot.auditLogs].slice(0, 500),
+        } as AuditLog, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
     });
   };
@@ -1198,17 +1428,26 @@ const App: React.FC = () => {
         } : item),
         accounts: postPurchasePaymentAccounts(snapshot.accounts, paymentAmount, method),
         paymentRecords: [payment, ...snapshot.paymentRecords],
-        auditLogs: [audit, ...snapshot.auditLogs].slice(0, 500),
+        auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
     });
   };
-  const receivePurchaseOrder = async (poId: string, updatedItems: { itemId: string, receivedQty: number }[]): Promise<void> => {
+  /** Terima barang dari PO. Mengembalikan daftar barang yang harga modalnya berubah agar harga jual bisa ditinjau. */
+  const receivePurchaseOrder = async (poId: string, updatedItems: { itemId: string, receivedQty: number }[]): Promise<CostChange[]> => {
     if (!currentUser || !hasPermission(currentUser, 'purchase.receive')) throw new Error('Anda tidak memiliki izin menerima PO.');
+    let costChanges: CostChange[] = [];
         await runInventorySafeMutation((snapshot) => {
           const po = snapshot.purchaseOrders.find(item => item.id === poId);
           if (!po) throw new Error('PO tidak ditemukan.');
           const result = receivePurchaseOrderStock(snapshot.items, po, updatedItems, currentUser);
           if (result.movements.length === 0) throw new Error('Masukkan minimal satu qty penerimaan.');
+          costChanges = result.costChanges;
+          const priceLogs = buildPriceChangeLogs(snapshot.items, result.items, {
+            source: 'PURCHASE',
+            note: `Modal rata-rata dari penerimaan ${po.id}`,
+            operatorName: currentUser.name,
+            operatorId: currentUser.id,
+          });
           const nextLines = po.items.map(line => {
             const update = updatedItems.find(entry => entry.itemId === line.itemId);
             return update ? { ...line, receivedQty: line.receivedQty + update.receivedQty } : line;
@@ -1222,13 +1461,74 @@ const App: React.FC = () => {
             } : item),
             items: result.items,
             inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+            priceHistory: [...priceLogs, ...(snapshot.priceHistory || [])].slice(0, PRICE_HISTORY_LIMIT),
+            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
           };
         });
+    return costChanges;
   };
 
-  const handleStockAdjustment = (log: any) => {
-    if (!currentUser || !hasPermission(currentUser, 'stock.adjust')) return alert('Anda tidak memiliki izin menyesuaikan stok.');
+  /** Pelunasan (sebagian/penuh) piutang pelanggan. Pembayaran tunai masuk ke rekap shift kasir yang terbuka. */
+  const receiveCustomerPayment = async (customerId: string, amount: number, method: string, note?: string): Promise<void> => {
+    if (!currentUser || !(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view'))) {
+      throw new Error('Anda tidak memiliki izin menerima pembayaran piutang.');
+    }
+    if (!Number.isFinite(amount) || amount <= 0) throw new Error('Nominal pembayaran tidak valid.');
+    await runInventorySafeMutation(snapshot => {
+      const customer = snapshot.customers.find(entry => entry.id === customerId);
+      if (!customer) throw new Error('Pelanggan tidak ditemukan.');
+      if (customer.currentDebt <= 0) throw new Error(`${customer.name} tidak memiliki piutang.`);
+      const payAmount = Math.min(Math.round(amount), customer.currentDebt);
+      const isCash = /tunai|cash/i.test(method);
+      const openSession = isCash ? snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN') : undefined;
+      const now = new Date().toISOString();
+      const payment: PaymentRecord = {
+        id: createId('PAY'),
+        referenceNo: createDocumentNo('PLN'),
+        referenceType: 'CUSTOMER_PAYMENT',
+        amount: payAmount,
+        method,
+        direction: 'IN',
+        createdAt: now,
+        operatorName: currentUser.name,
+        operatorId: currentUser.id,
+        customerId,
+        cashSessionId: openSession?.id,
+        note,
+      };
+      const audit: AuditLog = {
+        id: createId('AUD'),
+        action: 'CUSTOMER_PAYMENT',
+        actorId: currentUser.id,
+        actorName: currentUser.name,
+        entityType: 'CUSTOMER',
+        entityId: customerId,
+        entityLabel: customer.name,
+        details: `Pelunasan piutang ${customer.name} Rp ${payAmount.toLocaleString('id-ID')} via ${method}. Sisa: Rp ${(customer.currentDebt - payAmount).toLocaleString('id-ID')}.`,
+        createdAt: now,
+      };
+      return {
+        ...snapshot,
+        customers: snapshot.customers.map(entry => entry.id === customerId ? { ...entry, currentDebt: entry.currentDebt - payAmount } : entry),
+        accounts: postCustomerPaymentAccounts(snapshot.accounts, payAmount, method),
+        paymentRecords: [payment, ...snapshot.paymentRecords],
+        auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
+      };
+    });
+  };
+
+  const canAdjustStock = hasPermission(currentUser, 'stock.adjust') || hasPermission(currentUser, 'stock.opname');
+  const completeInventoryLog = (log: any): InventoryLog => ({
+    ...log,
+    id: log.id || createId('SO'),
+    createdAt: log.createdAt || new Date().toISOString(),
+    operatorName: log.operatorName || currentUser?.name || '',
+    operatorId: log.operatorId || currentUser?.id,
+  });
+
+  const handleStockAdjustment = (rawLog: any) => {
+    if (!currentUser || !canAdjustStock) return alert('Anda tidak memiliki izin menyesuaikan stok.');
+    const log = completeInventoryLog(rawLog);
     (async () => {
       try {
         await runInventorySafeMutation((snapshot) => {
@@ -1238,7 +1538,7 @@ const App: React.FC = () => {
             inventoryLogs: [log, ...snapshot.inventoryLogs],
             items: result.items,
             inventoryMovements: [result.movement, ...snapshot.inventoryMovements],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, 500),
+            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
           };
         });
       } catch (error: any) {
@@ -1247,8 +1547,9 @@ const App: React.FC = () => {
     })();
   };
 
-  const handleStockAdjustmentBulk = (logs: any[]) => {
-    if (!currentUser || !hasPermission(currentUser, 'stock.adjust')) return alert('Anda tidak memiliki izin menyesuaikan stok.');
+  const handleStockAdjustmentBulk = (rawLogs: any[]) => {
+    if (!currentUser || !canAdjustStock) return alert('Anda tidak memiliki izin menyesuaikan stok.');
+    const logs = rawLogs.map(completeInventoryLog);
     (async () => {
       try {
         await runInventorySafeMutation((snapshot) => {
@@ -1266,7 +1567,7 @@ const App: React.FC = () => {
             inventoryLogs: [...logs, ...snapshot.inventoryLogs],
             items: nextItems,
             inventoryMovements: [...bulkMovements, ...snapshot.inventoryMovements],
-            auditLogs: [...bulkAudits, ...snapshot.auditLogs].slice(0, 500),
+            auditLogs: [...bulkAudits, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
           };
         });
       } catch (error: any) {
@@ -1369,15 +1670,6 @@ const App: React.FC = () => {
 
   const renderContent = () => {
     if (!currentUser) return null;
-    const isManager = currentUser.role === UserRole.MANAGER || currentUser.role === UserRole.OWNER;
-    if (activeTab === 'settings') {
-      if (!hasPermission(currentUser, 'settings.manage')) {
-        setActiveTab(getAccessibleTabs(currentUser)[0] || 'dashboard');
-        return null;
-      }
-      return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} />;
-    }
-
     if (!canAccessTab(currentUser, activeTab)) {
        return (
          <div className="h-full flex flex-col items-center justify-center p-10 text-center space-y-6 animate-in fade-in duration-500">
@@ -1389,16 +1681,17 @@ const App: React.FC = () => {
     }
 
     switch (activeTab) {
-      case 'dashboard': return <Dashboard items={items} sales={sales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} />;
-      case 'master-items': return <MasterData type="items" items={items} onAddItem={addItem} onAddItemsBulk={addItemsBulk} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
-      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
-      case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} onCompleteSale={addSale} />;
+      case 'settings': return <Settings onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile} />;
+      case 'dashboard': return <Dashboard items={items} sales={sales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
+      case 'master-items': return <MasterData type="items" items={items} priceHistory={priceHistory} onAddItem={addItem} onImportItems={importItems} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onAdjustStockBulk={canAdjustStock ? handleStockAdjustmentBulk : undefined} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
+      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
+      case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} cashSessions={cashSessions} storeProfile={storeProfile} onCompleteSale={addSale} onNavigate={setActiveTab} />;
       case 'sales-list': return <SalesList sales={sales} onInitiateReturn={(invNo) => { setPreselectedReturnInvoice(invNo); setActiveTab('returns'); }} />;
       case 'returns': return <Returns sales={sales} returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
-      case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} currentUser={currentUser} />;
-      case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} canAdjust={hasPermission(currentUser, 'stock.adjust')} />;
+      case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} onUpdateItemsBulk={hasPermission(currentUser, 'item.edit') ? updateItemsBulk : undefined} currentUser={currentUser} />;
+      case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} canAdjust={canAdjustStock} />;
       case 'accounting': return <Accounting accounts={accounts} sales={sales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
-      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={sales} purchaseOrders={purchaseOrders} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
+      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={sales} returns={returns} purchaseOrders={purchaseOrders} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
       case 'media-vault': return (
         <MediaVault
           currentUser={currentUser}
@@ -1447,9 +1740,11 @@ const App: React.FC = () => {
 
   return (
     <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={sales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError}>
-      <Suspense fallback={<PageLoadingFallback />}>
-        {renderContent()}
-      </Suspense>
+      <ErrorBoundary key={activeTab} fallbackTitle="Halaman ini">
+        <Suspense fallback={<PageLoadingFallback />}>
+          {renderContent()}
+        </Suspense>
+      </ErrorBoundary>
     </Layout>
   );
 };

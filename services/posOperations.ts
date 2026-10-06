@@ -14,6 +14,10 @@ import { createId } from './idService';
 const makeId = createId;
 const nowIso = () => new Date().toISOString();
 
+/** Qty transaksi harus angka positif yang valid — mencegah NaN/undefined merusak stok dan saldo. */
+const isValidQty = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value) && value > 0;
+
 const createAudit = (
   action: AuditLog['action'],
   entityType: AuditLog['entityType'],
@@ -61,6 +65,16 @@ const createMovement = (
   createdAt: nowIso(),
 });
 
+/** Perubahan harga modal (HPP rata-rata) akibat penerimaan barang dari supplier. */
+export interface CostChange {
+  itemId: string;
+  itemName: string;
+  oldCost: number;
+  newCost: number;
+  /** Harga beli per unit di PO ini (setelah diskon PO). */
+  purchaseCost: number;
+}
+
 export const validateUniqueItem = (items: Item[], target: Item) => {
   const duplicatedCode = items.find(item => item.id !== target.id && item.code === target.code);
   if (duplicatedCode) throw new Error(`Kode barang ${target.code} sudah digunakan.`);
@@ -78,6 +92,7 @@ export const completeSale = (
   user: User,
   customers?: Customer[],
 ): { items: Item[]; movements: InventoryMovement[]; payment: PaymentRecord; audit: AuditLog; updatedCustomer?: Customer } => {
+  if (!Number.isFinite(sale.total) || sale.total < 0) throw new Error('Total penjualan tidak valid.');
   const draftItems = [...items];
   const movements: InventoryMovement[] = [];
 
@@ -86,7 +101,8 @@ export const completeSale = (
     if (targetIndex < 0) throw new Error(`Barang ${saleItem.name} tidak ditemukan.`);
 
     const currentItem = draftItems[targetIndex];
-    if (saleItem.qty <= 0) throw new Error(`Qty jual ${saleItem.name} tidak valid.`);
+    if (!isValidQty(saleItem.qty)) throw new Error(`Qty jual ${saleItem.name} tidak valid.`);
+    if (!Number.isFinite(saleItem.price) || saleItem.price < 0) throw new Error(`Harga jual ${saleItem.name} tidak valid.`);
     if (currentItem.stock < saleItem.qty) throw new Error(`Stok ${saleItem.name} tidak mencukupi.`);
 
     const newStock = currentItem.stock - saleItem.qty;
@@ -136,6 +152,8 @@ export const completeReturn = (
 ): { items: Item[]; movements: InventoryMovement[]; payment: PaymentRecord; audit: AuditLog } => {
   const originSale = sales.find(sale => sale.invoiceNo === ret.originalInvoiceNo);
   if (!originSale) throw new Error(`Faktur asal ${ret.originalInvoiceNo} tidak ditemukan.`);
+  if (!Array.isArray(ret.items) || ret.items.length === 0) throw new Error('Pilih minimal satu barang yang diretur.');
+  if (!Number.isFinite(ret.totalReturn) || ret.totalReturn < 0) throw new Error('Nilai retur tidak valid.');
 
   const existingReturnQty: Record<string, number> = {};
   returns
@@ -154,7 +172,7 @@ export const completeReturn = (
     if (!saleItem) throw new Error(`Item ${returnItem.name} tidak ada di faktur asal.`);
 
     const maxReturnable = saleItem.qty - (existingReturnQty[returnItem.itemId] || 0);
-    if (returnItem.qty <= 0 || returnItem.qty > maxReturnable) {
+    if (!isValidQty(returnItem.qty) || returnItem.qty > maxReturnable) {
       throw new Error(`Qty retur ${returnItem.name} melebihi qty yang bisa diretur.`);
     }
 
@@ -192,15 +210,16 @@ export const receivePurchaseOrderStock = (
   po: PurchaseOrder,
   updates: { itemId: string; receivedQty: number }[],
   user: User,
-): { items: Item[]; movements: InventoryMovement[]; audit: AuditLog } => {
+): { items: Item[]; movements: InventoryMovement[]; audit: AuditLog; costChanges: CostChange[] } => {
   const nextItems = [...items];
   const movements: InventoryMovement[] = [];
+  const costChanges: CostChange[] = [];
 
   for (const update of updates) {
     const poItem = po.items.find(item => item.itemId === update.itemId);
     if (!poItem) throw new Error(`Item penerimaan tidak ada di PO ${po.id}.`);
     const remainingQty = poItem.orderedQty - poItem.receivedQty;
-    if (update.receivedQty < 0 || update.receivedQty > remainingQty) {
+    if (!Number.isFinite(update.receivedQty) || update.receivedQty < 0 || update.receivedQty > remainingQty) {
       throw new Error(`Qty terima ${poItem.name} tidak valid.`);
     }
     if (update.receivedQty === 0) continue;
@@ -214,13 +233,20 @@ export const receivePurchaseOrderStock = (
     const weightedCost = newStock > 0
       ? ((currentItem.stock * currentItem.basePrice) + (update.receivedQty * effectiveUnitCost)) / newStock
       : effectiveUnitCost;
-    nextItems[itemIndex] = { ...currentItem, stock: newStock, basePrice: Math.round(weightedCost) };
+    const newCost = Math.round(weightedCost);
+    nextItems[itemIndex] = { ...currentItem, stock: newStock, basePrice: newCost };
     movements.push(createMovement(currentItem, update.receivedQty, currentItem.stock, newStock, 'PURCHASE_RECEIPT', 'IN', po.id, user));
+    if (newCost !== currentItem.basePrice) {
+      const existing = costChanges.find(change => change.itemId === currentItem.id);
+      if (existing) existing.newCost = newCost;
+      else costChanges.push({ itemId: currentItem.id, itemName: currentItem.name, oldCost: currentItem.basePrice, newCost, purchaseCost: Math.round(effectiveUnitCost) });
+    }
   }
 
   return {
     items: nextItems,
     movements,
+    costChanges,
     audit: createAudit('PO_RECEIVED', 'PURCHASE_ORDER', user.name, `Penerimaan barang untuk ${po.id} berhasil diposting.`, po.id, po.id, user.id),
   };
 };
@@ -235,7 +261,7 @@ export const adjustStock = (
 ): { items: Item[]; movement: InventoryMovement; audit: AuditLog } => {
   const itemIndex = items.findIndex(item => item.id === itemId);
   if (itemIndex < 0) throw new Error('Barang opname tidak ditemukan.');
-  if (actualStock < 0) throw new Error('Stok fisik tidak boleh negatif.');
+  if (!Number.isFinite(actualStock) || actualStock < 0) throw new Error('Stok fisik tidak boleh negatif.');
 
   const target = items[itemIndex];
   const nextItems = [...items];
