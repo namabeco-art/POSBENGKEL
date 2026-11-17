@@ -17,18 +17,24 @@ import {
   Hash,
   ArrowRightLeft
 } from 'lucide-react';
-import { Sale } from '../types';
+import { Sale, StoreProfile } from '../types';
 import { printReceipt } from '../services/printService';
+import { describeSaleLine } from '../services/pricing';
+import { describeSalePayments, saleUsesPaymentType } from '../services/salePayments';
 
 interface SalesListProps {
   sales: Sale[];
+  storeProfile?: StoreProfile;
   onInitiateReturn?: (invoiceNo: string) => void;
+  /** Tersedia bila user punya izin sale.void. */
+  onVoidSale?: (saleId: string, reason: string) => Promise<void>;
 }
 
-const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
+const SalesList: React.FC<SalesListProps> = ({ sales, storeProfile, onInitiateReturn, onVoidSale }) => {
+  const [isVoiding, setIsVoiding] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSale, setSelectedSale] = useState<Sale | null>(null);
-  const [filterType, setFilterType] = useState<'SEMUA' | 'TUNAI' | 'NON-TUNAI'>('SEMUA');
+  const [filterType, setFilterType] = useState<'SEMUA' | 'TUNAI' | 'NON-TUNAI' | 'KREDIT'>('SEMUA');
   
   // Date filter states
   const [startDate, setStartDate] = useState('');
@@ -38,7 +44,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
     return sales.filter(s => {
       const matchesSearch = s.invoiceNo.toLowerCase().includes(searchTerm.toLowerCase()) || 
                            s.customerName.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesFilter = filterType === 'SEMUA' || s.paymentType === filterType;
+      const matchesFilter = filterType === 'SEMUA' || saleUsesPaymentType(s, filterType as 'TUNAI' | 'NON-TUNAI' | 'KREDIT');
       
       // Date filter logic
       let matchesDate = true;
@@ -72,7 +78,24 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
 
   const handlePrint = () => {
     if (selectedSale) {
-      printReceipt(selectedSale);
+      printReceipt(selectedSale, storeProfile);
+    }
+  };
+
+  const handleVoid = async () => {
+    if (!selectedSale || !onVoidSale) return;
+    const reason = window.prompt(`Batalkan (void) faktur ${selectedSale.invoiceNo} senilai Rp ${selectedSale.total.toLocaleString('id-ID')}?\nStok, kas, dan piutang akan dikembalikan.\n\nTulis alasan pembatalan:`);
+    if (reason === null) return;
+    if (!reason.trim()) return alert('Alasan pembatalan wajib diisi.');
+    setIsVoiding(true);
+    try {
+      await onVoidSale(selectedSale.id, reason);
+      alert(`Faktur ${selectedSale.invoiceNo} dibatalkan.`);
+      setSelectedSale(null);
+    } catch (error: any) {
+      alert(error?.message || 'Pembatalan gagal.');
+    } finally {
+      setIsVoiding(false);
     }
   };
 
@@ -127,7 +150,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
 
          <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-100">
             <div className="flex bg-slate-200/50 p-1 rounded-xl border border-slate-300 shadow-inner overflow-x-auto scrollbar-hide max-w-full">
-               {['SEMUA', 'TUNAI', 'NON-TUNAI'].map(type => (
+               {['SEMUA', 'TUNAI', 'NON-TUNAI', 'KREDIT'].map(type => (
                  <button
                    key={type}
                    onClick={() => setFilterType(type as any)}
@@ -164,7 +187,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filteredSales.map(sale => (
-                <tr key={sale.id} className="hover:bg-blue-50/50 transition-colors group">
+                <tr key={sale.id} className={`hover:bg-blue-50/50 transition-colors group ${sale.status === 'VOID' ? 'opacity-60' : ''}`}>
                   <td className="px-5 md:px-8 py-4 md:py-5">
                     <button 
                       onClick={() => setSelectedSale(sale)}
@@ -174,6 +197,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                     </button>
                     <div className="md:hidden text-[8px] font-bold text-slate-400 uppercase mt-0.5">{sale.date}</div>
                     <div className="hidden md:block text-[9px] font-bold text-slate-400 uppercase mt-0.5 tracking-widest">OP: {sale.operatorName}</div>
+                    {sale.status === 'VOID' && <span className="inline-block mt-1 px-2 py-0.5 bg-red-100 text-red-700 rounded text-[9px] font-black uppercase">Void</span>}
                   </td>
                   <td className="hidden md:table-cell px-8 py-5">
                     <div className="flex items-center gap-2 text-slate-600 font-bold text-xs">
@@ -183,10 +207,10 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                   </td>
                   <td className="px-5 md:px-8 py-4 md:py-5">
                     <div className="font-black text-slate-800 uppercase tracking-tight text-[10px] md:text-sm truncate max-w-[100px] md:max-w-none">{sale.customerName}</div>
-                    <div className="md:hidden text-[8px] font-black text-blue-500 uppercase mt-0.5">{sale.paymentType}</div>
+                    <div className="md:hidden text-[8px] font-black text-blue-500 uppercase mt-0.5">{describeSalePayments(sale)}</div>
                   </td>
                   <td className="px-5 md:px-8 py-4 md:py-5 text-right">
-                    <div className="font-black text-slate-900 text-xs md:text-base tracking-tighter">Rp {sale.total.toLocaleString()}</div>
+                    <div className={`font-black text-xs md:text-base tracking-tighter ${sale.status === 'VOID' ? 'text-slate-400 line-through' : 'text-slate-900'}`}>Rp {sale.total.toLocaleString('id-ID')}</div>
                   </td>
                   <td className="hidden lg:table-cell px-8 py-5">
                     <div className="flex justify-center">
@@ -194,7 +218,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                          sale.paymentType === 'TUNAI' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-blue-50 text-blue-600 border-blue-100'
                        }`}>
                          {sale.paymentType === 'TUNAI' ? <Banknote size={12}/> : <CreditCard size={12}/>}
-                         {sale.paymentMethod || sale.paymentType}
+                         {describeSalePayments(sale)}
                        </span>
                     </div>
                   </td>
@@ -206,9 +230,10 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                       >
                         <Eye size={16} />
                       </button>
-                      <button 
+                      <button
                         onClick={() => onInitiateReturn && onInitiateReturn(sale.invoiceNo)}
-                        className="p-2 md:p-2.5 text-orange-600 hover:bg-orange-50 rounded-xl transition-all border border-orange-100 flex items-center gap-2"
+                        disabled={sale.status === 'VOID'}
+                        className="p-2 md:p-2.5 text-orange-600 hover:bg-orange-50 rounded-xl transition-all border border-orange-100 flex items-center gap-2 disabled:opacity-30 disabled:cursor-not-allowed"
                       >
                         <RotateCcw size={16} />
                         <span className="text-[9px] font-black uppercase hidden lg:inline">RETUR</span>
@@ -240,6 +265,9 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                     <div className="min-w-0">
                        <h3 className="text-base md:text-2xl font-black text-slate-900 uppercase tracking-tighter leading-none truncate">{selectedSale.invoiceNo}</h3>
                        <p className="text-slate-400 font-bold text-[8px] md:text-[10px] uppercase tracking-widest mt-1.5 truncate">{selectedSale.date}</p>
+                       {selectedSale.status === 'VOID' && (
+                         <p className="mt-1.5 text-[10px] md:text-xs font-bold text-red-600">DIBATALKAN oleh {selectedSale.voidedBy} — {selectedSale.voidReason}</p>
+                       )}
                     </div>
                  </div>
                  <button onClick={() => setSelectedSale(null)} className="p-2 md:p-3 bg-slate-50 text-slate-400 rounded-xl md:rounded-2xl hover:bg-red-500 hover:text-white transition-all active:scale-90"><X size={20}/></button>
@@ -256,8 +284,9 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                     <div className="bg-slate-50 p-5 md:p-6 rounded-[1.5rem] md:rounded-3xl border border-slate-200 space-y-2 md:space-y-3">
                        <div className="text-[8px] md:text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><CreditCard size={12}/> Metode Bayar</div>
                        <div className="font-black text-slate-800 text-sm md:text-lg uppercase leading-tight flex items-center gap-2">
-                         {selectedSale.paymentType} 
-                         {selectedSale.paymentMethod && <span className="text-[10px] md:text-xs font-bold text-blue-500">({selectedSale.paymentMethod})</span>}
+                         {selectedSale.payments?.length
+                           ? <span className="text-sm md:text-base">{selectedSale.payments.map(payment => `${payment.method} Rp ${payment.amount.toLocaleString('id-ID')}`).join(' + ')}</span>
+                           : <>{selectedSale.paymentType} {selectedSale.paymentMethod && <span className="text-[10px] md:text-xs font-bold text-blue-500">({selectedSale.paymentMethod})</span>}</>}
                        </div>
                        <div className="flex items-center justify-between pt-2 border-t border-slate-200/50">
                           <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase">Diterima</span>
@@ -279,7 +308,8 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                                <div className="w-8 h-8 md:w-10 md:h-10 bg-slate-50 rounded-lg md:rounded-xl flex items-center justify-center font-black text-slate-400 text-[10px] md:text-xs border border-slate-100 group-hover:bg-blue-600 group-hover:text-white transition-colors">#{idx+1}</div>
                                <div className="min-w-0">
                                   <div className="font-black text-slate-800 uppercase tracking-tight text-xs md:text-sm truncate">{item.name}</div>
-                                  <div className="text-[9px] font-bold text-slate-400 mt-0.5">{item.qty} Unit x Rp {item.price.toLocaleString()}</div>
+                                  <div className="text-[9px] font-bold text-slate-400 mt-0.5">{(() => { const label = describeSaleLine(item); return `${label.qtyText} x Rp ${label.priceText}`; })()}</div>
+                                  {item.components?.length ? <div className="text-[9px] text-slate-400">Isi paket: {item.components.map(component => `${component.qty} ${component.name}`).join(', ')}</div> : null}
                                </div>
                             </div>
                             <div className="font-black text-slate-900 text-xs md:text-lg tracking-tighter shrink-0 ml-3">Rp {item.total.toLocaleString()}</div>
@@ -298,6 +328,11 @@ const SalesList: React.FC<SalesListProps> = ({ sales, onInitiateReturn }) => {
                     <button onClick={handlePrint} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 md:px-8 py-3.5 md:py-4 bg-blue-600 text-white rounded-xl md:rounded-2xl font-black text-xs hover:bg-blue-700 transition-all shadow-xl active:scale-95 uppercase border-b-4 border-blue-800">
                        <Printer size={18}/> CETAK NOTA
                     </button>
+                    {onVoidSale && selectedSale.status !== 'VOID' && (
+                      <button onClick={handleVoid} disabled={isVoiding} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-5 py-3.5 md:py-4 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white rounded-xl md:rounded-2xl font-black text-xs">
+                        {isVoiding ? 'MEMBATALKAN...' : 'VOID'}
+                      </button>
+                    )}
                     <button onClick={() => setSelectedSale(null)} className="flex-1 md:flex-none flex items-center justify-center gap-2 px-6 md:px-8 py-3.5 md:py-4 bg-white/10 text-white rounded-xl md:rounded-2xl font-black text-xs hover:bg-white/20 transition-all border border-white/20 uppercase">
                        TUTUP
                     </button>

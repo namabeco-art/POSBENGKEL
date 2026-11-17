@@ -25,7 +25,7 @@ const SmartStockDashboard: React.FC<SmartStockDashboardProps> = ({ items, sales,
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
 
-    const salesMap: Record<string, { totalQty: number; totalRevenue: number; lastSoldDate: string }> = {};
+    const salesMap: Record<string, { totalQty: number; totalRevenue: number; lastSoldDate: string; lastSoldAt: string }> = {};
 
     sales.forEach(sale => {
       try {
@@ -34,16 +34,20 @@ const SmartStockDashboard: React.FC<SmartStockDashboardProps> = ({ items, sales,
         if (saleDate < thirtyDaysAgo) return;
 
         sale.items.forEach(si => {
-          if (!salesMap[si.itemId]) salesMap[si.itemId] = { totalQty: 0, totalRevenue: 0, lastSoldDate: sale.date };
+          if (!salesMap[si.itemId]) salesMap[si.itemId] = { totalQty: 0, totalRevenue: 0, lastSoldDate: '', lastSoldAt: '' };
           salesMap[si.itemId].totalQty += si.qty;
           salesMap[si.itemId].totalRevenue += si.total;
-          salesMap[si.itemId].lastSoldDate = sale.date;
+          // Simpan tanggal penjualan paling akhir (bukan yang terakhir diiterasi).
+          if (!salesMap[si.itemId].lastSoldDate || (sale.createdAt || '') > salesMap[si.itemId].lastSoldAt) {
+            salesMap[si.itemId].lastSoldDate = sale.date;
+            salesMap[si.itemId].lastSoldAt = sale.createdAt || '';
+          }
         });
       } catch { /* skip unparseable dates */ }
     });
 
-    return items.map(item => {
-      const stats = salesMap[item.id] || { totalQty: 0, totalRevenue: 0, lastSoldDate: '' };
+    return items.filter(item => item.itemType !== 'JASA').map(item => {
+      const stats = salesMap[item.id] || { totalQty: 0, totalRevenue: 0, lastSoldDate: '', lastSoldAt: '' };
       const dailyAvg = stats.totalQty / 30;
       const daysUntilEmpty = dailyAvg > 0 ? Math.round(item.stock / dailyAvg) : 999;
       const reorderLevel = item.reorderLevel || 5;

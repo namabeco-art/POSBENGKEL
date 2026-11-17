@@ -3,13 +3,21 @@ import { useShallow } from 'zustand/shallow';
 import { 
   AppData, User, Item, Customer, Supplier, Account, PurchaseOrder, 
   Sale, SaleReturn, InventoryMovement, AuditLog, CashSession, PaymentRecord, PromotionCampaign, 
-  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage, CashExpense
+  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage, CashExpense, PriceChangeLog, DeletedRecord, StoreProfile,
+  AppSettings, CustomerLedgerEntry, ManualJournal, Mechanic, CommissionPayment, HeldCart, ServiceOrder, Warehouse, StockTransfer, PurchaseReturn
 } from './types';
 import { 
   mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, 
   mockBranches, mockPromotions 
 } from './store';
-import { validateUniqueItem } from './services/posOperations';
+import { CUSTOMER_FIELD_GROUPS, ITEM_FIELD_GROUPS, stampCollection, stampEntity } from './services/syncMeta';
+import { AUDIT_LOG_LIMIT, DELETED_RECORDS_LIMIT } from './services/mergeService';
+import { PRICE_HISTORY_LIMIT } from './services/pricing';
+
+type Updater<T> = T | ((prev: T) => T);
+const resolve = <T,>(updater: Updater<T>, prev: T): T =>
+  typeof updater === 'function' ? (updater as (prev: T) => T)(prev) : updater;
+const nowIso = () => new Date().toISOString();
 
 export interface AppState extends AppData {
   // Application Data (from AppData)
@@ -33,6 +41,19 @@ export interface AppState extends AppData {
   branches: Branch[];
   aiConsultantHistory: ChatMessage[];
   floatingChatHistory: ChatMessage[];
+  priceHistory: PriceChangeLog[];
+  deletedRecords: DeletedRecord[];
+  storeProfile?: StoreProfile;
+  appSettings?: AppSettings;
+  customerLedger: CustomerLedgerEntry[];
+  manualJournals: ManualJournal[];
+  mechanics: Mechanic[];
+  commissionPayments: CommissionPayment[];
+  heldCarts: HeldCart[];
+  serviceOrders: ServiceOrder[];
+  warehouses: Warehouse[];
+  stockTransfers: StockTransfer[];
+  purchaseReturns: PurchaseReturn[];
 
   // Config fields
   openRouterApiKey?: string;
@@ -62,6 +83,15 @@ export interface AppState extends AppData {
   setMediaAssets: (assets: MediaAsset[] | ((prev: MediaAsset[]) => MediaAsset[])) => void;
   setAiConsultantHistory: (history: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
   setFloatingChatHistory: (history: ChatMessage[] | ((prev: ChatMessage[]) => ChatMessage[])) => void;
+  appendPriceHistory: (logs: PriceChangeLog[]) => void;
+  /** Catat penghapusan agar data tidak muncul lagi dari salinan perangkat lain saat sinkronisasi. */
+  recordDeletion: (collection: string, ids: string[]) => void;
+  setStoreProfile: (profile: StoreProfile) => void;
+  setAppSettings: (settings: AppSettings) => void;
+  setMechanics: (updater: Updater<Mechanic[]>) => void;
+  setHeldCarts: (updater: Updater<HeldCart[]>) => void;
+  setServiceOrders: (updater: Updater<ServiceOrder[]>) => void;
+  setWarehouses: (updater: Updater<Warehouse[]>) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -85,6 +115,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   branches: mockBranches,
   aiConsultantHistory: [],
   floatingChatHistory: [],
+  priceHistory: [],
+  deletedRecords: [],
+  storeProfile: undefined,
+  appSettings: undefined,
+  customerLedger: [],
+  manualJournals: [],
+  mechanics: [],
+  commissionPayments: [],
+  heldCarts: [],
+  serviceOrders: [],
+  warehouses: [],
+  stockTransfers: [],
+  purchaseReturns: [],
 
   // Implement applyData logic
   applyData: (data) => set((prev) => {
@@ -109,6 +152,19 @@ export const useAppStore = create<AppState>((set, get) => ({
       aiConsultantHistory: Array.isArray(data.aiConsultantHistory) ? data.aiConsultantHistory : prev.aiConsultantHistory,
       floatingChatHistory: Array.isArray(data.floatingChatHistory) ? data.floatingChatHistory : prev.floatingChatHistory,
       branches: Array.isArray((data as any).branches) ? (data as any).branches : prev.branches,
+      priceHistory: Array.isArray(data.priceHistory) ? data.priceHistory : prev.priceHistory,
+      deletedRecords: Array.isArray(data.deletedRecords) ? data.deletedRecords : prev.deletedRecords,
+      storeProfile: data.storeProfile && typeof data.storeProfile === 'object' ? data.storeProfile : prev.storeProfile,
+      appSettings: data.appSettings && typeof data.appSettings === 'object' ? data.appSettings : prev.appSettings,
+      customerLedger: Array.isArray(data.customerLedger) ? data.customerLedger : prev.customerLedger,
+      manualJournals: Array.isArray(data.manualJournals) ? data.manualJournals : prev.manualJournals,
+      mechanics: Array.isArray(data.mechanics) ? data.mechanics : prev.mechanics,
+      commissionPayments: Array.isArray(data.commissionPayments) ? data.commissionPayments : prev.commissionPayments,
+      heldCarts: Array.isArray(data.heldCarts) ? data.heldCarts : prev.heldCarts,
+      serviceOrders: Array.isArray(data.serviceOrders) ? data.serviceOrders : prev.serviceOrders,
+      warehouses: Array.isArray(data.warehouses) ? data.warehouses : prev.warehouses,
+      stockTransfers: Array.isArray(data.stockTransfers) ? data.stockTransfers : prev.stockTransfers,
+      purchaseReturns: Array.isArray(data.purchaseReturns) ? data.purchaseReturns : prev.purchaseReturns,
       openRouterApiKey: data.openRouterApiKey || prev.openRouterApiKey,
       aiModel: data.aiModel || prev.aiModel,
       supabaseUrl: data.supabaseUrl || prev.supabaseUrl,
@@ -120,38 +176,56 @@ export const useAppStore = create<AppState>((set, get) => ({
   appendAuditLog: (log) => set((state) => {
     const newLogs = [log, ...state.auditLogs];
     // Archive older logs to localStorage before trimming
-    if (newLogs.length > 2000) {
+    if (newLogs.length > AUDIT_LOG_LIMIT) {
       try {
         const archiveKey = 'HGROUP_AUDIT_ARCHIVE';
         const existing = JSON.parse(localStorage.getItem(archiveKey) || '[]');
-        const toArchive = newLogs.slice(2000);
+        const toArchive = newLogs.slice(AUDIT_LOG_LIMIT);
         const archived = [...toArchive, ...existing].slice(0, 10000);
         localStorage.setItem(archiveKey, JSON.stringify(archived));
       } catch {
         // localStorage full — silently skip archival
       }
     }
-    return { auditLogs: newLogs.slice(0, 2000) };
+    return { auditLogs: newLogs.slice(0, AUDIT_LOG_LIMIT) };
   }),
 
-  // Basic Setters with generic functional update support
-  setUsers: (updater) => set((state) => ({ users: typeof updater === 'function' ? updater(state.users) : updater })),
-  setItems: (updater) => set((state) => ({ items: typeof updater === 'function' ? updater(state.items) : updater })),
-  setCustomers: (updater) => set((state) => ({ customers: typeof updater === 'function' ? updater(state.customers) : updater })),
-  setSuppliers: (updater) => set((state) => ({ suppliers: typeof updater === 'function' ? updater(state.suppliers) : updater })),
-  setPurchaseOrders: (updater) => set((state) => ({ purchaseOrders: typeof updater === 'function' ? updater(state.purchaseOrders) : updater })),
-  setSales: (updater) => set((state) => ({ sales: typeof updater === 'function' ? updater(state.sales) : updater })),
-  setReturns: (updater) => set((state) => ({ returns: typeof updater === 'function' ? updater(state.returns) : updater })),
-  setInventoryMovements: (updater) => set((state) => ({ inventoryMovements: typeof updater === 'function' ? updater(state.inventoryMovements) : updater })),
-  setCashSessions: (updater) => set((state) => ({ cashSessions: typeof updater === 'function' ? updater(state.cashSessions) : updater })),
-  setCashExpenses: (updater) => set((state) => ({ cashExpenses: typeof updater === 'function' ? updater(state.cashExpenses) : updater })),
-  setPaymentRecords: (updater) => set((state) => ({ paymentRecords: typeof updater === 'function' ? updater(state.paymentRecords) : updater })),
-  setAccounts: (updater) => set((state) => ({ accounts: typeof updater === 'function' ? updater(state.accounts) : updater })),
-  setAiUndoStack: (updater) => set((state) => ({ aiUndoStack: typeof updater === 'function' ? updater(state.aiUndoStack) : updater })),
-  setPromotions: (updater) => set((state) => ({ promotions: typeof updater === 'function' ? updater(state.promotions) : updater })),
-  setMediaAssets: (updater) => set((state) => ({ mediaAssets: typeof updater === 'function' ? updater(state.mediaAssets) : updater })),
-  setAiConsultantHistory: (updater) => set((state) => ({ aiConsultantHistory: typeof updater === 'function' ? updater(state.aiConsultantHistory) : updater })),
-  setFloatingChatHistory: (updater) => set((state) => ({ floatingChatHistory: typeof updater === 'function' ? updater(state.floatingChatHistory) : updater })),
+  // Basic Setters with generic functional update support.
+  // Koleksi yang bisa berubah diberi cap waktu agar merge antar perangkat tahu versi mana yang terbaru.
+  setUsers: (updater) => set((state) => ({ users: stampCollection(state.users, resolve(updater, state.users), nowIso()) })),
+  setItems: (updater) => set((state) => ({ items: stampCollection(state.items, resolve(updater, state.items), nowIso(), { groups: ITEM_FIELD_GROUPS }) })),
+  setCustomers: (updater) => set((state) => ({ customers: stampCollection(state.customers, resolve(updater, state.customers), nowIso(), { groups: CUSTOMER_FIELD_GROUPS }) })),
+  setSuppliers: (updater) => set((state) => ({ suppliers: stampCollection(state.suppliers, resolve(updater, state.suppliers), nowIso()) })),
+  setPurchaseOrders: (updater) => set((state) => ({ purchaseOrders: stampCollection(state.purchaseOrders, resolve(updater, state.purchaseOrders), nowIso()) })),
+  setSales: (updater) => set((state) => ({ sales: resolve(updater, state.sales) })),
+  setReturns: (updater) => set((state) => ({ returns: stampCollection(state.returns, resolve(updater, state.returns), nowIso()) })),
+  setInventoryMovements: (updater) => set((state) => ({ inventoryMovements: resolve(updater, state.inventoryMovements) })),
+  setCashSessions: (updater) => set((state) => ({ cashSessions: stampCollection(state.cashSessions, resolve(updater, state.cashSessions), nowIso()) })),
+  setCashExpenses: (updater) => set((state) => ({ cashExpenses: resolve(updater, state.cashExpenses) })),
+  setPaymentRecords: (updater) => set((state) => ({ paymentRecords: resolve(updater, state.paymentRecords) })),
+  setAccounts: (updater) => set((state) => ({ accounts: stampCollection(state.accounts, resolve(updater, state.accounts), nowIso(), { key: 'code' }) })),
+  setAiUndoStack: (updater) => set((state) => ({ aiUndoStack: resolve(updater, state.aiUndoStack) })),
+  setPromotions: (updater) => set((state) => ({ promotions: stampCollection(state.promotions, resolve(updater, state.promotions), nowIso()) })),
+  setMediaAssets: (updater) => set((state) => ({ mediaAssets: resolve(updater, state.mediaAssets) })),
+  setAiConsultantHistory: (updater) => set((state) => ({ aiConsultantHistory: resolve(updater, state.aiConsultantHistory) })),
+  setFloatingChatHistory: (updater) => set((state) => ({ floatingChatHistory: resolve(updater, state.floatingChatHistory) })),
+  appendPriceHistory: (logs) => {
+    if (!logs.length) return;
+    set((state) => ({ priceHistory: [...logs, ...state.priceHistory].slice(0, PRICE_HISTORY_LIMIT) }));
+  },
+  recordDeletion: (collection, ids) => {
+    if (!ids.length) return;
+    const deletedAt = nowIso();
+    set((state) => ({
+      deletedRecords: [...ids.map(id => ({ collection, id, deletedAt })), ...state.deletedRecords].slice(0, DELETED_RECORDS_LIMIT),
+    }));
+  },
+  setStoreProfile: (profile) => set((state) => ({ storeProfile: stampEntity(state.storeProfile as any, profile as any, nowIso()) })),
+  setAppSettings: (settings) => set((state) => ({ appSettings: stampEntity(state.appSettings as any, settings as any, nowIso()) })),
+  setMechanics: (updater) => set((state) => ({ mechanics: stampCollection(state.mechanics, resolve(updater, state.mechanics), nowIso()) })),
+  setHeldCarts: (updater) => set((state) => ({ heldCarts: stampCollection(state.heldCarts, resolve(updater, state.heldCarts), nowIso()) })),
+  setServiceOrders: (updater) => set((state) => ({ serviceOrders: stampCollection(state.serviceOrders, resolve(updater, state.serviceOrders), nowIso()) })),
+  setWarehouses: (updater) => set((state) => ({ warehouses: stampCollection(state.warehouses, resolve(updater, state.warehouses), nowIso()) })),
 }));
 
 
@@ -184,6 +258,7 @@ export const useBranches = () => useAppStore(state => state.branches);
 export const useAiUndoStack = () => useAppStore(state => state.aiUndoStack);
 export const useAiConsultantHistory = () => useAppStore(state => state.aiConsultantHistory);
 export const useFloatingChatHistory = () => useAppStore(state => state.floatingChatHistory);
+export const usePriceHistory = () => useAppStore(state => state.priceHistory);
 
 /** Action-only selectors (never cause re-renders from data changes) */
 export const useAppActions = () => useAppStoreShallow(state => ({
@@ -206,4 +281,12 @@ export const useAppActions = () => useAppStoreShallow(state => ({
   setMediaAssets: state.setMediaAssets,
   setAiConsultantHistory: state.setAiConsultantHistory,
   setFloatingChatHistory: state.setFloatingChatHistory,
+  appendPriceHistory: state.appendPriceHistory,
+  recordDeletion: state.recordDeletion,
+  setStoreProfile: state.setStoreProfile,
+  setAppSettings: state.setAppSettings,
+  setMechanics: state.setMechanics,
+  setHeldCarts: state.setHeldCarts,
+  setServiceOrders: state.setServiceOrders,
+  setWarehouses: state.setWarehouses,
 }));

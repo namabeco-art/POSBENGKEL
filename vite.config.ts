@@ -3,6 +3,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
 import tailwindcss from '@tailwindcss/vite';
+import { cloudflare } from '@cloudflare/vite-plugin';
 
 export default defineConfig(() => {
     return {
@@ -13,8 +14,14 @@ export default defineConfig(() => {
       plugins: [
         react(),
         tailwindcss(),
+        // Menjalankan Worker + Durable Object + R2 secara lokal saat `npm run dev`, dan membangun Worker saat build.
+        cloudflare(),
         VitePWA({
           registerType: 'autoUpdate',
+          workbox: {
+            // API cloud tidak boleh dijawab dari cache/index.html oleh service worker.
+            navigateFallbackDenylist: [/^\/api\//],
+          },
           manifest: {
             name: 'POS Hulio V2',
             short_name: 'POSHulio',

@@ -4,6 +4,7 @@ import { Calculator, BookOpen, Receipt, ArrowUpRight, ArrowDownLeft, Plus, X, La
 import KasHarian from '../components/KasHarian';
 import LaporanPajak from '../components/LaporanPajak';
 import { createId } from '../services/idService';
+import { getSaleCashAmount } from '../services/salePayments';
 
 interface AccountingProps {
   accounts: Account[];
@@ -24,8 +25,8 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
   // Calculate today's cash sales for KasHarian
   const todayCashData = useMemo(() => {
     const today = new Date().toLocaleDateString('id-ID');
-    const todaySales = sales.filter(s => s.date.startsWith(today) && s.paymentType === 'TUNAI');
-    const salesCashToday = todaySales.reduce((sum, s) => sum + s.total, 0);
+    const todaySales = sales.filter(s => s.date.startsWith(today));
+    const salesCashToday = todaySales.reduce((sum, s) => sum + getSaleCashAmount(s), 0);
     const openSession = cashSessions.find(cs => cs.status === 'OPEN' && cs.userId === currentUser.id);
     const openingCash = openSession?.openingCash || 0;
     return { openingCash, salesCashToday };
@@ -69,7 +70,7 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
         </div>
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm">
           <div className="flex items-center gap-2 mb-3"><ArrowDownLeft size={18} className="text-emerald-500"/><span className="text-xs font-medium text-slate-500">Pendapatan (MTD)</span></div>
-          <p className="text-2xl font-bold text-slate-800">Rp {sales.filter(s => { try { const p = s.date.split(' ')[0].split('/'); return +p[1] === new Date().getMonth() + 1; } catch { return false; } }).reduce((sum, s) => sum + s.total, 0).toLocaleString()}</p>
+          <p className="text-2xl font-bold text-slate-800">Rp {sales.filter(s => { try { const now = new Date(); if (s.createdAt) { const d = new Date(s.createdAt); return d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear(); } const p = s.date.split(' ')[0].split('/'); return +p[1] === now.getMonth() + 1 && +p[2] === now.getFullYear(); } catch { return false; } }).reduce((sum, s) => sum + s.total, 0).toLocaleString('id-ID')}</p>
         </div>
         <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-sm flex items-center justify-center cursor-pointer hover:border-indigo-300 transition-all group" onClick={() => setIsModalOpen(true)}>
           <div className="text-center">

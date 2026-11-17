@@ -6,6 +6,12 @@ import {
   Scan
 } from 'lucide-react';
 import { Item, InventoryMovement } from '../types';
+import { createId } from '../services/idService';
+import { downloadCsv, findColumn, parseCsv } from '../services/csv';
+import { DEFAULT_WAREHOUSE_ID, getWarehouseStock } from '../services/warehouses';
+
+/** Opname menghitung stok fisik di gudang utama (gudang lain diatur lewat Transfer Stok). */
+const mainStock = (item: Item) => getWarehouseStock(item, DEFAULT_WAREHOUSE_ID);
 
 interface InventoryProps {
   items: Item[];
@@ -38,18 +44,18 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
   const groupedLogs = useMemo(() => {
     const groups: { [key: string]: { id: string, date: string, items: any[], totalVariance: number } } = {};
     logs.forEach(log => {
-      const refId = log.id.includes('-') ? log.id.split('-').slice(0, 2).join('-') : log.id; 
+      const refId = /^SO-[0-9a-f-]{36}-\d+$/i.test(log.id) ? log.id.replace(/-\d+$/, '') : log.id; 
       if (!groups[refId]) {
-        groups[refId] = { id: refId, date: log.date, items: [], totalVariance: 0 };
+        groups[refId] = { id: refId, date: log.date || (log.createdAt ? new Date(log.createdAt).toLocaleDateString('id-ID') : '-'), items: [], totalVariance: 0 };
       }
       groups[refId].items.push(log);
-      groups[refId].totalVariance += log.difference;
+      groups[refId].totalVariance += Number(log.difference ?? (log.actualStock - (log.systemStock ?? log.previousStock ?? log.actualStock))) || 0;
     });
-    return Object.values(groups).sort((a: any, b: any) => b.id.localeCompare(a.id));
+    return Object.values(groups);
   }, [logs]);
 
-  const filteredItems = useMemo(() => items.filter(i => 
-    i.name.toLowerCase().includes(searchTerm.toLowerCase()) || 
+  const filteredItems = useMemo(() => items.filter(i => !i.isBundle && i.itemType !== 'JASA').filter(i =>
+    i.name.toLowerCase().includes(searchTerm.toLowerCase()) ||  
     i.code.toLowerCase().includes(searchTerm.toLowerCase()) ||
     i.barcode.includes(searchTerm)
   ), [items, searchTerm]);
@@ -104,16 +110,62 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
   };
 
   const handleDownloadTemplate = () => {
-    const headers = "Kode Barang,Barcode,Nama Barang,Stok Sistem,Stok Fisik\n";
-    const example = items.slice(0, 5).map(i => `${i.code},${i.barcode},${i.name},${i.stock},`).join("\n");
-    const csvContent = "data:text/csv;charset=utf-8," + headers + example;
-    const encodedUri = encodeURI(csvContent);
-    const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", "template_opname_massal.csv");
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    // Semua barang, agar petugas gudang tinggal mengisi kolom Stok Fisik.
+    downloadCsv(`template_opname_${new Date().toISOString().slice(0, 10)}.csv`, [
+      ['Kode Barang', 'Barcode', 'Nama Barang', 'Stok Sistem', 'Stok Fisik'],
+      ...items.filter(i => !i.isBundle && i.itemType !== 'JASA').map(i => [i.code, i.barcode, i.name, mainStock(i), '']),
+    ]);
+  };
+
+  /** Import hasil hitung fisik massal (CSV dari template). Baris dengan Stok Fisik kosong dilewati. */
+  const handleImportOpname = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file || !onAdjustStockBulk) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rows = parseCsv(String(reader.result || ''));
+      if (rows.length < 2) return alert('File kosong atau tidak sesuai template.');
+      const header = rows[0];
+      const codeCol = findColumn(header, ['Kode Barang', 'Kode', 'Code']);
+      const barcodeCol = findColumn(header, ['Barcode']);
+      const physicalCol = findColumn(header, ['Stok Fisik', 'Fisik', 'Actual Stock']);
+      if (physicalCol < 0 || (codeCol < 0 && barcodeCol < 0)) return alert('Kolom "Kode Barang" dan "Stok Fisik" tidak ditemukan. Gunakan tombol Template.');
+
+      const now = new Date();
+      const batchId = createId('SO');
+      const errors: string[] = [];
+      const logs: any[] = [];
+      rows.slice(1).forEach((row, index) => {
+        const rawPhysical = (row[physicalCol] || '').trim();
+        if (!rawPhysical) return;
+        const physical = Number(rawPhysical.replace(',', '.'));
+        const code = codeCol >= 0 ? (row[codeCol] || '').trim() : '';
+        const barcode = barcodeCol >= 0 ? (row[barcodeCol] || '').trim() : '';
+        const item = items.find(i => (code && i.code === code) || (barcode && i.barcode === barcode));
+        if (!item) { errors.push(`Baris ${index + 2}: barang ${code || barcode} tidak ditemukan`); return; }
+        if (!Number.isFinite(physical) || physical < 0) { errors.push(`Baris ${index + 2}: stok fisik "${rawPhysical}" tidak valid`); return; }
+        if (physical === mainStock(item)) return;
+        logs.push({
+          id: `${batchId}-${logs.length + 1}`,
+          date: now.toLocaleDateString('id-ID'),
+          createdAt: now.toISOString(),
+          itemId: item.id,
+          itemName: item.name,
+          systemStock: mainStock(item),
+          actualStock: physical,
+          difference: physical - mainStock(item),
+          notes: `Opname massal (${file.name})`,
+          status: 'SELESAI',
+        });
+      });
+      if (logs.length === 0) {
+        return alert(errors.length ? `Tidak ada stok yang diubah.\n${errors.slice(0, 10).join('\n')}` : 'Tidak ada selisih stok — semua sudah sesuai.');
+      }
+      const ok = window.confirm(`${logs.length} barang akan disesuaikan stoknya.${errors.length ? `\n${errors.length} baris dilewati:\n${errors.slice(0, 5).join('\n')}` : ''}\n\nLanjutkan?`);
+      if (ok) onAdjustStockBulk(logs);
+    };
+    reader.readAsText(file);
   };
 
   const closeModal = () => {
@@ -130,13 +182,14 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
   const handleSubmitOpname = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem) return;
-    const diff = physicalStock - selectedItem.stock;
+    const diff = physicalStock - mainStock(selectedItem);
     onAdjustStock({
-      id: `SO-${Date.now().toString().slice(-6)}`,
+      id: createId('SO'),
       date: new Date().toLocaleDateString('id-ID'),
+      createdAt: new Date().toISOString(),
       itemId: selectedItem.id,
       itemName: selectedItem.name,
-      systemStock: selectedItem.stock,
+      systemStock: mainStock(selectedItem),
       actualStock: physicalStock,
       difference: diff,
       notes: notes,
@@ -185,7 +238,12 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
                     <td className="px-6 py-4 text-slate-500">{new Date(movement.createdAt).toLocaleString('id-ID')}</td>
                     <td className="px-6 py-4 uppercase">{movement.itemName}</td>
                     <td className="px-6 py-4">{movement.type}</td>
-                    <td className={`px-6 py-4 text-right ${movement.direction === 'OUT' ? 'text-red-600' : 'text-emerald-600'}`}>{movement.direction === 'OUT' ? '-' : '+'}{movement.quantity}</td>
+                    {(() => {
+                      // Opname bisa menambah ATAU mengurangi stok — tanda dihitung dari stok sebelum/sesudah.
+                      const delta = movement.newStock - movement.previousStock;
+                      const isOut = movement.direction === 'OUT' || (movement.direction === 'ADJUSTMENT' && delta < 0);
+                      return <td className={`px-6 py-4 text-right ${isOut ? 'text-red-600' : 'text-emerald-600'}`}>{isOut ? '-' : '+'}{Math.abs(movement.direction === 'ADJUSTMENT' ? delta : movement.quantity)}</td>;
+                    })()}
                     <td className="px-6 py-4 text-right text-slate-900">{movement.newStock}</td>
                   </tr>
                 ))}
@@ -226,7 +284,8 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
             <button onClick={handleDownloadTemplate} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-white border-2 border-slate-300 text-slate-600 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-slate-50 transition-all active:scale-95 shadow-sm">
               <Download size={16}/> Template
             </button>
-            {canAdjust && <button onClick={() => fileImportRef.current?.click()} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-emerald-100 border-2 border-emerald-300 text-emerald-800 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-emerald-200 transition-all active:scale-95 shadow-sm">
+            <input ref={fileImportRef} type="file" accept=".csv,.txt" className="hidden" onChange={handleImportOpname} />
+            {canAdjust && onAdjustStockBulk && <button onClick={() => fileImportRef.current?.click()} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-emerald-100 border-2 border-emerald-300 text-emerald-800 px-5 py-3.5 rounded-xl font-black text-[9px] md:text-[10px] uppercase hover:bg-emerald-200 transition-all active:scale-95 shadow-sm">
               <Upload size={16}/> Import
             </button>}
             {canAdjust && <button onClick={() => { setOpnameMode('single'); setIsModalOpen(true); }} className="flex-1 lg:flex-none flex items-center justify-center gap-2 bg-blue-700 text-white px-6 py-3.5 rounded-xl font-black shadow-lg hover:bg-blue-800 transition-all active:scale-95 uppercase text-[9px] md:text-[10px] tracking-widest">
@@ -324,7 +383,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
                                  </div>
                                  <div className="text-right shrink-0">
                                     <div className="text-[7px] font-black text-slate-300 uppercase">SYS STOK</div>
-                                    <div className="font-black text-blue-700 text-base">{item.stock}</div>
+                                    <div className="font-black text-blue-700 text-base">{mainStock(item)}</div>
                                  </div>
                               </button>
                             ))}
@@ -337,7 +396,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
                                <img src={selectedItem.imageUrl} className="w-14 h-14 rounded-2xl object-cover border-2 border-white shadow-md" />
                                <div className="min-w-0">
                                   <div className="font-black text-blue-900 uppercase text-xs leading-tight truncate">{selectedItem.name}</div>
-                                  <div className="text-[9px] font-bold text-blue-500 uppercase tracking-widest mt-1">Sistem: {selectedItem.stock} UNIT</div>
+                                  <div className="text-[9px] font-bold text-blue-500 uppercase tracking-widest mt-1">Sistem: {mainStock(selectedItem)} UNIT</div>
                                </div>
                             </div>
                             <button type="button" onClick={() => setSelectedItem(null)} className="text-blue-500 font-black text-[10px] uppercase hover:underline shrink-0">Ganti</button>

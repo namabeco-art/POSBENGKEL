@@ -37,3 +37,13 @@ export const postCashExpenseAccounts = (accounts: Account[], amount: number): Ac
 
 export const reverseCashExpenseAccounts = (accounts: Account[], amount: number): Account[] =>
   applyDeltas(accounts, { '1-1000': amount, '6-1100': -amount });
+
+/** Pelunasan piutang pelanggan: piutang berkurang, kas/bank bertambah. */
+export const postCustomerPaymentAccounts = (accounts: Account[], amount: number, method = ''): Account[] => {
+  const targetCode = /tunai|cash/i.test(method) ? '1-1000' : '1-1100';
+  return applyDeltas(accounts, { [targetCode]: amount, '1-1200': -amount });
+};
+
+/** Membatalkan pencatatan hutang PO (misal undo draft PO yang belum diterima/dibayar). */
+export const reversePurchaseOrderAccounts = (accounts: Account[], total: number): Account[] =>
+  applyDeltas(accounts, { '2-1100': -total });

@@ -1,4 +1,6 @@
-import { Sale, PurchaseOrder, Item, Customer, Account } from '../types';
+import { Sale, PurchaseOrder, StoreProfile } from '../types';
+import { describeSaleLine } from './pricing';
+import { PAYMENT_METHOD_LABEL } from './salePayments';
 
 const escapeHtml = (value: unknown): string => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -42,9 +44,15 @@ const documentStyles = `
   .total-box { margin-top: 20px; text-align: right; font-weight: bold; font-size: 14px; border-top: 2px solid #000; padding-top: 10px; }
 `;
 
-export const printReceipt = (sale: Sale) => {
+const rupiah = (value: number) => Math.round(value || 0).toLocaleString('id-ID');
+
+export const printReceipt = (sale: Sale, profile?: StoreProfile) => {
   const win = window.open('', '_blank');
-  if (!win) return;
+  if (!win) {
+    alert('Jendela cetak diblokir browser. Izinkan pop-up untuk aplikasi ini lalu coba cetak lagi.');
+    return;
+  }
+  const storeName = profile?.name?.trim() || 'POS HULIO';
 
   win.document.write(`
     <html>
@@ -54,10 +62,12 @@ export const printReceipt = (sale: Sale) => {
       </head>
       <body>
         <div class="center">
-          <div class="bold" style="font-size: 14px;">HGROUP ENTERPRISE</div>
-          <div>Sistem iPOS 5 Pro</div>
+          <div class="bold" style="font-size: 14px;">${escapeHtml(storeName.toUpperCase())}</div>
+          ${profile?.address ? `<div>${escapeHtml(profile.address)}</div>` : ''}
+          ${profile?.phone ? `<div>${escapeHtml(profile.phone)}</div>` : ''}
           <div>--------------------------</div>
         </div>
+        ${sale.status === 'VOID' ? '<div class="center bold" style="font-size: 14px;">*** VOID / DIBATALKAN ***</div>' : ''}
         <div>No: ${escapeHtml(sale.invoiceNo)}</div>
         <div>Tgl: ${escapeHtml(sale.date)}</div>
         <div>Pel: ${escapeHtml(sale.customerName)}</div>
@@ -65,28 +75,42 @@ export const printReceipt = (sale: Sale) => {
         ${sale.items.map(item => `
           <div class="bold">${escapeHtml(item.name.toUpperCase())}</div>
           <div class="item-row">
-            <span>${item.qty} x ${item.price.toLocaleString()}</span>
-            <span>${item.total.toLocaleString()}</span>
+            <span>${escapeHtml(describeSaleLine(item).qtyText)} x ${describeSaleLine(item).priceText}</span>
+            <span>${rupiah(item.discountAmount ? (item.grossTotal ?? item.total + item.discountAmount) : item.total)}</span>
           </div>
+          ${item.discountAmount ? `<div class="item-row"><span>${item.isPromoGift ? 'BONUS PROMO' : `DISKON ${escapeHtml(item.discountText || '')}`}</span><span>-${rupiah(item.discountAmount)}</span></div>` : ''}
+          ${item.serialNumbers?.length ? `<div>SN: ${escapeHtml(item.serialNumbers.join(', '))}</div>` : ''}
+          ${item.warrantyDays ? `<div>Garansi ${item.warrantyDays} hari</div>` : ''}
         `).join('')}
         <div class="line"></div>
+        <div class="item-row">
+          <span>SUBTOTAL</span>
+          <span>${rupiah(sale.subtotal)}</span>
+        </div>
+        ${sale.discountAmount && sale.discountAmount > 0 ? `
+        <div class="item-row">
+          <span>DISKON${sale.promoName ? ` (${escapeHtml(sale.promoName)})` : ''}</span>
+          <span>-${rupiah(sale.discountAmount)}</span>
+        </div>` : ''}
         <div class="item-row bold">
           <span>TOTAL</span>
-          <span>${sale.total.toLocaleString()}</span>
+          <span>${rupiah(sale.total)}</span>
         </div>
-        <div class="item-row">
-          <span>BAYAR</span>
-          <span>${sale.amountReceived.toLocaleString()}</span>
-        </div>
+        ${sale.payments?.length
+          ? sale.payments.map(payment => `<div class="item-row"><span>${escapeHtml(PAYMENT_METHOD_LABEL[payment.method] || payment.method).toUpperCase()}</span><span>${rupiah(payment.method === 'TUNAI' ? sale.amountReceived : payment.amount)}</span></div>`).join('')
+          : `<div class="item-row">
+          <span>BAYAR (${escapeHtml(sale.paymentMethod || sale.paymentType)})</span>
+          <span>${rupiah(sale.amountReceived)}</span>
+        </div>`}
         <div class="item-row">
           <span>KEMBALI</span>
-          <span>${sale.changeAmount.toLocaleString()}</span>
+          <span>${rupiah(sale.changeAmount)}</span>
         </div>
         <div class="line"></div>
         <div class="center footer">
           KASIR: ${escapeHtml(sale.operatorName)}<br>
-          Terima kasih atas kunjungan Anda.<br>
-          Powered by H-AI Enterprise
+          Terima kasih atas kunjungan Anda.
+          ${profile?.receiptFooter ? `<br>${escapeHtml(profile.receiptFooter)}` : ''}
         </div>
         <script>setTimeout(() => { window.print(); window.close(); }, 500);</script>
       </body>
@@ -109,7 +133,7 @@ export const printPurchaseOrder = (po: PurchaseOrder) => {
         <div class="header">
           <div>
             <div class="title">Purchase Order</div>
-            <div style="font-weight: bold; margin-top: 5px;">HGROUP ENTERPRISE V5</div>
+            <div style="font-weight: bold; margin-top: 5px;">POS HULIO</div>
           </div>
           <div style="text-align: right;">
             <div>NO: ${escapeHtml(po.id)}</div>

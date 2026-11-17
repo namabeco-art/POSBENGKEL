@@ -8,11 +8,12 @@ import {
   BarChart3, AlertCircle, Sparkles, Receipt, Hash, CreditCard, User as UserIcon, Wallet, Landmark,
   Notebook, Layers, ShieldCheck, RefreshCw, ArrowDownLeft, AlertTriangle
 } from 'lucide-react';
-import { Item, Customer, Supplier, Account, Sale, PurchaseOrder } from '../types';
+import { Item, Customer, Supplier, Account, Sale, PurchaseOrder, SaleReturn } from '../types';
 import { printSimpleReport, exportToExcel } from '../services/printService';
 import SmartStockDashboard from '../components/SmartStockDashboard';
 import PiutangDashboard from '../components/PiutangDashboard';
 import ProfitAnalysis from '../components/ProfitAnalysis';
+import { describeSalePayments, getSaleCashAmount } from '../services/salePayments';
 
 interface ReportingProps {
   items: Item[];
@@ -20,11 +21,13 @@ interface ReportingProps {
   suppliers: Supplier[];
   accounts: Account[];
   sales: Sale[];
+  returns?: SaleReturn[];
   purchaseOrders: PurchaseOrder[];
+  onReceiveCustomerPayment?: (customerId: string, amount: number, method: string, note?: string) => Promise<void>;
   onAnalyzeWithAI?: () => void;
 }
 
-const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, accounts, sales, purchaseOrders, onAnalyzeWithAI }) => {
+const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, accounts, sales, returns = [], purchaseOrders, onReceiveCustomerPayment, onAnalyzeWithAI }) => {
   const [activeReport, setActiveReport] = useState<'stok' | 'penjualan' | 'kas' | 'buku' | 'stok-pintar' | 'piutang' | 'profit'>('stok');
   const [searchTerm, setSearchTerm] = useState('');
   const [startDate, setStartDate] = useState('');
@@ -36,14 +39,14 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
     return new Date(+parts[2], +parts[1] - 1, +parts[0]);
   };
 
-  // Helper to calculate profit for a sale
+  // Helper to calculate profit for a sale (setelah diskon transaksi)
   const calculateSaleProfit = (sale: Sale) => {
-    return sale.items.reduce((totalProfit, saleItem) => {
+    const cost = sale.items.reduce((totalCost, saleItem) => {
       const masterItem = items.find(i => i.id === saleItem.itemId);
       const costPrice = saleItem.costPrice ?? masterItem?.basePrice ?? 0;
-      const itemProfit = (saleItem.price - costPrice) * saleItem.qty;
-      return totalProfit + itemProfit;
+      return totalCost + costPrice * saleItem.qty;
     }, 0);
+    return sale.total - cost;
   };
 
   // 1. Data Aggregation for Stock Report
@@ -59,7 +62,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
   const salesMetrics = useMemo(() => {
     const revenue = sales.reduce((sum, x) => sum + x.total, 0);
     const count = sales.length;
-    const cashShare = sales.filter(s => s.paymentType === 'TUNAI').reduce((sum, x) => sum + x.total, 0);
+    const cashShare = sales.reduce((sum, x) => sum + getSaleCashAmount(x), 0);
     const nonCashShare = revenue - cashShare;
     const totalProfit = sales.reduce((sum, s) => sum + calculateSaleProfit(s), 0);
     return { revenue, count, cashShare, nonCashShare, totalProfit };
@@ -144,7 +147,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
         columns = ['No Faktur', 'Tanggal', 'Pelanggan', 'Total Omzet', 'Total Laba', 'Metode'];
         data = (filtered as Sale[]).map(s => {
           const profit = calculateSaleProfit(s);
-          return [s.invoiceNo, s.date, s.customerName, s.total, profit, s.paymentType];
+          return [s.invoiceNo, s.date, s.customerName, s.total, profit, describeSalePayments(s)];
         });
         break;
       case 'kas':
@@ -240,11 +243,11 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
       )}
 
       {activeReport === 'piutang' && (
-        <PiutangDashboard customers={customers} sales={sales} />
+        <PiutangDashboard customers={customers} sales={sales} onReceivePayment={onReceiveCustomerPayment} />
       )}
 
       {activeReport === 'profit' && (
-        <ProfitAnalysis items={items} sales={sales} />
+        <ProfitAnalysis items={items} sales={sales} returns={returns} />
       )}
 
       {/* Legacy Reports - Summary Row */}
@@ -376,7 +379,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
                       <td className="px-8 py-5 uppercase">{s.customerName}</td>
                       <td className="px-8 py-5 text-right text-slate-900">Rp {s.total.toLocaleString()}</td>
                       <td className="px-8 py-5 text-right text-emerald-600">Rp {calculateSaleProfit(s).toLocaleString()}</td>
-                      <td className="px-8 py-5 text-center"><span className="bg-slate-100 px-2 py-0.5 rounded text-[8px] font-black uppercase">{s.paymentType}</span></td>
+                      <td className="px-8 py-5 text-center"><span className="bg-slate-100 px-2 py-0.5 rounded text-[8px] font-black uppercase">{describeSalePayments(s)}</span></td>
                    </tr>
                  ))}
                  {activeReport === 'kas' && (filteredData as Account[]).filter(a => a.type === 'ASSET' && (a.name.includes('Kas') || a.name.includes('Bank'))).map(a => (

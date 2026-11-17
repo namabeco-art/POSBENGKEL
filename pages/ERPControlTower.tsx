@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { CheckCircle2, ClipboardCheck, Factory, Landmark, PlayCircle, ReceiptText, ShieldCheck, Store, Truck, Users, XCircle } from 'lucide-react';
 import { CashSession, Customer, Item, PurchaseOrder, Sale, SaleReturn, Supplier, User } from '../types';
+import { getSaleCreditAmount } from '../services/salePayments';
 
 type StageKey = 'stage1' | 'stage2' | 'stage3';
 
@@ -59,8 +60,7 @@ const ERPControlTower: React.FC<ERPControlTowerProps> = ({
 
   const receivableAmount = useMemo(
     () => sales
-      .filter((sale) => sale.paymentType === 'KREDIT')
-      .reduce((sum, sale) => sum + sale.total, 0),
+      .reduce((sum, sale) => sum + getSaleCreditAmount(sale), 0),
     [sales],
   );
 

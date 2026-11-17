@@ -1,70 +1,25 @@
+/** File media toko (foto price list, faktur) di Cloudflare R2 lewat Worker. */
 import { MediaAsset } from '../types';
-import { getResolvedSupabaseAnonKey, getResolvedSupabaseBucket, getResolvedSupabaseUrl } from './appConfig';
-import { getCloudConfig } from './syncService';
+import { getCloudConfig, hasCloudConfig } from './syncService';
+import { buildApiUrl, getCloudAuthHeaders, getCloudSession } from './cloudAuth';
 
-const sanitizeBaseUrl = (url: string) => url.replace(/\/+$/, '');
-
-const buildHeaders = (anonKey: string, contentType?: string) => {
-  const headers: Record<string, string> = {
-    apikey: anonKey,
-    Authorization: `Bearer ${anonKey}`,
-  };
-  if (contentType) headers['Content-Type'] = contentType;
-  return headers;
-};
-
-const createStoragePath = (storeId: string, fileName: string) => {
-  const safeName = fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const stamp = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-  return `${storeId || 'default'}/${stamp}-${safeName}`;
-};
-
-export const isSupabaseMediaConfigured = () => {
+const mediaUrl = (path: string) => {
   const config = getCloudConfig();
-  const baseUrl = getResolvedSupabaseUrl((config as any).supabaseUrl);
-  const anonKey = getResolvedSupabaseAnonKey((config as any).supabaseAnonKey);
-  const bucket = getResolvedSupabaseBucket((config as any).supabaseBucket);
-  return Boolean(baseUrl && anonKey && bucket);
+  return buildApiUrl(config.apiBaseUrl || '', `stores/${encodeURIComponent(config.storeId)}/${path}`);
 };
 
-export const uploadMediaToSupabase = async (
-  file: File,
-  uploadedBy: string,
-  meta?: Partial<MediaAsset>,
-): Promise<MediaAsset> => {
+export const isCloudMediaConfigured = () => hasCloudConfig() && Boolean(getCloudSession(getCloudConfig().storeId));
+
+export const uploadMediaToCloud = async (file: File, uploadedBy: string, meta?: Partial<MediaAsset>): Promise<MediaAsset> => {
   const config = getCloudConfig();
-  const baseUrl = sanitizeBaseUrl(getResolvedSupabaseUrl((config as any).supabaseUrl));
-  const anonKey = getResolvedSupabaseAnonKey((config as any).supabaseAnonKey);
-  const bucket = getResolvedSupabaseBucket((config as any).supabaseBucket);
-  const storeId = config.storeId || 'default';
-
-  if (!baseUrl || !anonKey || !bucket) {
-    throw new Error('SUPABASE_MEDIA_NOT_CONFIGURED');
-  }
-
-  const storagePath = createStoragePath(storeId, file.name);
-  const uploadUrl = `${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${storagePath}`;
-  const uploadResponse = await fetch(uploadUrl, {
+  if (!isCloudMediaConfigured()) throw new Error('CLOUD_MEDIA_NOT_CONFIGURED');
+  const response = await fetch(mediaUrl(`media?name=${encodeURIComponent(file.name)}`), {
     method: 'POST',
-    headers: {
-      ...buildHeaders(anonKey, file.type || 'application/octet-stream'),
-      'x-upsert': 'false',
-    },
+    headers: getCloudAuthHeaders(config.storeId, file.type || 'application/octet-stream'),
     body: file,
   });
-
-  if (!uploadResponse.ok) {
-    const detail = await uploadResponse.text().catch(() => '');
-    throw new Error(`SUPABASE_UPLOAD_FAILED::${uploadResponse.status} ${detail}`);
-  }
-
-  const signedResponse = await fetch(`${baseUrl}/storage/v1/object/sign/${encodeURIComponent(bucket)}/${storagePath}`, {
-    method: 'POST',
-    headers: buildHeaders(anonKey, 'application/json'),
-    body: JSON.stringify({ expiresIn: 60 * 60 * 24 * 7 }),
-  });
-  const signedData = await signedResponse.json().catch(() => ({}));
-  const signedUrl = signedData?.signedURL ? `${baseUrl}/storage/v1${signedData.signedURL}` : undefined;
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.storagePath) throw new Error(`CLOUD_UPLOAD_FAILED::${response.status} ${data.message || ''}`.trim());
 
   return {
     id: `MEDIA-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -78,40 +33,31 @@ export const uploadMediaToSupabase = async (
     category: meta?.category || 'OTHER',
     notes: meta?.notes || '',
     extractedText: meta?.extractedText,
-    sourceType: 'supabase',
-    storagePath,
-    signedUrl,
+    sourceType: 'cloud',
+    storagePath: data.storagePath,
+    signedUrl: data.signedUrl,
     useAsKnowledge: meta?.useAsKnowledge ?? true,
   };
 };
 
-export const refreshSupabaseSignedUrl = async (asset: MediaAsset): Promise<string | undefined> => {
-  if (!asset.storagePath) return asset.signedUrl;
+/** URL bertanda tangan baru (berlaku 7 hari). */
+export const refreshMediaUrl = async (asset: MediaAsset): Promise<string | undefined> => {
+  if (!asset.storagePath || !isCloudMediaConfigured()) return asset.signedUrl;
   const config = getCloudConfig();
-  const baseUrl = sanitizeBaseUrl(getResolvedSupabaseUrl((config as any).supabaseUrl));
-  const anonKey = getResolvedSupabaseAnonKey((config as any).supabaseAnonKey);
-  const bucket = getResolvedSupabaseBucket((config as any).supabaseBucket);
-  if (!baseUrl || !anonKey || !bucket) return asset.signedUrl;
-
-  const signedResponse = await fetch(`${baseUrl}/storage/v1/object/sign/${encodeURIComponent(bucket)}/${asset.storagePath}`, {
+  const response = await fetch(mediaUrl('media/sign'), {
     method: 'POST',
-    headers: buildHeaders(anonKey, 'application/json'),
-    body: JSON.stringify({ expiresIn: 60 * 60 * 24 * 7 }),
-  });
-  const signedData = await signedResponse.json().catch(() => ({}));
-  if (signedData?.signedURL) return `${baseUrl}/storage/v1${signedData.signedURL}`;
-  return asset.signedUrl;
+    headers: getCloudAuthHeaders(config.storeId, 'application/json'),
+    body: JSON.stringify({ storagePath: asset.storagePath }),
+  }).catch(() => null);
+  const data = response ? await response.json().catch(() => ({})) : {};
+  return data?.signedUrl || asset.signedUrl;
 };
 
-export const deleteSupabaseMedia = async (asset: MediaAsset): Promise<void> => {
-  if (!asset.storagePath) return;
+export const deleteCloudMedia = async (asset: MediaAsset): Promise<void> => {
+  if (!asset.storagePath || !isCloudMediaConfigured()) return;
   const config = getCloudConfig();
-  const baseUrl = sanitizeBaseUrl(getResolvedSupabaseUrl((config as any).supabaseUrl));
-  const anonKey = getResolvedSupabaseAnonKey((config as any).supabaseAnonKey);
-  const bucket = getResolvedSupabaseBucket((config as any).supabaseBucket);
-  if (!baseUrl || !anonKey || !bucket) return;
-  await fetch(`${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${asset.storagePath}`, {
+  await fetch(mediaUrl(`media?path=${encodeURIComponent(asset.storagePath)}`), {
     method: 'DELETE',
-    headers: buildHeaders(anonKey),
+    headers: getCloudAuthHeaders(config.storeId),
   }).catch(() => undefined);
 };

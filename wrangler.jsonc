@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "poshulio",
+  "main": "./worker/index.ts",
+  "compatibility_date": "2026-11-17",
+  "upload_source_maps": true,
+  "assets": {
+    // Aplikasi kasir adalah SPA: URL yang bukan file statis dijawab index.html.
+    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    "run_worker_first": ["/api/*"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "STORE", "class_name": "StoreObject" }]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["StoreObject"] }
+  ],
+  "r2_buckets": [
+    { "binding": "MEDIA", "bucket_name": "poshulio-media" }
+  ],
+  "vars": {
+    "OPENROUTER_MODEL": "openrouter/auto"
+  },
+  // Rahasia (diisi lewat `wrangler secret put`, bukan di file ini):
+  //   SETUP_KEY             — kode untuk mendaftarkan toko baru
+  //   MEDIA_SIGNING_SECRET  — kunci tanda tangan URL file media
+  //   OPENROUTER_API_KEY    — opsional, AI tanpa membocorkan kunci ke browser
+  "observability": { "enabled": true }
+}
