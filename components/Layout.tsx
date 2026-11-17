@@ -5,7 +5,7 @@ import {
   Database, Calculator, Users, LogOut, ShieldCheck,
   PieChart, ClipboardList, RotateCcw, Sparkles, Bot,
   MessageSquare, RefreshCw, AlertCircle, CheckCircle2, 
-  CloudOff, FileText, Truck
+  CloudOff, FileText, Truck, Wrench, Wallet, HardHat, Warehouse as WarehouseIcon, Undo2, Tag, BookOpen, BarChart3
 } from 'lucide-react';
 import { User, UserRole } from '../types';
 import FloatingAIChat from './FloatingAIChat';
@@ -30,13 +30,16 @@ interface LayoutProps {
   syncError?: boolean;
   /** Cloud menolak perangkat ini (belum login cloud toko). */
   cloudAuthRequired?: boolean;
+  /** Mode Lengkap menampilkan menu tambahan (WO, deposit, gudang, buku besar, ...). */
+  isFullMode?: boolean;
 }
 
 const Layout: React.FC<LayoutProps> = ({ 
   children, activeTab, setActiveTab, currentUser, onLogout, 
   items, sales, accounts, floatingMessages, onUpdateMessages, 
-  isSyncing, onManualSync, lastSyncTime, syncError, cloudAuthRequired = false
+  isSyncing, onManualSync, lastSyncTime, syncError, cloudAuthRequired = false, isFullMode = false
 }) => {
+  const mode = isFullMode ? 'LENGKAP' : 'SIMPLE';
   const [collapsed, setCollapsed] = useState(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isFloatingChatOpen, setIsFloatingChatOpen] = useState(false);
@@ -48,20 +51,28 @@ const Layout: React.FC<LayoutProps> = ({
     { section: 'Menu Utama', items: [
       { id: 'dashboard', label: 'Dashboard', icon: <LayoutDashboard size={18} /> },
       { id: 'pos', label: 'Kasir', icon: <Store size={18} />, highlight: true },
+      { id: 'service-orders', label: 'Servis / WO', icon: <Wrench size={18} /> },
     ]},
     { section: 'Data', items: [
       { id: 'master-items', label: 'Barang', icon: <Package size={18} /> },
       { id: 'master-contacts', label: 'Kontak', icon: <Users size={18} /> },
+      { id: 'mechanics', label: 'Mekanik & Komisi', icon: <HardHat size={18} /> },
+      { id: 'promotions', label: 'Promo', icon: <Tag size={18} /> },
     ]},
     { section: 'Transaksi', items: [
       { id: 'sales-list', label: 'Penjualan', icon: <ClipboardList size={18} /> },
       { id: 'returns', label: 'Retur', icon: <RotateCcw size={18} /> },
+      { id: 'deposits', label: 'Deposit Pelanggan', icon: <Wallet size={18} /> },
       { id: 'purchasing', label: 'Pembelian', icon: <Truck size={18} /> },
+      { id: 'purchase-returns', label: 'Retur Beli', icon: <Undo2 size={18} /> },
       { id: 'stock-opname', label: 'Stok Opname', icon: <History size={18} /> },
+      { id: 'warehouses', label: 'Gudang & Transfer', icon: <WarehouseIcon size={18} /> },
     ]},
     { section: 'Laporan', items: [
       { id: 'accounting', label: 'Akuntansi', icon: <Calculator size={18} /> },
+      { id: 'ledger', label: 'Jurnal & Neraca', icon: <BookOpen size={18} /> },
       { id: 'reporting', label: 'Laporan', icon: <PieChart size={18} /> },
+      { id: 'advanced-reports', label: 'Laporan Lengkap', icon: <BarChart3 size={18} /> },
     ]},
     // AI section only shows if API key is configured
     ...(isAiEnabled ? [{ section: 'AI & Media', items: [
@@ -79,7 +90,7 @@ const Layout: React.FC<LayoutProps> = ({
       ...section,
       items: section.items.filter(item => {
         if (item.id === 'settings' && currentUser.role !== UserRole.MANAGER && currentUser.role !== UserRole.OWNER) return false;
-        return canAccessTab(currentUser, item.id);
+        return canAccessTab(currentUser, item.id, mode);
       })
     }))
     .filter(section => section.items.length > 0);
@@ -146,7 +157,7 @@ const Layout: React.FC<LayoutProps> = ({
                 <span className="text-white font-bold text-sm">H</span>
               </div>
               <div>
-                <h1 className="text-sm font-bold text-slate-800 leading-none">POS Hulio</h1>
+                <h1 className="text-sm font-bold text-slate-800 leading-none">POS Hulio{isFullMode && <span className="ml-1.5 text-[9px] font-bold px-1.5 py-0.5 rounded bg-indigo-100 text-indigo-700 align-middle">LENGKAP</span>}</h1>
                 <SyncBadge />
               </div>
             </div>
@@ -248,7 +259,7 @@ const Layout: React.FC<LayoutProps> = ({
           <div className="px-4 md:px-6 py-2.5 bg-amber-50 border-b border-amber-200 text-xs text-amber-800 flex flex-wrap items-center gap-2" role="alert">
             <AlertCircle size={14} className="shrink-0" />
             <span>Data perangkat ini <b>belum terkirim ke cloud</b>: cloud toko menolak perangkat yang belum login.</span>
-            {canAccessTab(currentUser, 'settings')
+            {canAccessTab(currentUser, 'settings', mode)
               ? <button onClick={() => setActiveTab('settings')} className="underline font-semibold">Hubungkan di Pengaturan</button>
               : <span>Minta owner menghubungkan perangkat ini.</span>}
           </div>

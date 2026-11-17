@@ -1,32 +1,38 @@
-import React, { Suspense, lazy, useState, useEffect, useCallback } from 'react';
+import React, { Suspense, lazy, useState, useEffect, useCallback, useMemo } from 'react';
 import Layout from './components/Layout';
-import { AIPriceUpdateDraft, AIUndoEntry, AppData, AuditLog, Branch, CashExpense, CashSession, Customer, InventoryLog, InventoryMovement, Item, MediaAsset, PaymentRecord, PriceChangeSource, PromotionCampaign, PurchaseOrder, Sale, SaleReturn, StoreProfile, Supplier, User, UserRole, Account } from './types';
+import { AIPriceUpdateDraft, AIUndoEntry, AppData, AppSettings, AuditLog, Branch, CashExpense, CashSession, Customer, HeldCart, InventoryLog, InventoryMovement, Item, JournalLine, MediaAsset, Mechanic, PaymentRecord, PriceChangeSource, PromotionCampaign, PurchaseOrder, PurchaseReturn, Sale, SaleReturn, ServiceOrder, StockTransfer, StoreProfile, Supplier, User, UserRole, Account, Warehouse } from './types';
 import { mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, mockBranches, mockPromotions } from './store';
 import { ShieldCheck, User as UserIcon, Key, Clock, AlertCircle, Info, CloudLightning, RefreshCw, Loader2, Link2, CheckCircle2, X, Plus, Store, ChevronRight, Globe, Lock, Trash2, Settings2, Database, HardDrive, Server, QrCode, Terminal, Activity, ChevronDown, Search, Cloud, Monitor, MapPin, ShieldEllipsis } from 'lucide-react';
-import { pullFromCloud, pushToCloud, getCloudConfig, hasCloudConfig, applyActivationCode, saveCloudConfig, withCloudInventoryLock } from './services/syncService';
+import { pullFromCloud, syncWithCloud, getCloudConfig, hasCloudConfig, applyActivationCode, saveCloudConfig, withCloudInventoryLock } from './services/syncService';
 import { clearSessionLocal, loadAppDataLocal, loadSessionLocal, saveAppDataLocal, saveSessionLocal } from './services/storageService';
 import { hashPassword, sanitizeUserSession, verifyPassword } from './services/authService';
 import { canAccessTab, getAccessibleTabs, hasPermission } from './services/permissions';
 import { getLoginLockoutRemaining, recordFailedLogin, resetLoginAttempts } from './services/rateLimiter';
 import { adjustStock, completeReturn, completeSale, receivePurchaseOrderStock, validateUniqueItem, voidSaleStock, type CostChange } from './services/posOperations';
 import { getCloudProfileLabel, getCloudProfileRegion, getCloudProfiles } from './services/cloudProfiles';
-import { hasEnvCloudConfig, getEnvConfig } from './services/appConfig';
 import { useAppStore } from './appStore';
 import { mergeAppData } from './services/mergeService';
 import { loadAppDataIndexedDB, saveAppDataIndexedDB } from './services/indexedDbService';
 import { createDocumentNo, createId } from './services/idService';
-import { postCashExpenseAccounts, postCustomerPaymentAccounts, postPurchaseOrderAccounts, postPurchasePaymentAccounts, postReturnAccounts, postSaleAccounts, reverseCashExpenseAccounts, reversePurchaseOrderAccounts } from './services/accountingService';
+import { postPurchasePaymentAccounts, reverseCashExpenseAccounts, reversePurchaseOrderAccounts } from './services/accountingService';
 import { buildPriceChangeLogs, getItemCost, PRICE_HISTORY_LIMIT, syncUnitPrices } from './services/pricing';
 import { stampAppData } from './services/syncMeta';
 import { AUDIT_LOG_LIMIT } from './services/mergeService';
 import ErrorBoundary from './components/ErrorBoundary';
 import CloudConnectPanel from './components/CloudConnectPanel';
 import { isCloudAuthError, onCloudSessionChange } from './services/cloudAuth';
+import { applyBalanceChanges, BalanceChange } from './services/customerLedger';
+import { allocateReturnRefund, getSaleBankAmount, getSaleCashAmount, getSaleCreditAmount, getSaleDepositAmount, getSalePayments, summarizePaymentType } from './services/salePayments';
+import { buildJournals, computeAccountBalances, ensureLedgerAccounts, getReturnRefund, LEDGER_VERSION } from './services/ledger';
+import { assertPeriodOpen, createPurchaseReturn, getPurchaseOrderOutstanding, importOpeningReceivables, payCommission, postManualJournal, receiveServiceOrderDp, refundDeposit, saveServiceOrder, topupDeposit, transferStockOp } from './services/fullOps';
+import { getAutoBackupConfig, isBackupDue, runBackup } from './services/autoBackup';
+import { DEFAULT_WAREHOUSE_ID } from './services/warehouses';
 
 /** Perangkat yang belum punya transaksi apa pun (data bawaan/contoh saja). */
 const hasLocalTransactions = (data: Partial<AppData>) => Boolean(
   data.sales?.length || data.inventoryMovements?.length || data.purchaseOrders?.length || data.cashSessions?.length
-  || data.returns?.length || data.paymentRecords?.length || data.cashExpenses?.length,
+  || data.returns?.length || data.paymentRecords?.length || data.cashExpenses?.length
+  || data.customerLedger?.length || data.serviceOrders?.length || data.purchaseReturns?.length || data.manualJournals?.length,
 );
 
 /** Workspace (Store ID) pemilik data lokal di perangkat ini. */
@@ -58,6 +64,14 @@ const AIConsultant = lazy(() => import('./pages/AIConsultant'));
 const Settings = lazy(() => import('./pages/Settings'));
 const ERPControlTower = lazy(() => import('./pages/ERPControlTower'));
 const MediaVault = lazy(() => import('./pages/MediaVault'));
+const ServiceOrders = lazy(() => import('./pages/ServiceOrders'));
+const Deposits = lazy(() => import('./pages/Deposits'));
+const Mechanics = lazy(() => import('./pages/Mechanics'));
+const Warehouses = lazy(() => import('./pages/Warehouses'));
+const PurchaseReturns = lazy(() => import('./pages/PurchaseReturns'));
+const Promotions = lazy(() => import('./pages/Promotions'));
+const Ledger = lazy(() => import('./pages/Ledger'));
+const AdvancedReports = lazy(() => import('./pages/AdvancedReports'));
 
 type UserDraft = {
   id: string;
@@ -110,8 +124,13 @@ const App: React.FC = () => {
     branches, aiConsultantHistory, setAiConsultantHistory,
     floatingChatHistory, setFloatingChatHistory,
     priceHistory, appendPriceHistory, recordDeletion, storeProfile, setStoreProfile,
+    appSettings, setAppSettings, customerLedger, manualJournals, mechanics, setMechanics, commissionPayments,
+    heldCarts, setHeldCarts, serviceOrders, setServiceOrders, warehouses, setWarehouses, stockTransfers, purchaseReturns,
     applyData, appendAuditLog
   } = appStore;
+  /** Mode aplikasi toko: SIMPLE (default, tampilan seperti biasa) atau LENGKAP (fitur ala ERP). */
+  const appMode = appSettings?.mode === 'LENGKAP' ? 'LENGKAP' : 'SIMPLE';
+  const isFullMode = appMode === 'LENGKAP';
 
   // Login States
   const [loginUsername, setLoginUsername] = useState('');
@@ -163,11 +182,17 @@ const App: React.FC = () => {
       priceHistory: state.priceHistory,
       deletedRecords: state.deletedRecords,
       storeProfile: state.storeProfile,
-      openRouterApiKey: getCloudConfig().openRouterApiKey,
-      aiModel: getCloudConfig().aiModel,
-      supabaseUrl: (getCloudConfig() as any).supabaseUrl || '',
-      supabaseAnonKey: (getCloudConfig() as any).supabaseAnonKey || '',
-      supabaseBucket: (getCloudConfig() as any).supabaseBucket || 'erp-media',
+      appSettings: state.appSettings,
+      customerLedger: state.customerLedger,
+      manualJournals: state.manualJournals,
+      mechanics: state.mechanics,
+      commissionPayments: state.commissionPayments,
+      heldCarts: state.heldCarts,
+      serviceOrders: state.serviceOrders,
+      warehouses: state.warehouses,
+      stockTransfers: state.stockTransfers,
+      purchaseReturns: state.purchaseReturns,
+      // Kredensial (API key AI, dsb.) sengaja TIDAK ikut tersimpan ke data cloud/backup.
     };
   }, []);
 
@@ -251,9 +276,8 @@ const App: React.FC = () => {
     pushInFlight.current = true;
     lastPushTime.current = Date.now();
     try {
-      const remote = await pullFromCloud();
-      const merged = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
-      await pushToCloud(merged);
+      // Tarik → gabung → simpan (compare-and-swap; diulang otomatis bila perangkat lain menyimpan bersamaan).
+      const { remote, data: merged } = await syncWithCloud(remote => (remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot()));
       markWorkspaceSynced();
       if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), merged) as AppData);
       setLastSyncTime(new Date().toLocaleTimeString());
@@ -478,7 +502,7 @@ const App: React.FC = () => {
       details: `${updatedUser.name} berhasil login.`,
       createdAt: new Date().toISOString(),
     });
-    const defaultTab = getAccessibleTabs(updatedUser)[0] || 'dashboard';
+    const defaultTab = getAccessibleTabs(updatedUser, appMode)[0] || 'dashboard';
     setActiveTab(defaultTab);
   };
 
@@ -488,9 +512,7 @@ const App: React.FC = () => {
     try {
       const config = getCloudConfig();
       // Gabungkan dulu dengan cloud agar transaksi terminal lain tidak tertimpa.
-      const remote = await pullFromCloud();
-      const dataToSave = remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot();
-      await pushToCloud(dataToSave);
+      const { remote, data: dataToSave } = await syncWithCloud(remote => (remote ? mergeWithRemote(buildDataSnapshot(), remote) : buildDataSnapshot()));
       markWorkspaceSynced();
       if (remote) applyRemoteData(mergeAppData(buildDataSnapshot(), dataToSave) as AppData);
       lastPushTime.current = Date.now();
@@ -592,7 +614,7 @@ const App: React.FC = () => {
   const exportBackup = () => {
     const snapshot = buildDataSnapshot();
     // Bug #20 fix: Strip sensitive credentials from backup
-    const { openRouterApiKey, supabaseUrl, supabaseAnonKey, supabaseBucket, ...safeData } = snapshot;
+    const { openRouterApiKey: _key, supabaseUrl: _url, supabaseAnonKey: _anon, supabaseBucket: _bucket, ...safeData } = snapshot;
     const blob = new Blob([JSON.stringify(safeData, null, 2)], { type: 'application/json;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
@@ -642,9 +664,7 @@ const App: React.FC = () => {
 
     setIsSyncing(true);
     try {
-      const remote = await pullFromCloud();
-      const latest = remote ? { ...mergeWithRemote(buildDataSnapshot(), remote), users: useAppStore.getState().users } : dataToSave;
-      await pushToCloud(latest);
+      await syncWithCloud(remote => (remote ? { ...mergeWithRemote(buildDataSnapshot(), remote), users: useAppStore.getState().users } : dataToSave));
       setLastSyncTime(new Date().toLocaleTimeString());
       setSyncError(false);
       alert(`User default untuk workspace ${workspaceLabel} berhasil direset. Gunakan admin / 123.`);
@@ -669,16 +689,18 @@ const App: React.FC = () => {
       try {
         let nextCloud: AppData | null = null;
         await withCloudInventoryLock(async () => {
-          const remote = await pullFromCloud();
-          const localSnapshot = buildDataSnapshot();
-          const latest = remote ? mergeWithRemote(localSnapshot, remote) : localSnapshot;
-          try {
-            nextCloud = mutate(latest);
-          } catch (error) {
-            mutationError = error;
-            throw error;
-          }
-          await pushToCloud(nextCloud);
+          // Mutasi dihitung dari data cloud terbaru; bila versi cloud berubah saat menyimpan, dihitung ulang.
+          const result = await syncWithCloud(remote => {
+            const localSnapshot = buildDataSnapshot();
+            const latest = remote ? mergeWithRemote(localSnapshot, remote) : localSnapshot;
+            try {
+              return mutate(latest);
+            } catch (error) {
+              mutationError = error;
+              throw error;
+            }
+          });
+          nextCloud = result.data;
         });
         if (!nextCloud) throw new Error('Mutasi cloud tidak menghasilkan data.');
         markWorkspaceSynced();
@@ -775,8 +797,14 @@ const App: React.FC = () => {
           imageUrl: row.imageUrl || existing.imageUrl,
           basePrice: row.basePrice > 0 ? row.basePrice : existing.basePrice,
           memberPrices: row.memberPrices.map((price, level) => (price > 0 ? price : existing.memberPrices[level] || 0)),
+          itemType: row.itemType ?? existing.itemType,
+          reorderLevel: row.reorderLevel ?? existing.reorderLevel,
+          trackSerial: row.trackSerial ?? existing.trackSerial,
         };
         next.units = syncUnitPrices(existing.units, existing.memberPrices[0] || 0, next.memberPrices[0] || 0);
+        // Satuan besar dari file (mis. migrasi iPos) menggantikan satuan besar lama.
+        const importedExtras = (row.units || []).filter(unit => unit.conversion > 1);
+        if (importedExtras.length > 0) next.units = [...(next.units || []).filter(unit => unit.conversion === 1), ...importedExtras];
         try { validateUniqueItem(working, next); } catch (error: any) { errors.push(`Baris ${line}: ${error.message}`); return; }
         working = working.map(item => (item.id === existing.id ? next : item));
         if (!addedIds.has(existing.id)) updatedIds.add(existing.id);
@@ -998,7 +1026,9 @@ const App: React.FC = () => {
       const removableIds = new Set(removable.map(po => po.id));
       if (removable.length > 0) {
         setPurchaseOrders(prev => prev.filter(po => !removableIds.has(po.id)));
-        setAccounts(prev => reversePurchaseOrderAccounts(prev, removable.reduce((sum, po) => sum + po.total, 0)));
+        // Hanya PO versi lama yang mencatat hutang saat dibuat; PO baru belum punya jurnal sebelum barang diterima.
+        const legacyTotal = removable.filter(po => !po.ledgerV).reduce((sum, po) => sum + po.total, 0);
+        if (legacyTotal > 0) setAccounts(prev => reversePurchaseOrderAccounts(prev, legacyTotal));
         recordDeletion('purchaseOrders', [...removableIds]);
       }
       if (removable.length < targets.length) {
@@ -1202,8 +1232,8 @@ const App: React.FC = () => {
     const cashRefunds = returns
       .filter(ret => ret.status === 'APPROVED')
       .reduce((sum, ret) => {
-        // Retur baru mencatat shift tempat uang refund dikeluarkan.
-        if (ret.cashSessionId) return sum + (ret.cashSessionId === openSession.id ? ret.totalReturn : 0);
+        // Retur baru mencatat shift tempat uang refund dikeluarkan (hanya bagian tunai).
+        if (ret.cashSessionId) return sum + (ret.cashSessionId === openSession.id ? (ret.refund ? ret.refund.cash : ret.totalReturn) : 0);
         // Data lama: perkiraan dari shift penjualan asal.
         if ((ret.createdAt || '') < openSession.openedAt) return sum;
         const origin = sales.find(sale => sale.invoiceNo === ret.originalInvoiceNo);
@@ -1215,13 +1245,22 @@ const App: React.FC = () => {
     const customerCashPayments = paymentRecords
       .filter(payment => payment.referenceType === 'CUSTOMER_PAYMENT' && payment.cashSessionId === openSession.id)
       .reduce((sum, payment) => sum + payment.amount, 0);
+    // Uang tunai lain di laci: topup deposit/DP & refund retur beli (masuk), pengembalian deposit & komisi (keluar).
+    const otherCash = (direction: 'IN' | 'OUT') => paymentRecords
+      .filter(payment => payment.cashSessionId === openSession.id && payment.direction === direction && /tunai|cash/i.test(payment.method))
+      .filter(payment => payment.referenceType === 'DEPOSIT' || payment.referenceType === 'COMMISSION' || payment.referenceType === 'PURCHASE_RETURN')
+      .reduce((sum, payment) => sum + payment.amount, 0);
+    const otherCashIn = otherCash('IN');
+    const otherCashOut = otherCash('OUT');
     const expectedCash = openSession.openingCash
-      + sessionSales.filter(sale => sale.paymentType === 'TUNAI').reduce((sum, sale) => sum + sale.total, 0)
+      + sessionSales.reduce((sum, sale) => sum + getSaleCashAmount(sale), 0)
       + customerCashPayments
+      + otherCashIn
       - cashRefunds
+      - otherCashOut
       - sessionExpenses;
-    const nonCashSales = sessionSales.filter(sale => sale.paymentType === 'NON-TUNAI').reduce((sum, sale) => sum + sale.total, 0);
-    const creditSales = sessionSales.filter(sale => sale.paymentType === 'KREDIT').reduce((sum, sale) => sum + sale.total, 0);
+    const nonCashSales = sessionSales.reduce((sum, sale) => sum + getSaleBankAmount(sale) + getSaleDepositAmount(sale), 0);
+    const creditSales = sessionSales.reduce((sum, sale) => sum + getSaleCreditAmount(sale), 0);
     const shortageOrOverage = closingCash - expectedCash;
 
     const closedSession: CashSession = {
@@ -1234,6 +1273,8 @@ const App: React.FC = () => {
       cashRefunds,
       cashExpenses: sessionExpenses,
       customerCashPayments,
+      otherCashIn,
+      otherCashOut,
       shortageOrOverage,
       closingNotes,
       status: 'CLOSED',
@@ -1247,11 +1288,11 @@ const App: React.FC = () => {
     if (expense.amount <= 0 || !expense.description.trim()) throw new Error('Keterangan dan nominal pengeluaran wajib diisi.');
     await runInventorySafeMutation(snapshot => {
       const openSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
-      const prepared = { ...expense, operatorId: currentUser.id, operatorName: currentUser.name, cashSessionId: openSession?.id };
+      const prepared = { ...expense, operatorId: currentUser.id, operatorName: currentUser.name, cashSessionId: openSession?.id, ledgerV: LEDGER_VERSION };
+      // Jurnal (Dr Biaya, Cr Kas) diturunkan otomatis dari dokumen ini — saldo akun tidak diubah langsung.
       return {
         ...snapshot,
         cashExpenses: [prepared, ...snapshot.cashExpenses],
-        accounts: postCashExpenseAccounts(snapshot.accounts, prepared.amount),
       };
     });
   };
@@ -1264,16 +1305,22 @@ const App: React.FC = () => {
       if (target.cashSessionId && snapshot.cashSessions.some(session => session.id === target.cashSessionId && session.status === 'CLOSED')) {
         throw new Error('Pengeluaran dari shift yang sudah ditutup tidak dapat dihapus.');
       }
+      assertPeriodOpen(snapshot.appSettings, target.createdAt, 'Pengeluaran');
       return {
         ...snapshot,
         cashExpenses: snapshot.cashExpenses.filter(expense => expense.id !== id),
-        accounts: reverseCashExpenseAccounts(snapshot.accounts, target.amount),
+        // Data lama (sebelum buku besar otomatis) memakai saldo akun langsung.
+        accounts: target.ledgerV ? snapshot.accounts : reverseCashExpenseAccounts(snapshot.accounts, target.amount),
         deletedRecords: [{ collection: 'cashExpenses', id, deletedAt: new Date().toISOString() }, ...(snapshot.deletedRecords || [])],
       };
     });
   };
 
-  const addSale = async (sale: Sale): Promise<Sale> => {
+  /**
+   * Simpan penjualan. Mendukung pembayaran campuran (`sale.payments`), jasa, diskon baris, deposit,
+   * dan faktur dari Work Order. Saldo pelanggan berubah lewat buku besar pelanggan (aman untuk sinkron).
+   */
+  const addSale = async (sale: Sale, options: { heldCartId?: string } = {}): Promise<Sale> => {
     if (!currentUser || !hasPermission(currentUser, 'sale.create')) throw new Error('Anda tidak memiliki izin membuat penjualan.');
     const zeroPriced = sale.items.find(line => !(line.price > 0));
     if (zeroPriced) throw new Error(`Harga jual ${zeroPriced.name} masih Rp 0. Atur harga di Master Barang sebelum dijual.`);
@@ -1281,14 +1328,23 @@ const App: React.FC = () => {
       if (snapshot.sales.some(entry => entry.id === sale.id || entry.invoiceNo === sale.invoiceNo)) {
         throw new Error(`Faktur ${sale.invoiceNo} sudah tersimpan.`);
       }
+      const payments = getSalePayments(sale);
+      const paidTotal = payments.reduce((sum, payment) => sum + payment.amount, 0);
+      if (Math.round(paidTotal) !== Math.round(sale.total)) throw new Error('Total pembayaran tidak sama dengan total belanja.');
       const customer = snapshot.customers.find(entry => entry.id === sale.customerId);
-      if (sale.paymentType === 'KREDIT') {
+      const creditAmount = getSaleCreditAmount(sale);
+      const depositAmount = getSaleDepositAmount(sale);
+      if (creditAmount > 0) {
         if (!customer || customer.creditLimit <= 0) throw new Error('Pilih pelanggan yang memiliki limit kredit.');
-        if (customer.currentDebt + sale.total > customer.creditLimit) throw new Error('Transaksi melebihi limit kredit pelanggan.');
+        if (customer.currentDebt + creditAmount > customer.creditLimit) throw new Error('Transaksi melebihi limit kredit pelanggan.');
+      }
+      if (depositAmount > 0 && (!customer || (customer.depositBalance || 0) < depositAmount)) {
+        throw new Error(`Saldo deposit pelanggan tidak cukup (tersedia Rp ${(customer?.depositBalance || 0).toLocaleString('id-ID')}).`);
       }
       const openSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN') || null;
       const preparedSale: Sale = {
         ...sale,
+        paymentType: sale.payments?.length ? summarizePaymentType(sale.payments) : sale.paymentType,
         items: sale.items.map(line => ({
           ...line,
           costPrice: (() => {
@@ -1301,21 +1357,31 @@ const App: React.FC = () => {
         status: 'COMPLETED',
         operatorId: currentUser.id,
         cashSessionId: openSession?.id,
+        ledgerV: LEDGER_VERSION,
       };
       const result = completeSale(snapshot.items, preparedSale, currentUser, snapshot.customers);
-      let nextCustomers = snapshot.customers;
-      if (preparedSale.paymentType === 'KREDIT') {
-        nextCustomers = nextCustomers.map(entry => entry.id === preparedSale.customerId ? { ...entry, currentDebt: entry.currentDebt + preparedSale.total } : entry);
-      }
-      if (result.updatedCustomer) {
-        nextCustomers = nextCustomers.map(entry => entry.id === result.updatedCustomer!.id ? { ...entry, rewardPoints: result.updatedCustomer!.rewardPoints } : entry);
-      }
+      const balanceChanges: BalanceChange[] = [
+        { customerId: preparedSale.customerId, kind: 'DEBT', delta: creditAmount, referenceNo: preparedSale.invoiceNo, referenceType: 'SALE' },
+        { customerId: preparedSale.customerId, kind: 'DEPOSIT', delta: -depositAmount, referenceNo: preparedSale.invoiceNo, referenceType: 'SALE' },
+        { customerId: preparedSale.customerId, kind: 'POINTS', delta: (preparedSale.pointsEarned || 0) - (preparedSale.pointsUsed || 0), referenceNo: preparedSale.invoiceNo, referenceType: 'SALE' },
+      ];
+      const balances = applyBalanceChanges(snapshot.customers, balanceChanges, currentUser);
+      const now = new Date().toISOString();
+      const serviceOrdersNext = preparedSale.serviceOrderId
+        ? (snapshot.serviceOrders || []).map(order => (order.id === preparedSale.serviceOrderId ? { ...order, status: 'DIFAKTURKAN' as const, invoiceNo: preparedSale.invoiceNo, updatedAt: now } : order))
+        : snapshot.serviceOrders;
+      const heldCartsNext = options.heldCartId ? (snapshot.heldCarts || []).filter(cart => cart.id !== options.heldCartId) : snapshot.heldCarts;
       return {
         ...snapshot,
         sales: [{ ...preparedSale, items: result.saleItems }, ...snapshot.sales],
         items: result.items,
-        customers: nextCustomers,
-        accounts: postSaleAccounts(snapshot.accounts, preparedSale),
+        customers: balances.customers,
+        customerLedger: [...balances.entries, ...(snapshot.customerLedger || [])],
+        serviceOrders: serviceOrdersNext,
+        heldCarts: heldCartsNext,
+        deletedRecords: options.heldCartId
+          ? [{ collection: 'heldCarts', id: options.heldCartId, deletedAt: now }, ...(snapshot.deletedRecords || [])]
+          : snapshot.deletedRecords,
         inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
         paymentRecords: [result.payment, ...snapshot.paymentRecords],
         auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
@@ -1327,7 +1393,7 @@ const App: React.FC = () => {
   };
 
   /**
-   * Batalkan transaksi (void) — untuk salah input di shift yang sama. Stok, kas/bank, piutang, dan poin dikembalikan.
+   * Batalkan transaksi (void) — untuk salah input di shift yang sama. Stok, kas/bank, piutang, deposit, dan poin dikembalikan.
    * Transaksi dari shift yang sudah ditutup, yang sudah diretur, atau yang piutangnya sudah dicicil harus lewat Retur.
    */
   const voidSale = async (saleId: string, reason: string): Promise<void> => {
@@ -1338,6 +1404,7 @@ const App: React.FC = () => {
       const sale = snapshot.sales.find(entry => entry.id === saleId);
       if (!sale) throw new Error('Transaksi tidak ditemukan.');
       if (sale.status === 'VOID') throw new Error(`Faktur ${sale.invoiceNo} sudah dibatalkan.`);
+      assertPeriodOpen(snapshot.appSettings, sale.createdAt, `Faktur ${sale.invoiceNo}`);
       if (snapshot.returns.some(entry => entry.originalInvoiceNo === sale.invoiceNo)) {
         throw new Error('Faktur ini sudah memiliki retur — gunakan menu Retur untuk sisa barang.');
       }
@@ -1345,11 +1412,17 @@ const App: React.FC = () => {
         throw new Error('Shift kasir untuk transaksi ini sudah ditutup — gunakan menu Retur.');
       }
       const customer = snapshot.customers.find(entry => entry.id === sale.customerId);
-      if (sale.paymentType === 'KREDIT' && customer && customer.currentDebt < sale.total) {
+      const creditAmount = getSaleCreditAmount(sale);
+      if (creditAmount > 0 && customer && customer.currentDebt < creditAmount) {
         throw new Error('Piutang transaksi ini sudah dibayar sebagian — gunakan menu Retur.');
       }
       const result = voidSaleStock(snapshot.items, sale, currentUser, trimmedReason);
       const now = new Date().toISOString();
+      const balances = applyBalanceChanges(snapshot.customers, [
+        { customerId: sale.customerId, kind: 'DEBT', delta: -creditAmount, referenceNo: sale.invoiceNo, referenceType: 'SALE_VOID' },
+        { customerId: sale.customerId, kind: 'DEPOSIT', delta: getSaleDepositAmount(sale), referenceNo: sale.invoiceNo, referenceType: 'SALE_VOID' },
+        { customerId: sale.customerId, kind: 'POINTS', delta: (sale.pointsUsed || 0) - (sale.pointsEarned || 0), referenceNo: sale.invoiceNo, referenceType: 'SALE_VOID' },
+      ], currentUser);
       return {
         ...snapshot,
         sales: snapshot.sales.map(entry => entry.id === saleId ? {
@@ -1358,21 +1431,67 @@ const App: React.FC = () => {
           voidedAt: now,
           voidedBy: currentUser.name,
           voidReason: trimmedReason,
+          voidLedgerV: LEDGER_VERSION,
           updatedAt: now,
         } : entry),
         items: result.items,
-        customers: snapshot.customers.map(entry => {
-          if (entry.id !== sale.customerId) return entry;
-          const currentDebt = sale.paymentType === 'KREDIT' ? Math.max(0, entry.currentDebt - sale.total) : entry.currentDebt;
-          const rewardPoints = Math.max(0, (entry.rewardPoints || 0) - (sale.pointsEarned || 0) + (sale.pointsUsed || 0));
-          return currentDebt === entry.currentDebt && rewardPoints === (entry.rewardPoints || 0) ? entry : { ...entry, currentDebt, rewardPoints };
-        }),
-        accounts: postReturnAccounts(snapshot.accounts, sale, sale.total),
+        customers: balances.customers,
+        customerLedger: [...balances.entries, ...(snapshot.customerLedger || [])],
+        // WO yang difakturkan lewat transaksi ini kembali ke status SELESAI agar bisa difakturkan ulang.
+        serviceOrders: sale.serviceOrderId
+          ? (snapshot.serviceOrders || []).map(order => (order.id === sale.serviceOrderId ? { ...order, status: 'SELESAI' as const, invoiceNo: undefined, updatedAt: now } : order))
+          : snapshot.serviceOrders,
         inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
         paymentRecords: [result.payment, ...snapshot.paymentRecords],
         auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
     });
+  };
+
+  /**
+   * Proses retur yang disetujui: stok kembali dan dana dikembalikan sesuai cara bayar faktur asal
+   * (kurangi piutang → deposit → bank → tunai). Dipakai saat retur langsung disetujui maupun approval belakangan.
+   */
+  const applyApprovedReturn = (snapshot: AppData, targetReturn: SaleReturn, user: User): AppData => {
+    const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
+    const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, { ...targetReturn, status: 'APPROVED' }, user);
+    const originSale = snapshot.sales.find(sale => sale.invoiceNo === targetReturn.originalInvoiceNo)!;
+    const customer = snapshot.customers.find(entry => entry.id === originSale.customerId);
+    const alreadyRefunded = approvedReturns
+      .filter(entry => entry.originalInvoiceNo === originSale.invoiceNo)
+      .reduce((acc, entry) => {
+        const refund = getReturnRefund(entry, originSale);
+        return { credit: acc.credit + refund.credit, deposit: acc.deposit + refund.deposit, cash: acc.cash + refund.cash, bank: acc.bank + refund.bank };
+      }, { credit: 0, deposit: 0, cash: 0, bank: 0 });
+    const refund = allocateReturnRefund(originSale, targetReturn.totalReturn, { currentDebt: customer?.currentDebt || 0, alreadyRefunded });
+    // Deposit hanya untuk pelanggan terdaftar; jika tidak ada, kembalikan tunai.
+    if (refund.deposit > 0 && !customer) { refund.cash += refund.deposit; refund.deposit = 0; }
+    const refundSession = snapshot.cashSessions.find(session => session.userId === user.id && session.status === 'OPEN');
+    const now = new Date().toISOString();
+    const approved: SaleReturn = {
+      ...targetReturn,
+      status: 'APPROVED',
+      approvedAt: now,
+      approvedBy: user.name,
+      refund,
+      ledgerV: LEDGER_VERSION,
+      cashSessionId: refund.cash > 0 ? refundSession?.id : undefined,
+    };
+    const balances = applyBalanceChanges(snapshot.customers, [
+      { customerId: originSale.customerId, kind: 'DEBT', delta: -refund.credit, referenceNo: targetReturn.returnNo, referenceType: 'RETURN' },
+      { customerId: originSale.customerId, kind: 'DEPOSIT', delta: refund.deposit, referenceNo: targetReturn.returnNo, referenceType: 'RETURN' },
+    ], user);
+    const exists = snapshot.returns.some(entry => entry.id === targetReturn.id);
+    return {
+      ...snapshot,
+      returns: exists ? snapshot.returns.map(entry => (entry.id === targetReturn.id ? approved : entry)) : [approved, ...snapshot.returns],
+      items: result.items,
+      customers: balances.customers,
+      customerLedger: [...balances.entries, ...(snapshot.customerLedger || [])],
+      inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
+      paymentRecords: [result.payment, ...snapshot.paymentRecords],
+      auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
+    };
   };
 
   const addReturn = async (ret: SaleReturn): Promise<SaleReturn> => {
@@ -1402,63 +1521,18 @@ const App: React.FC = () => {
         };
         return { ...snapshot, returns: [preparedReturn, ...snapshot.returns], auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT) };
       }
-      const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
-      const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, preparedReturn, currentUser);
-      const originSale = snapshot.sales.find(sale => sale.invoiceNo === preparedReturn.originalInvoiceNo)!;
-      const refundSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
-      const approvedReturn: SaleReturn = {
-        ...preparedReturn,
-        approvedAt: new Date().toISOString(),
-        approvedBy: currentUser.name,
-        cashSessionId: originSale.paymentType === 'TUNAI' ? refundSession?.id : undefined,
-      };
-      const nextCustomers = originSale.paymentType === 'KREDIT'
-        ? snapshot.customers.map(customer => customer.id === originSale.customerId
-          ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - preparedReturn.totalReturn) }
-          : customer)
-        : snapshot.customers;
-      return {
-        ...snapshot,
-        returns: [approvedReturn, ...snapshot.returns],
-        items: result.items,
-        customers: nextCustomers,
-        accounts: postReturnAccounts(snapshot.accounts, originSale, preparedReturn.totalReturn),
-        inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
-        paymentRecords: [result.payment, ...snapshot.paymentRecords],
-        auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
-      };
+      return applyApprovedReturn(snapshot, preparedReturn, currentUser);
     });
     return next.returns.find(entry => entry.id === ret.id) || preparedReturn;
   };
 
   const approveReturn = async (returnId: string): Promise<void> => {
     if (!currentUser || !hasPermission(currentUser, 'return.approve')) throw new Error('Anda tidak memiliki izin approve retur.');
-        await runInventorySafeMutation((snapshot) => {
-          const targetReturn = snapshot.returns.find(entry => entry.id === returnId);
-          if (!targetReturn || targetReturn.status === 'APPROVED') return snapshot;
-          const approvedReturns = snapshot.returns.filter(entry => entry.status === 'APPROVED');
-          const result = completeReturn(snapshot.items, snapshot.sales, approvedReturns, { ...targetReturn, status: 'APPROVED' }, currentUser);
-          const originSale = snapshot.sales.find(sale => sale.invoiceNo === targetReturn.originalInvoiceNo)!;
-          const refundSession = snapshot.cashSessions.find(session => session.userId === currentUser.id && session.status === 'OPEN');
-          return {
-            ...snapshot,
-            returns: snapshot.returns.map(entry => entry.id === returnId ? {
-              ...entry,
-              status: 'APPROVED' as const,
-              approvedAt: new Date().toISOString(),
-              approvedBy: currentUser.name,
-              cashSessionId: originSale.paymentType === 'TUNAI' ? refundSession?.id : undefined,
-            } : entry),
-            items: result.items,
-            customers: originSale.paymentType === 'KREDIT'
-              ? snapshot.customers.map(customer => customer.id === originSale.customerId ? { ...customer, currentDebt: Math.max(0, customer.currentDebt - targetReturn.totalReturn) } : customer)
-              : snapshot.customers,
-            accounts: postReturnAccounts(snapshot.accounts, originSale, targetReturn.totalReturn),
-            inventoryMovements: [...result.movements, ...snapshot.inventoryMovements],
-            paymentRecords: [result.payment, ...snapshot.paymentRecords],
-            auditLogs: [result.audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
-          };
-        });
+    await runInventorySafeMutation((snapshot) => {
+      const targetReturn = snapshot.returns.find(entry => entry.id === returnId);
+      if (!targetReturn || targetReturn.status === 'APPROVED') return snapshot;
+      return applyApprovedReturn(snapshot, targetReturn, currentUser);
+    });
   };
 
   const addPurchaseOrder = async (po: PurchaseOrder): Promise<void> => {
@@ -1466,11 +1540,11 @@ const App: React.FC = () => {
     await runInventorySafeMutation(snapshot => {
       if (snapshot.purchaseOrders.some(entry => entry.id === po.id)) throw new Error(`PO ${po.id} sudah tersimpan.`);
       if (!Number.isFinite(po.total) || po.total <= 0 || po.items.length === 0 || po.items.some(line => !(line.orderedQty > 0) || !(line.cost >= 0))) throw new Error('Data item PO tidak valid.');
-      const roundedPo = { ...po, subtotal: Math.round(po.subtotal), total: Math.round(po.total) };
+      // Hutang dicatat di buku besar saat barang diterima (bukan saat PO dibuat).
+      const roundedPo = { ...po, subtotal: Math.round(po.subtotal), total: Math.round(po.total), ledgerV: LEDGER_VERSION };
       return {
         ...snapshot,
         purchaseOrders: [roundedPo, ...snapshot.purchaseOrders],
-        accounts: postPurchaseOrderAccounts(snapshot.accounts, roundedPo.total),
         auditLogs: [{
         id: createId('AUD'),
         action: 'PO_CREATED',
@@ -1490,7 +1564,8 @@ const App: React.FC = () => {
     await runInventorySafeMutation(snapshot => {
       const po = snapshot.purchaseOrders.find(item => item.id === poId);
       if (!po) throw new Error('PO tidak ditemukan.');
-      const payableAmount = Math.max(0, po.total - (po.paidAmount || 0));
+      // Sisa hutang memperhitungkan retur beli yang memotong hutang PO ini.
+      const payableAmount = getPurchaseOrderOutstanding(po, snapshot.purchaseReturns || []);
       const paymentAmount = amount && amount > 0 ? Math.min(amount, payableAmount) : payableAmount;
       if (paymentAmount <= 0) throw new Error('PO sudah lunas atau nominal tidak valid.');
       const payment: PaymentRecord = {
@@ -1503,6 +1578,7 @@ const App: React.FC = () => {
         createdAt: new Date().toISOString(),
         operatorName: currentUser.name,
         operatorId: currentUser.id,
+        ledgerV: po.ledgerV ? LEDGER_VERSION : undefined,
       };
       const audit: AuditLog = {
         id: createId('AUD'),
@@ -1520,10 +1596,11 @@ const App: React.FC = () => {
         purchaseOrders: snapshot.purchaseOrders.map(item => item.id === poId ? {
           ...item,
           paidAmount: (item.paidAmount || 0) + paymentAmount,
-          isPaid: ((item.paidAmount || 0) + paymentAmount) >= item.total,
+          isPaid: payableAmount - paymentAmount <= 0,
           paymentNotes: note ? [...(item.paymentNotes || []), note] : item.paymentNotes,
         } : item),
-        accounts: postPurchasePaymentAccounts(snapshot.accounts, paymentAmount, method),
+        // PO versi lama: saldo akun masih dikelola langsung (hutang sudah dicatat saat PO dibuat).
+        accounts: po.ledgerV ? snapshot.accounts : postPurchasePaymentAccounts(snapshot.accounts, paymentAmount, method),
         paymentRecords: [payment, ...snapshot.paymentRecords],
         auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
@@ -1592,7 +1669,11 @@ const App: React.FC = () => {
         customerId,
         cashSessionId: openSession?.id,
         note,
+        ledgerV: LEDGER_VERSION,
       };
+      const balances = applyBalanceChanges(snapshot.customers, [
+        { customerId, kind: 'DEBT', delta: -payAmount, referenceNo: payment.referenceNo, referenceType: 'PAYMENT', method, cashSessionId: openSession?.id },
+      ], currentUser);
       const audit: AuditLog = {
         id: createId('AUD'),
         action: 'CUSTOMER_PAYMENT',
@@ -1606,8 +1687,8 @@ const App: React.FC = () => {
       };
       return {
         ...snapshot,
-        customers: snapshot.customers.map(entry => entry.id === customerId ? { ...entry, currentDebt: entry.currentDebt - payAmount } : entry),
-        accounts: postCustomerPaymentAccounts(snapshot.accounts, payAmount, method),
+        customers: balances.customers,
+        customerLedger: [...balances.entries, ...(snapshot.customerLedger || [])],
         paymentRecords: [payment, ...snapshot.paymentRecords],
         auditLogs: [audit, ...snapshot.auditLogs].slice(0, AUDIT_LOG_LIMIT),
       };
@@ -1672,6 +1753,190 @@ const App: React.FC = () => {
       }
     })();
   };
+
+  // ============================================================ MODE LENGKAP
+  const requireUser = (permission: Parameters<typeof hasPermission>[1], message: string): User => {
+    if (!currentUser || !hasPermission(currentUser, permission)) throw new Error(message);
+    return currentUser;
+  };
+
+  /** Simpan pengaturan toko (mode, tutup buku, margin minimal, sandi modal). Tersinkron ke semua perangkat. */
+  const saveAppSettings = (patch: Partial<AppSettings>): boolean => {
+    if (!currentUser || !hasPermission(currentUser, 'settings.manage')) {
+      alert('Hanya owner/manager yang bisa mengubah pengaturan toko.');
+      return false;
+    }
+    if (patch.lockDate) {
+      const pad = (n: number) => String(n).padStart(2, '0');
+      const now = new Date();
+      const today = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+      if (patch.lockDate >= today) {
+        alert('Tanggal tutup buku harus sebelum hari ini.');
+        return false;
+      }
+    }
+    const current = useAppStore.getState().appSettings;
+    setAppSettings({ mode: 'SIMPLE', ...(current || {}), ...patch } as AppSettings);
+    appendAuditLog({
+      id: createId('AUD'),
+      action: 'SETTINGS_UPDATED',
+      actorId: currentUser.id,
+      actorName: currentUser.name,
+      entityType: 'SETTINGS',
+      details: `Pengaturan toko diubah: ${Object.keys(patch).join(', ')}${patch.mode ? ` (mode ${patch.mode})` : ''}${patch.lockDate !== undefined ? ` (tutup buku s/d ${patch.lockDate || '-'})` : ''}.`,
+      createdAt: new Date().toISOString(),
+    });
+    return true;
+  };
+
+  const handleTopupDeposit = async (customerId: string, amount: number, method: string, note?: string) => {
+    const user = requireUser('sale.create', 'Anda tidak memiliki izin menerima deposit.');
+    await runInventorySafeMutation(snapshot => topupDeposit(snapshot, user, { customerId, amount, method, note }));
+  };
+
+  const handleRefundDeposit = async (customerId: string, amount: number, method: string, note?: string) => {
+    const user = requireUser('accounting.view', 'Pengembalian deposit butuh izin akuntansi.');
+    await runInventorySafeMutation(snapshot => refundDeposit(snapshot, user, { customerId, amount, method, note }));
+  };
+
+  const handleSaveServiceOrder = async (order: ServiceOrder) => {
+    const user = requireUser('sale.create', 'Anda tidak memiliki izin membuat Work Order.');
+    await runInventorySafeMutation(snapshot => saveServiceOrder(snapshot, user, order));
+  };
+
+  const handleServiceOrderDp = async (orderId: string, amount: number, method: string) => {
+    const user = requireUser('sale.create', 'Anda tidak memiliki izin menerima DP.');
+    await runInventorySafeMutation(snapshot => receiveServiceOrderDp(snapshot, user, orderId, amount, method));
+  };
+
+  /** WO yang dikirim ke kasir untuk dibuatkan faktur. */
+  const [posServiceOrder, setPosServiceOrder] = useState<ServiceOrder | null>(null);
+  const sendServiceOrderToPos = (order: ServiceOrder) => {
+    setPosServiceOrder(order);
+    setActiveTab('pos');
+  };
+
+  const handleSaveMechanic = (mechanic: Mechanic) => {
+    if (!hasPermission(currentUser, 'settings.manage')) return alert('Hanya owner/manager yang bisa mengubah data mekanik.');
+    if (!mechanic.name.trim()) return alert('Nama mekanik wajib diisi.');
+    setMechanics(prev => (prev.some(entry => entry.id === mechanic.id) ? prev.map(entry => (entry.id === mechanic.id ? mechanic : entry)) : [...prev, mechanic]));
+  };
+
+  const handlePayCommission = async (mechanicId: string, amount: number, method: string, note?: string) => {
+    const user = requireUser('accounting.view', 'Pembayaran komisi butuh izin akuntansi.');
+    await runInventorySafeMutation(snapshot => payCommission(snapshot, user, { mechanicId, amount, method, note }));
+  };
+
+  const handleSaveWarehouse = (warehouse: Warehouse) => {
+    if (!hasPermission(currentUser, 'stock.adjust')) return alert('Anda tidak memiliki izin mengelola gudang.');
+    if (!warehouse.name.trim()) return alert('Nama gudang wajib diisi.');
+    setWarehouses(prev => (prev.some(entry => entry.id === warehouse.id) ? prev.map(entry => (entry.id === warehouse.id ? warehouse : entry)) : [...prev, warehouse]));
+  };
+
+  const handleTransferStock = async (input: { fromWarehouseId: string; toWarehouseId: string; items: StockTransfer['items']; note?: string }) => {
+    const user = requireUser('stock.adjust', 'Anda tidak memiliki izin memindahkan stok.');
+    await runInventorySafeMutation(snapshot => transferStockOp(snapshot, user, input));
+  };
+
+  const handlePurchaseReturn = async (input: Omit<PurchaseReturn, 'id' | 'returnNo' | 'total' | 'createdAt' | 'operatorName' | 'operatorId'>) => {
+    const user = requireUser('purchase.create', 'Anda tidak memiliki izin membuat retur pembelian.');
+    await runInventorySafeMutation(snapshot => createPurchaseReturn(snapshot, user, input));
+  };
+
+  const handleSavePromotion = (promo: PromotionCampaign) => {
+    if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengatur promo.');
+    setPromotions(prev => (prev.some(entry => entry.id === promo.id) ? prev.map(entry => (entry.id === promo.id ? promo : entry)) : [promo, ...prev]));
+  };
+
+  const handleDeletePromotion = (id: string) => {
+    if (!hasPermission(currentUser, 'item.edit')) return alert('Anda tidak memiliki izin mengatur promo.');
+    setPromotions(prev => prev.filter(entry => entry.id !== id));
+    recordDeletion('promotions', [id]);
+  };
+
+  const handlePostJournal = async (input: { date: string; description: string; lines: JournalLine[] }) => {
+    const user = requireUser('accounting.view', 'Anda tidak memiliki izin membuat jurnal.');
+    await runInventorySafeMutation(snapshot => postManualJournal(snapshot, user, input));
+  };
+
+  const handleHoldCart = (cart: HeldCart) => {
+    if (!hasPermission(currentUser, 'sale.create')) return alert('Anda tidak memiliki izin menahan transaksi.');
+    setHeldCarts(prev => [cart, ...prev.filter(entry => entry.id !== cart.id)]);
+  };
+
+  const handleDeleteHeldCart = (id: string) => {
+    setHeldCarts(prev => prev.filter(entry => entry.id !== id));
+    recordDeletion('heldCarts', [id]);
+  };
+
+  /** Import pelanggan/supplier hasil migrasi. Nama yang sudah ada dilewati. */
+  const handleImportContacts = (newCustomers: Customer[], newSuppliers: Supplier[]) => {
+    if (!hasPermission(currentUser, 'contact.create')) {
+      alert('Anda tidak memiliki izin menambah kontak.');
+      return { customers: 0, suppliers: 0 };
+    }
+    const state = useAppStore.getState();
+    const customerNames = new Set(state.customers.map(entry => entry.name.trim().toLowerCase()));
+    const supplierNames = new Set(state.suppliers.map(entry => entry.name.trim().toLowerCase()));
+    const freshCustomers = newCustomers.filter(entry => {
+      const key = entry.name.trim().toLowerCase();
+      if (customerNames.has(key)) return false;
+      customerNames.add(key);
+      return true;
+    });
+    const freshSuppliers = newSuppliers.filter(entry => {
+      const key = entry.name.trim().toLowerCase();
+      if (supplierNames.has(key)) return false;
+      supplierNames.add(key);
+      return true;
+    });
+    if (freshCustomers.length) setCustomers(prev => [...prev, ...freshCustomers]);
+    if (freshSuppliers.length) setSuppliers(prev => [...prev, ...freshSuppliers]);
+    return { customers: freshCustomers.length, suppliers: freshSuppliers.length };
+  };
+
+  const handleImportOpeningReceivables = async (rows: Array<{ customerName: string; amount: number }>) => {
+    const user = requireUser('accounting.view', 'Import saldo awal piutang butuh izin akuntansi.');
+    let summary = { applied: 0, missing: [] as string[] };
+    await runInventorySafeMutation(snapshot => {
+      const result = importOpeningReceivables(snapshot, user, rows);
+      summary = { applied: result.applied, missing: result.missing };
+      return result.data;
+    });
+    return summary;
+  };
+
+  /** Buku besar diturunkan dari dokumen transaksi — saldo akun yang ditampilkan di semua halaman. */
+  const journals = useMemo(() => buildJournals({
+    sales, returns, purchaseOrders, inventoryMovements, paymentRecords, cashExpenses,
+    customerLedger, commissionPayments, purchaseReturns, manualJournals,
+  }), [sales, returns, purchaseOrders, inventoryMovements, paymentRecords, cashExpenses, customerLedger, commissionPayments, purchaseReturns, manualJournals]);
+  const ledgerAccounts = useMemo(() => computeAccountBalances(accounts, journals), [accounts, journals]);
+
+  // Lengkapi bagan akun (Persediaan, Deposit, Modal, HPP, ...) sekali setelah data dimuat.
+  useEffect(() => {
+    if (!isDataLoaded) return;
+    const state = useAppStore.getState();
+    const ensured = ensureLedgerAccounts(state.accounts, state.items);
+    if (ensured !== state.accounts) setAccounts(ensured);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isDataLoaded, accounts.length]);
+
+  // Backup otomatis per perangkat (mode Lengkap).
+  useEffect(() => {
+    if (!isDataLoaded || !isFullMode) return;
+    const tick = async () => {
+      if (!isBackupDue(getAutoBackupConfig())) return;
+      try {
+        await runBackup(buildDataSnapshot());
+      } catch (error) {
+        console.warn('[AutoBackup] gagal:', error);
+      }
+    };
+    void tick();
+    const timer = setInterval(() => { void tick(); }, 5 * 60_000);
+    return () => clearInterval(timer);
+  }, [isDataLoaded, isFullMode, buildDataSnapshot]);
 
   // Transaksi yang di-void tidak dihitung di omzet, laporan, pajak, maupun AI.
   const activeSales = sales.filter(sale => sale.status !== 'VOID');
@@ -1776,28 +2041,35 @@ const App: React.FC = () => {
 
   const renderContent = () => {
     if (!currentUser) return null;
-    if (!canAccessTab(currentUser, activeTab)) {
+    if (!canAccessTab(currentUser, activeTab, appMode)) {
        return (
          <div className="h-full flex flex-col items-center justify-center p-10 text-center space-y-6 animate-in fade-in duration-500">
            <div className="w-24 h-24 bg-red-50 text-red-500 rounded-full flex items-center justify-center shadow-inner border-4 border-red-100"><Lock size={48} /></div>
            <div><h2 className="text-2xl font-black text-slate-900 uppercase tracking-tighter">Akses Ditolak</h2><p className="text-slate-400 font-bold text-xs uppercase tracking-widest mt-2 max-w-xs mx-auto">Anda tidak memiliki izin akses untuk modul ini. Hubungi Manager untuk bantuan.</p></div>
-           <button onClick={() => setActiveTab(getAccessibleTabs(currentUser)[0] || 'dashboard')} className="px-8 py-4 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl active:scale-95 border-b-4 border-slate-950">Kembali ke Beranda</button>
+           <button onClick={() => setActiveTab(getAccessibleTabs(currentUser, appMode)[0] || 'dashboard')} className="px-8 py-4 bg-slate-900 text-white rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl active:scale-95 border-b-4 border-slate-950">Kembali ke Beranda</button>
          </div>
        );
     }
 
     switch (activeTab) {
-      case 'settings': return <Settings cloudAuthRequired={cloudAuthRequired} onCloudConnected={handleCloudConnected} onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile} />;
-      case 'dashboard': return <Dashboard items={items} sales={activeSales} customers={customers} accounts={accounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
-      case 'master-items': return <MasterData type="items" items={items} priceHistory={priceHistory} onAddItem={addItem} onImportItems={importItems} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onAdjustStockBulk={canAdjustStock ? handleStockAdjustmentBulk : undefined} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} />;
-      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} />;
-      case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} cashSessions={cashSessions} storeProfile={storeProfile} onCompleteSale={addSale} onNavigate={setActiveTab} />;
+      case 'settings': return <Settings cloudAuthRequired={cloudAuthRequired} onCloudConnected={handleCloudConnected} onCloudConfigChange={() => { setIsCloudActive(hasCloudConfig()); setSavedDbs(getCloudProfiles()); }} onExportBackup={exportBackup} onImportBackup={importBackup} storeProfile={storeProfile} onSaveStoreProfile={setStoreProfile}
+        appSettings={appSettings} onSaveAppSettings={saveAppSettings} getSnapshot={buildDataSnapshot}
+        onImportItems={hasPermission(currentUser, 'item.create') ? importItems : undefined}
+        onImportContacts={hasPermission(currentUser, 'contact.create') ? handleImportContacts : undefined}
+        onImportOpeningReceivables={hasPermission(currentUser, 'accounting.view') ? handleImportOpeningReceivables : undefined} />;
+      case 'dashboard': return <Dashboard items={items} sales={activeSales} customers={customers} accounts={ledgerAccounts} purchaseOrders={purchaseOrders} inventoryMovements={inventoryMovements} cashSessions={cashSessions} currentUser={currentUser} onOpenCashSession={openCashSession} onCloseCashSession={closeCashSession} onNavigate={setActiveTab} />;
+      case 'master-items': return <MasterData type="items" items={items} priceHistory={priceHistory} onAddItem={addItem} onImportItems={importItems} onUpdateItem={updateItem} onUpdateItemsBulk={updateItemsBulk} onAdjustStockBulk={canAdjustStock ? handleStockAdjustmentBulk : undefined} onDeleteItem={deleteItem} onManualPush={handleManualPush} onRefresh={() => handleManualRefresh(true)} isSyncing={isSyncing} canCreate={hasPermission(currentUser, 'item.create')} canEdit={hasPermission(currentUser, 'item.edit')} canDelete={hasPermission(currentUser, 'item.delete')} isFullMode={isFullMode} appSettings={appSettings} warehouses={warehouses} />;
+      case 'master-contacts': return <MasterData type="contacts" customers={customers} suppliers={suppliers} onAddCustomer={addCustomer} onUpdateCustomer={updateCustomer} onAddSupplier={addSupplier} onUpdateSupplier={updateSupplier} onDeleteCustomer={deleteCustomer} onDeleteSupplier={deleteSupplier} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} canCreate={hasPermission(currentUser, 'contact.create')} canEdit={hasPermission(currentUser, 'contact.edit')} canDelete={hasPermission(currentUser, 'contact.delete')} isFullMode={isFullMode} />;
+      case 'pos': return <SalesPOS currentUser={currentUser} items={items} customers={customers} promotions={promotions} cashSessions={cashSessions} storeProfile={storeProfile} onCompleteSale={addSale} onNavigate={setActiveTab}
+        isFullMode={isFullMode} appSettings={appSettings} mechanics={mechanics} heldCarts={heldCarts} onHoldCart={handleHoldCart} onDeleteHeldCart={handleDeleteHeldCart}
+        serviceOrder={posServiceOrder} onServiceOrderConsumed={() => setPosServiceOrder(null)} />;
       case 'sales-list': return <SalesList sales={sales} storeProfile={storeProfile} onVoidSale={hasPermission(currentUser, 'sale.void') ? voidSale : undefined} onInitiateReturn={(invNo) => { setPreselectedReturnInvoice(invNo); setActiveTab('returns'); }} />;
       case 'returns': return <Returns sales={activeSales}  returns={returns} onCompleteReturn={addReturn} onApproveReturn={approveReturn} currentUser={currentUser} preselectedInvoiceNo={preselectedReturnInvoice} />;
-      case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} onUpdateItemsBulk={hasPermission(currentUser, 'item.edit') ? updateItemsBulk : undefined} currentUser={currentUser} />;
+      case 'purchasing': return <Purchasing purchaseOrders={purchaseOrders} suppliers={suppliers} items={items} onAddPO={addPurchaseOrder} onReceivePO={receivePurchaseOrder} onPayPO={payPurchaseOrder} onUpdateItemsBulk={hasPermission(currentUser, 'item.edit') ? updateItemsBulk : undefined} currentUser={currentUser}
+        isFullMode={isFullMode} warehouses={warehouses} purchaseReturns={purchaseReturns} />;
       case 'stock-opname': return <Inventory items={items} logs={inventoryLogs} movements={inventoryMovements} onAdjustStock={handleStockAdjustment} onAdjustStockBulk={handleStockAdjustmentBulk} canAdjust={canAdjustStock} />;
-      case 'accounting': return <Accounting accounts={accounts} sales={activeSales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
-      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={accounts} sales={activeSales} returns={returns} purchaseOrders={purchaseOrders} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
+      case 'accounting': return <Accounting accounts={ledgerAccounts} sales={activeSales} cashSessions={cashSessions} cashExpenses={cashExpenses} currentUser={currentUser} onAddCashExpense={addCashExpense} onDeleteCashExpense={deleteCashExpense} />;
+      case 'reporting': return <Reporting items={items} customers={customers} suppliers={suppliers} accounts={ledgerAccounts} sales={activeSales} returns={returns} purchaseOrders={purchaseOrders} onReceiveCustomerPayment={(hasPermission(currentUser, 'sale.create') || hasPermission(currentUser, 'accounting.view')) ? receiveCustomerPayment : undefined} onAnalyzeWithAI={() => setActiveTab('ai-consultant')} />;
       case 'media-vault': return (
         <MediaVault
           currentUser={currentUser}
@@ -1820,12 +2092,33 @@ const App: React.FC = () => {
           onNavigate={setActiveTab}
         />
       );
+      // ---------------- Mode Lengkap
+      case 'service-orders': return <ServiceOrders orders={serviceOrders} customers={customers} items={items} mechanics={mechanics} currentUser={currentUser}
+        onSave={handleSaveServiceOrder} onReceiveDp={handleServiceOrderDp} onSendToPos={sendServiceOrderToPos} />;
+      case 'deposits': return <Deposits customers={customers} ledger={customerLedger} onTopup={handleTopupDeposit}
+        onRefund={hasPermission(currentUser, 'accounting.view') ? handleRefundDeposit : undefined} />;
+      case 'mechanics': return <Mechanics mechanics={mechanics} sales={activeSales} returns={returns} payments={commissionPayments} appSettings={appSettings}
+        onSaveMechanic={hasPermission(currentUser, 'settings.manage') ? handleSaveMechanic : undefined}
+        onPayCommission={hasPermission(currentUser, 'accounting.view') ? handlePayCommission : undefined} />;
+      case 'warehouses': return <Warehouses warehouses={warehouses} items={items} transfers={stockTransfers}
+        onSaveWarehouse={hasPermission(currentUser, 'stock.adjust') ? handleSaveWarehouse : undefined}
+        onTransfer={hasPermission(currentUser, 'stock.adjust') ? handleTransferStock : undefined} />;
+      case 'purchase-returns': return <PurchaseReturns suppliers={suppliers} items={items} purchaseOrders={purchaseOrders} purchaseReturns={purchaseReturns} warehouses={warehouses}
+        onCreate={hasPermission(currentUser, 'purchase.create') ? handlePurchaseReturn : undefined} />;
+      case 'promotions': return <Promotions promotions={promotions} items={items} currentUser={currentUser}
+        onSave={hasPermission(currentUser, 'item.edit') ? handleSavePromotion : undefined}
+        onDelete={hasPermission(currentUser, 'item.edit') ? handleDeletePromotion : undefined} />;
+      case 'ledger': return <Ledger accounts={accounts} journals={journals} appSettings={appSettings}
+        onPostJournal={handlePostJournal}
+        onSaveAppSettings={hasPermission(currentUser, 'settings.manage') ? saveAppSettings : undefined} />;
+      case 'advanced-reports': return <AdvancedReports items={items} sales={activeSales} returns={returns} movements={inventoryMovements}
+        purchaseOrders={purchaseOrders} suppliers={suppliers} mechanics={mechanics} warehouses={warehouses} />;
       case 'user-management': return <UserManagement users={users} onAddUser={addUser} onUpdateUser={updateUser} onDeleteUser={deleteUser} canManage={hasPermission(currentUser, 'user.manage')} />;
       case 'ai-consultant': return (
         <AIConsultant
           items={items}
           sales={activeSales}
-          accounts={accounts}
+          accounts={ledgerAccounts}
           messages={aiConsultantHistory}
           onUpdateMessages={setAiConsultantHistory}
           onApplyPriceUpdates={applyAIPriceUpdates}
@@ -1845,7 +2138,7 @@ const App: React.FC = () => {
   };
 
   return (
-    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={activeSales} accounts={accounts} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError} cloudAuthRequired={cloudAuthRequired}>
+    <Layout activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} onLogout={handleLogout} items={items} sales={activeSales} accounts={ledgerAccounts} isFullMode={isFullMode} floatingMessages={floatingChatHistory} onUpdateMessages={setFloatingChatHistory} isSyncing={isSyncing} onManualSync={() => handleManualRefresh(true)} lastSyncTime={lastSyncTime} syncError={syncError} cloudAuthRequired={cloudAuthRequired}>
       <ErrorBoundary key={activeTab} fallbackTitle="Halaman ini">
         <Suspense fallback={<PageLoadingFallback />}>
           {renderContent()}

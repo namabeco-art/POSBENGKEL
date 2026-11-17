@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockAccounts, mockBranches, mockCustomers, mockItems, mockPromotions, mockSuppliers, mockUsers } from '../store';
 import type { AppData, Item } from '../types';
+import { buildJournals, computeAccountBalances } from '../services/ledger';
 
 /**
  * Simulasi satu hari operasional toko:
@@ -151,9 +152,14 @@ test('simulasi satu hari operasional toko', async ({ page }) => {
   expect(closed.expectedCash).toBe(253000);
   expect(closed.shortageOrOverage).toBe(0);
 
-  const balance = (code: string) => data.accounts.find(account => account.code === code)!.balance;
+  // Saldo akun = saldo awal + jurnal otomatis dari dokumen transaksi (sama seperti yang ditampilkan aplikasi).
+  const ledger = computeAccountBalances(data.accounts, buildJournals(data));
+  const balance = (code: string) => ledger.find(account => account.code === code)!.balance;
   expect(balance('1-1000')).toBe(5_000_000 + 110_000 + 43_000); // Kas Toko
   expect(balance('1-1200')).toBe(0); // Piutang lunas
-  expect(balance('2-1100')).toBe(500_000); // Hutang supplier dari PO
+  expect(balance('2-1100')).toBe(500_000); // Hutang supplier dari penerimaan PO
   expect(balance('4-1100')).toBe(110_000 + 43_000); // Penjualan
+  expect(balance('1-1300')).toBe(data.accounts.find(account => account.code === '1-1300')!.balance + 500_000 - 2 * 45_000 - 35_000); // Persediaan: + PO - HPP 2 oli & 1 kampas
+  const sum = (type: string) => ledger.filter(account => account.type === type).reduce((total, account) => total + account.balance, 0);
+  expect(sum('ASSET')).toBe(sum('LIABILITY') + sum('EQUITY') + sum('INCOME') - sum('EXPENSE')); // neraca seimbang
 });

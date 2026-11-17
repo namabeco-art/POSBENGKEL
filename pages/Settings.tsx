@@ -5,12 +5,14 @@ import {
   HardDrive, ExternalLink, BookOpen, Wifi, WifiOff, Shield,
   ChevronDown, Copy, Download, Upload
 } from 'lucide-react';
-import { getEnvConfig, getResolvedOpenRouterApiKey, getResolvedOpenRouterModel, getResolvedSupabaseAnonKey, getResolvedSupabaseBucket, getResolvedSupabaseUrl, hasEnvCloudConfig, isRuntimeSettingsAllowed } from '../services/appConfig';
-import { 
-  getCloudConfig, saveCloudConfig, smartTestConnection, pushConfigToCloud
-} from '../services/syncService';
+import { CLOUD_AI_PROXY_KEY, getEnvConfig, getResolvedOpenRouterApiKey, getResolvedOpenRouterModel, hasEnvCloudConfig, isRuntimeSettingsAllowed } from '../services/appConfig';
+import { generateActivationCodeForConfig, getCloudConfig, saveCloudConfig, testCloudConnection } from '../services/syncService';
+import { isValidStoreId, normalizeStoreId } from '../services/cloudAuth';
 import { parseOpenRouterError, requestOpenRouterReply } from '../services/aiService';
-import { StoreProfile } from '../types';
+import { AppData, AppSettings, Customer, Item, StoreProfile, Supplier } from '../types';
+import ModeSettingsPanel from '../components/settings/ModeSettingsPanel';
+import IposImportPanel from '../components/settings/IposImportPanel';
+import AutoBackupPanel from '../components/settings/AutoBackupPanel';
 import { isThermalPrinterEnabled, isWebSerialSupported, setThermalPrinterEnabled } from '../services/thermalPrinterService';
 import CloudConnectPanel from '../components/CloudConnectPanel';
 
@@ -22,9 +24,20 @@ interface SettingsProps {
   onSaveStoreProfile?: (profile: StoreProfile) => void;
   cloudAuthRequired?: boolean;
   onCloudConnected?: () => void | Promise<void>;
+  // ---- Mode aplikasi & fitur mode Lengkap
+  appSettings?: AppSettings;
+  onSaveAppSettings?: (patch: Partial<AppSettings>) => boolean;
+  getSnapshot?: () => AppData;
+  onImportItems?: (rows: Item[]) => { added: number; updated: number; errors: string[] };
+  onImportContacts?: (customers: Customer[], suppliers: Supplier[]) => { customers: number; suppliers: number };
+  onImportOpeningReceivables?: (rows: Array<{ customerName: string; amount: number }>) => Promise<{ applied: number; missing: string[] }>;
 }
 
-const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup, onImportBackup, storeProfile, onSaveStoreProfile, cloudAuthRequired = false, onCloudConnected }) => {
+const Settings: React.FC<SettingsProps> = ({
+  onCloudConfigChange, onExportBackup, onImportBackup, storeProfile, onSaveStoreProfile, cloudAuthRequired = false, onCloudConnected,
+  appSettings, onSaveAppSettings, getSnapshot, onImportItems, onImportContacts, onImportOpeningReceivables,
+}) => {
+  const isFullMode = appSettings?.mode === 'LENGKAP';
   const [profileForm, setProfileForm] = useState<StoreProfile>({
     name: storeProfile?.name || '',
     address: storeProfile?.address || '',
@@ -49,7 +62,6 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
   const [aiStatus, setAiStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [cloudStatus, setCloudStatus] = useState<'idle' | 'testing' | 'connected' | 'error'>('idle');
   const [isSaving, setIsSaving] = useState(false);
-  const [showAdvanced, setShowAdvanced] = useState(false);
   const [showTutorial, setShowTutorial] = useState<'none' | 'ai' | 'cloud' | 'deploy'>('none');
   const [logs, setLogs] = useState<{ time: string; msg: string; type: 'info' | 'ok' | 'err' }[]>([]);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -62,17 +74,14 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
 
   // Auto-detect status on load
   const hasAiKey = Boolean(getResolvedOpenRouterApiKey(cloudConfig.openRouterApiKey)?.trim());
-  const hasCloudDb = Boolean(
-    (cloudConfig.supabaseUrl || cloudConfig.url) && 
-    (cloudConfig.supabaseAnonKey || cloudConfig.token) && 
-    cloudConfig.storeId
-  );
+  const storeIdDraft = normalizeStoreId(cloudConfig.storeId || '');
+  const hasCloudDb = isValidStoreId(storeIdDraft);
   const isEnvManaged = hasEnvCloudConfig();
 
   useEffect(() => {
     addLog('Halaman pengaturan dimuat', 'info');
-    if (hasAiKey) addLog('API Key OpenRouter terdeteksi', 'ok');
-    if (isEnvManaged) addLog('Konfigurasi dari .env server aktif', 'ok');
+    if (hasAiKey) addLog(getResolvedOpenRouterApiKey(cloudConfig.openRouterApiKey) === CLOUD_AI_PROXY_KEY ? 'AI memakai proxy server Cloudflare' : 'API Key OpenRouter terdeteksi', 'ok');
+    if (isEnvManaged) addLog('Toko ditetapkan dari env build', 'ok');
     if (hasCloudDb && cloudConfig.enabled) {
       addLog('Menguji koneksi cloud...', 'info');
       handleTestCloud();
@@ -86,8 +95,8 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
     setAiStatus('testing');
     addLog(`Tes OpenRouter (model: ${resolvedModel})...`, 'info');
     try {
-      const persistedDraft = { ...getCloudConfig(), ...cloudConfig, openRouterApiKey: resolvedApiKey, aiModel: resolvedModel };
-      saveCloudConfig(persistedDraft);
+      // Simpan nilai yang diketik (bukan penanda proxy) agar tidak terkunci ke proxy.
+      saveCloudConfig({ ...getCloudConfig(), ...cloudConfig, openRouterApiKey: cloudConfig.openRouterApiKey || '', aiModel: cloudConfig.aiModel || '' });
       if (onCloudConfigChange) onCloudConfigChange();
       await requestOpenRouterReply({ apiKey: resolvedApiKey, userMessage: 'Balas hanya: OK', systemPrompt: 'Connectivity check.', primaryModel: resolvedModel, appName: 'POSHULIO' });
       setAiStatus('connected');
@@ -99,28 +108,28 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
   };
 
   const handleTestCloud = async () => {
-    const url = (cloudConfig.supabaseUrl || cloudConfig.url || '').trim();
-    const key = (cloudConfig.supabaseAnonKey || cloudConfig.token || '').trim();
-    if (!url || !key) { setCloudStatus('error'); addLog('URL atau Key Supabase kosong', 'err'); return; }
     setCloudStatus('testing');
-    addLog(`Tes koneksi ke ${url.slice(0, 30)}...`, 'info');
-    const result = await smartTestConnection(url, key);
+    addLog('Tes koneksi ke server cloud Cloudflare...', 'info');
+    const result = await testCloudConnection((cloudConfig.apiBaseUrl || '').trim());
     if (result.success) {
       setCloudStatus('connected');
-      addLog('Supabase terhubung — cloud sync aktif', 'ok');
+      addLog(`${result.message}${result.ai ? ' Proxy AI server tersedia.' : ''}`, 'ok');
     } else {
       setCloudStatus('error');
-      addLog(`Supabase gagal: ${result.message}`, 'err');
+      addLog(`Cloud gagal: ${result.message}`, 'err');
     }
   };
 
   const handleSave = async () => {
+    if (cloudConfig.enabled && !hasCloudDb) {
+      alert('Store ID hanya huruf kecil, angka, - atau _ (3–64 karakter).');
+      return;
+    }
     setIsSaving(true);
     addLog('Menyimpan pengaturan...', 'info');
     try {
-      const finalConfig = { ...cloudConfig, supabaseUrl: cloudConfig.supabaseUrl || cloudConfig.url || '', supabaseAnonKey: cloudConfig.supabaseAnonKey || cloudConfig.token || '', supabaseBucket: cloudConfig.supabaseBucket || 'erp-media', enabled: hasCloudDb };
-      saveCloudConfig(finalConfig);
-      if (hasCloudDb) await pushConfigToCloud(finalConfig).catch(() => {});
+      saveCloudConfig({ ...cloudConfig, storeId: storeIdDraft, enabled: Boolean(cloudConfig.enabled) && hasCloudDb });
+      setCloudConfig(getCloudConfig());
       if (onCloudConfigChange) onCloudConfigChange();
       addLog('Pengaturan berhasil disimpan', 'ok');
       alert('Pengaturan berhasil disimpan!');
@@ -165,13 +174,16 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
         )}
       </div>
 
+      {/* Mode aplikasi: Simple / Lengkap */}
+      <ModeSettingsPanel appSettings={appSettings} onSave={onSaveAppSettings} />
+
       {/* Keamanan cloud: login perangkat ke akun cloud toko */}
-      {hasCloudDb && cloudConfig.enabled && (
+      {hasCloudDb && getCloudConfig().enabled && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-3">
           <div>
             <h3 className="text-sm font-bold text-slate-800">Keamanan Cloud</h3>
             <p className="text-xs text-slate-400 mt-0.5">
-              Setelah menjalankan <code>supabase/setup.sql</code>, data toko hanya bisa dibaca perangkat yang login dengan akun cloud toko. Lihat README bagian "Mengamankan Cloud".
+              Data toko di Cloudflare hanya bisa dibaca/ditulis perangkat yang login dengan akun cloud toko. Jika perangkat hilang, ganti password — semua perangkat lain otomatis keluar.
             </p>
           </div>
           <CloudConnectPanel authRequired={cloudAuthRequired} onConnected={onCloudConnected} />
@@ -279,88 +291,79 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
         </div>
       </div>
 
-      {/* Section 2: Cloud Sync */}
+      {/* Section 2: Cloud Sync (Cloudflare) */}
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
         <div className="p-6 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className={`p-2 rounded-xl ${hasCloudDb ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
-              {hasCloudDb ? <Wifi size={20}/> : <WifiOff size={20}/>}
+            <div className={`p-2 rounded-xl ${hasCloudDb && cloudConfig.enabled ? 'bg-emerald-100 text-emerald-600' : 'bg-slate-100 text-slate-400'}`}>
+              {hasCloudDb && cloudConfig.enabled ? <Wifi size={20}/> : <WifiOff size={20}/>}
             </div>
             <div>
-              <h3 className="text-sm font-bold text-slate-800">Cloud Sync</h3>
+              <h3 className="text-sm font-bold text-slate-800">Cloud Sync (Cloudflare)</h3>
               <p className="text-xs text-slate-400 mt-0.5">
-                {isEnvManaged ? 'Dikelola dari file .env server' : hasCloudDb ? 'Data tersinkron antar perangkat' : 'Opsional — untuk sinkron data antar komputer/tablet'}
+                {isEnvManaged ? 'Toko ditetapkan dari env build' : hasCloudDb && cloudConfig.enabled ? 'Data tersinkron antar perangkat' : 'Opsional — untuk sinkron data antar komputer/tablet'}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {hasCloudDb && cloudStatus !== 'connected' && (
-              <button onClick={handleTestCloud} className="px-3 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100">
-                {cloudStatus === 'testing' ? <RefreshCw size={14} className="animate-spin" /> : 'Tes'}
-              </button>
-            )}
+            <button onClick={handleTestCloud} className="px-3 py-1.5 text-xs font-bold text-blue-600 bg-blue-50 rounded-lg hover:bg-blue-100">
+              {cloudStatus === 'testing' ? <RefreshCw size={14} className="animate-spin" /> : 'Tes'}
+            </button>
             {cloudStatus === 'connected' && <CheckCircle2 size={18} className="text-emerald-500" />}
-            <button onClick={() => setShowTutorial(showTutorial === 'cloud' ? 'none' : 'cloud')} className="p-2 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-50">
+            <button onClick={() => setShowTutorial(showTutorial === 'cloud' ? 'none' : 'cloud')} className="p-2 text-slate-400 hover:text-blue-600 rounded-lg hover:bg-slate-50" aria-label="Panduan cloud sync">
               <HelpCircle size={16} />
             </button>
           </div>
         </div>
 
         {showTutorial === 'cloud' && (
-          <div className="px-6 pb-4 space-y-3">
+          <div className="px-6 pb-4">
             <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 space-y-3">
-              <h4 className="text-xs font-bold text-blue-800 flex items-center gap-2"><BookOpen size={14}/> Kapan Perlu Cloud Sync?</h4>
-              <p className="text-xs text-blue-700 leading-relaxed">Cloud sync berguna jika Anda punya 2+ perangkat (misal: komputer kasir + laptop belakang) yang perlu data sama.</p>
+              <h4 className="text-xs font-bold text-blue-800 flex items-center gap-2"><BookOpen size={14}/> Cara Pakai Cloud Sync</h4>
               <ol className="text-xs text-blue-700 space-y-2 list-decimal list-inside leading-relaxed">
-                <li>Buka <a href="https://supabase.com" target="_blank" rel="noreferrer" className="underline font-bold">supabase.com</a> → daftar gratis</li>
-                <li>Buat project baru (pilih region Singapore untuk Indonesia)</li>
-                <li>Buka Settings → API → copy <b>Project URL</b> dan <b>anon public key</b></li>
-                <li>Buka Storage → buat bucket bernama <b>erp-media</b> (set public)</li>
-                <li>Paste URL dan Key di kolom bawah → klik Simpan</li>
+                <li>Isi <b>Store ID</b> unik untuk toko (mis. <code>bengkel_jaya</code>), centang <b>Aktifkan</b>, lalu Simpan.</li>
+                <li>Perangkat pertama (owner): <b>Daftarkan toko baru</b> di panel Keamanan Cloud memakai kode pendaftaran dari pemilik server.</li>
+                <li>Perangkat lain: isi Store ID yang sama (atau tempel kode aktivasi), lalu <b>Login perangkat</b> dengan email & password cloud toko.</li>
               </ol>
-              <p className="text-xs text-blue-500 italic">Supabase free tier: 500MB database + 1GB storage. Cukup untuk bengkel kecil-menengah.</p>
-            </div>
-            <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 space-y-2">
-              <h4 className="text-xs font-bold text-amber-800">⚡ Perbedaan: Isi di sini vs di .env (Vercel/VPS)</h4>
-              <div className="text-xs text-amber-700 leading-relaxed space-y-1.5">
-                <p><b>• Isi di halaman ini</b> → untuk pakai lokal (npm run dev di komputer toko). Data disimpan di browser.</p>
-                <p><b>• Isi di .env / Vercel Environment Variables</b> → untuk deploy online. Tidak perlu isi di halaman ini karena sistem otomatis baca dari server.</p>
-                <p className="text-amber-600 italic pt-1">Kalau sudah deploy ke Vercel dengan env variables, bagian ini bisa diabaikan — checklist "Env Server (.env)" di atas akan hijau otomatis.</p>
-              </div>
+              <p className="text-xs text-blue-500 italic">Data tersimpan di Cloudflare (Durable Object per toko) dan tetap bisa dipakai offline — sinkron otomatis saat online.</p>
             </div>
           </div>
         )}
 
-        {!isEnvManaged && (
+        {!isEnvManaged ? (
           <div className="px-6 pb-6 space-y-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-500">Store ID <span className="text-slate-300 font-normal">(nama unik toko)</span></label>
-                <input className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="bengkel_saya" value={cloudConfig.storeId || ''} onChange={(e) => setCloudConfig({...cloudConfig, storeId: e.target.value.toLowerCase().replace(/\s+/g, '_')})} />
+                <label className="text-xs font-bold text-slate-500" htmlFor="cloud-store-id">Store ID <span className="text-slate-300 font-normal">(nama unik toko)</span></label>
+                <input id="cloud-store-id" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="bengkel_saya" value={cloudConfig.storeId || ''} onChange={(e) => setCloudConfig({...cloudConfig, storeId: e.target.value.toLowerCase().replace(/\s+/g, '_')})} />
               </div>
               <div className="space-y-2">
-                <label className="text-xs font-bold text-slate-500">Supabase Bucket <span className="text-slate-300 font-normal">(biarkan default)</span></label>
-                <input className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="erp-media" value={(cloudConfig as any).supabaseBucket || 'erp-media'} onChange={(e) => setCloudConfig({...cloudConfig, supabaseBucket: e.target.value})} />
+                <label className="text-xs font-bold text-slate-500" htmlFor="cloud-display-name">Nama tampilan <span className="text-slate-300 font-normal">(opsional)</span></label>
+                <input id="cloud-display-name" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="Bengkel Jaya Pusat" value={cloudConfig.displayName || ''} onChange={(e) => setCloudConfig({...cloudConfig, displayName: e.target.value})} />
               </div>
             </div>
             <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500">Supabase URL <span className="text-slate-300 font-normal">(dari Settings → API di Supabase)</span></label>
-              <input className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="https://xxxxx.supabase.co" value={cloudConfig.supabaseUrl || cloudConfig.url || ''} onChange={(e) => setCloudConfig({...cloudConfig, supabaseUrl: e.target.value})} />
+              <label className="text-xs font-bold text-slate-500" htmlFor="cloud-api-url">Alamat API <span className="text-slate-300 font-normal">(kosongkan bila aplikasi dibuka dari domain Cloudflare-nya sendiri)</span></label>
+              <input id="cloud-api-url" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="https://poshulio.namaanda.workers.dev" value={cloudConfig.apiBaseUrl || ''} onChange={(e) => setCloudConfig({...cloudConfig, apiBaseUrl: e.target.value.trim()})} />
             </div>
-            <div className="space-y-2">
-              <label className="text-xs font-bold text-slate-500">Supabase Anon Key <span className="text-slate-300 font-normal">(dari Settings → API di Supabase)</span></label>
-              <input type="password" className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm font-medium focus:border-blue-500 outline-none" placeholder="eyJhbGciOiJIUzI1NiIs..." value={cloudConfig.supabaseAnonKey || cloudConfig.token || ''} onChange={(e) => setCloudConfig({...cloudConfig, supabaseAnonKey: e.target.value})} />
-            </div>
+            <label className="flex items-center gap-2 text-sm font-semibold text-slate-700">
+              <input type="checkbox" checked={Boolean(cloudConfig.enabled)} onChange={(e) => setCloudConfig({...cloudConfig, enabled: e.target.checked})} /> Aktifkan cloud sync di perangkat ini
+            </label>
+            {hasCloudDb && cloudConfig.enabled && (
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                <span>Kode aktivasi untuk perangkat lain (tanpa rahasia):</span>
+                <code className="px-2 py-1 bg-slate-100 rounded-lg break-all">{generateActivationCodeForConfig({ ...cloudConfig, storeId: storeIdDraft })}</code>
+                <button type="button" onClick={() => navigator.clipboard?.writeText(generateActivationCodeForConfig({ ...cloudConfig, storeId: storeIdDraft }))} className="flex items-center gap-1 text-blue-600 font-semibold"><Copy size={12}/> Salin</button>
+              </div>
+            )}
           </div>
-        )}
-
-        {isEnvManaged && (
+        ) : (
           <div className="px-6 pb-6">
             <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4 flex items-start gap-3">
               <CheckCircle2 size={16} className="text-emerald-500 shrink-0 mt-0.5" />
               <div>
-                <p className="text-xs font-bold text-emerald-700">Sudah Terhubung via Environment Server</p>
-                <p className="text-xs text-emerald-600 mt-1">Konfigurasi cloud diambil otomatis dari file .env di server (Vercel/VPS). Tidak perlu isi manual di sini.</p>
+                <p className="text-xs font-bold text-emerald-700">Toko: {cloudConfig.displayName || cloudConfig.storeId}</p>
+                <p className="text-xs text-emerald-600 mt-1">Store ID ditetapkan saat build (VITE_STORE_ID). Cukup login perangkat di panel Keamanan Cloud.</p>
               </div>
             </div>
           </div>
@@ -371,10 +374,10 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
       <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden shadow-sm">
         <button onClick={() => setShowTutorial(showTutorial === 'deploy' ? 'none' : 'deploy')} className="w-full p-6 flex items-center justify-between text-left hover:bg-slate-50 transition-all">
           <div className="flex items-center gap-3">
-            <div className="p-2 bg-purple-100 text-purple-600 rounded-xl"><Globe size={20}/></div>
+            <div className="p-2 bg-orange-100 text-orange-600 rounded-xl"><Globe size={20}/></div>
             <div>
-              <h3 className="text-sm font-bold text-slate-800">Panduan Deploy Online</h3>
-              <p className="text-xs text-slate-400 mt-0.5">Cara pasang POS ini di VPS atau Vercel agar bisa diakses dari mana saja</p>
+              <h3 className="text-sm font-bold text-slate-800">Panduan Deploy ke Cloudflare</h3>
+              <p className="text-xs text-slate-400 mt-0.5">Aplikasi, API, data toko, dan file — semuanya di Cloudflare</p>
             </div>
           </div>
           <ChevronDown size={18} className={`text-slate-400 transition-transform ${showTutorial === 'deploy' ? 'rotate-180' : ''}`} />
@@ -382,35 +385,19 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
 
         {showTutorial === 'deploy' && (
           <div className="px-6 pb-6 space-y-4">
-            {/* Vercel */}
-            <div className="bg-gradient-to-r from-slate-900 to-slate-800 rounded-xl p-5 text-white space-y-3">
-              <h4 className="text-sm font-bold flex items-center gap-2">▲ Deploy ke Vercel <span className="text-xs font-normal text-slate-300">(Gratis, paling mudah)</span></h4>
-              <ol className="text-xs space-y-1.5 list-decimal list-inside text-slate-200 leading-relaxed">
-                <li>Push kode ke GitHub</li>
-                <li>Buka <a href="https://vercel.com" target="_blank" rel="noreferrer" className="underline text-blue-300">vercel.com</a> → Import project dari GitHub</li>
-                <li>Di tab Environment Variables, isi VITE_OPENROUTER_API_KEY (dan cloud vars jika perlu)</li>
-                <li>Klik Deploy — selesai! Dapat URL seperti <code className="bg-white/10 px-1 rounded">pos-bengkel.vercel.app</code></li>
+            <div className="bg-gradient-to-r from-orange-600 to-amber-500 rounded-xl p-5 text-white space-y-3">
+              <h4 className="text-sm font-bold">Deploy ke Cloudflare Workers <span className="text-xs font-normal text-orange-100">(paket gratis cukup)</span></h4>
+              <ol className="text-xs space-y-1.5 list-decimal list-inside text-orange-50 leading-relaxed">
+                <li><code className="bg-white/15 px-1 rounded">npx wrangler login</code></li>
+                <li><code className="bg-white/15 px-1 rounded">npx wrangler r2 bucket create poshulio-media</code> (sekali)</li>
+                <li><code className="bg-white/15 px-1 rounded">npx wrangler secret put SETUP_KEY</code> dan <code className="bg-white/15 px-1 rounded">MEDIA_SIGNING_SECRET</code> (opsional <code className="bg-white/15 px-1 rounded">OPENROUTER_API_KEY</code>)</li>
+                <li><code className="bg-white/15 px-1 rounded">npm run deploy</code> → dapat URL <code className="bg-white/15 px-1 rounded">https://poshulio.&lt;akun&gt;.workers.dev</code></li>
               </ol>
             </div>
-
-            {/* VPS */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 space-y-3">
-              <h4 className="text-sm font-bold text-slate-800 flex items-center gap-2">🖥️ Deploy ke VPS <span className="text-xs font-normal text-slate-400">(Lebih fleksibel)</span></h4>
-              <ol className="text-xs space-y-1.5 list-decimal list-inside text-slate-600 leading-relaxed">
-                <li>SSH ke VPS, install Node.js 18+</li>
-                <li><code className="bg-slate-200 px-1 rounded">git clone</code> repo → <code className="bg-slate-200 px-1 rounded">npm install</code></li>
-                <li>Buat file <code className="bg-slate-200 px-1 rounded">.env.local</code> → isi variabel yang diperlukan</li>
-                <li><code className="bg-slate-200 px-1 rounded">npm run build</code> → serve folder <code className="bg-slate-200 px-1 rounded">dist/</code> pakai Nginx atau Caddy</li>
-              </ol>
-              <p className="text-xs text-slate-400 italic">Rekomendasi VPS murah: IDCloudHost (30rb/bln), DigitalOcean ($4/bln), atau Hetzner (€4/bln)</p>
-            </div>
-
-            {/* Lokal */}
-            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-3">
-              <h4 className="text-sm font-bold text-emerald-800 flex items-center gap-2">💻 Pakai Lokal Saja</h4>
+            <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-5 space-y-2">
+              <h4 className="text-sm font-bold text-emerald-800">💻 Pakai Lokal Saja</h4>
               <p className="text-xs text-emerald-700 leading-relaxed">
-                Tidak perlu deploy ke mana-mana! Cukup jalankan <code className="bg-emerald-100 px-1 rounded">npm run dev</code> di komputer toko. 
-                Buka browser ke <code className="bg-emerald-100 px-1 rounded">localhost:3000</code>. Data tersimpan di browser — aman selama tidak clear browser data.
+                Jalankan <code className="bg-emerald-100 px-1 rounded">npm run dev</code> dan buka <code className="bg-emerald-100 px-1 rounded">localhost:3000</code>. Backend Cloudflare ikut berjalan lokal; tanpa cloud sync data tetap tersimpan di browser.
               </p>
             </div>
           </div>
@@ -428,6 +415,11 @@ const Settings: React.FC<SettingsProps> = ({ onCloudConfigChange, onExportBackup
           {isSaving ? 'Menyimpan...' : 'Simpan Pengaturan'}
         </button>
       </div>
+
+      {isFullMode && getSnapshot && <AutoBackupPanel getSnapshot={getSnapshot} />}
+      {isFullMode && (onImportItems || onImportContacts || onImportOpeningReceivables) && (
+        <IposImportPanel onImportItems={onImportItems} onImportContacts={onImportContacts} onImportOpeningReceivables={onImportOpeningReceivables} />
+      )}
 
       {/* Section 4: Backup & Restore */}
       <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm">

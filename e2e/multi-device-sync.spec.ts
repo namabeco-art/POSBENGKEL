@@ -1,19 +1,13 @@
-import { expect, test, type BrowserContext, type Page, type Route } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { mockAccounts, mockBranches, mockCustomers, mockItems, mockSuppliers, mockUsers } from '../store';
 import type { AppData, Item } from '../types';
+import { createTestStore, openDevice, readCloud, readLocal, type TestStore } from './cloudHarness';
 
 /**
- * Simulasi 2 perangkat (PC owner + tablet kasir) yang tersinkron lewat Supabase Storage palsu (in-memory).
+ * Simulasi 2 perangkat (PC owner + tablet kasir) yang tersinkron lewat backend Cloudflare asli (lokal).
  * Membuktikan: perubahan harga owner tidak hilang saat kasir berjualan bersamaan, stok tetap benar,
  * dan barang yang dihapus tidak muncul lagi.
  */
-
-const SUPABASE = 'https://fake-project.supabase.co';
-const BASE_URL = 'http://127.0.0.1:4173';
-const DATA_PATH = 'erp-media/state/toko1/app-data.txt';
-
-const encode = (data: unknown) => Buffer.from(JSON.stringify(data), 'utf8').toString('base64');
-const decode = (raw: string) => JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
 
 const seedData = (): AppData => ({
   users: mockUsers.map(user => ({ ...user })),
@@ -27,66 +21,7 @@ const seedData = (): AppData => ({
   aiConsultantHistory: [], floatingChatHistory: [],
 });
 
-/** Server Supabase Storage palsu yang dipakai bersama oleh semua perangkat. */
-const createFakeCloud = () => {
-  const objects = new Map<string, string>();
-  const offlineContexts = new Set<BrowserContext>();
-  const handler = (context: BrowserContext) => async (route: Route) => {
-    if (offlineContexts.has(context)) return route.abort('internetdisconnected');
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname.startsWith('/auth/v1/health')) return route.fulfill({ status: 200, body: '{}' });
-    const key = decodeURIComponent(url.pathname.replace('/storage/v1/object/', ''));
-    const method = request.method();
-    if (method === 'GET') {
-      if (!objects.has(key)) return route.fulfill({ status: 400, contentType: 'application/json', body: '{"statusCode":"404","error":"not_found","message":"Object not found"}' });
-      return route.fulfill({ status: 200, contentType: 'text/plain', body: objects.get(key)! });
-    }
-    if (method === 'DELETE') {
-      objects.delete(key);
-      return route.fulfill({ status: 200, body: '{}' });
-    }
-    if (method === 'POST') {
-      const upsert = (request.headers()['x-upsert'] || '').toLowerCase() === 'true';
-      if (!upsert && objects.has(key)) return route.fulfill({ status: 400, contentType: 'application/json', body: '{"statusCode":"409","error":"Duplicate"}' });
-      objects.set(key, request.postData() || '');
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ Key: key }) });
-    }
-    return route.fulfill({ status: 200, body: '{}' });
-  };
-  return {
-    objects,
-    read: (): AppData => decode(objects.get(DATA_PATH)!),
-    attach: (context: BrowserContext) => context.route(`${SUPABASE}/**`, handler(context)),
-    setOffline: (context: BrowserContext, offline: boolean) => {
-      if (offline) offlineContexts.add(context); else offlineContexts.delete(context);
-    },
-  };
-};
-
-const openDevice = async (browser: import('@playwright/test').Browser, cloud: ReturnType<typeof createFakeCloud>, username: string) => {
-  const context = await browser.newContext({ baseURL: BASE_URL });
-  await cloud.attach(context);
-  await context.addInitScript(({ supabase }) => {
-    if (sessionStorage.getItem('__seeded')) return;
-    sessionStorage.setItem('__seeded', '1');
-    localStorage.clear();
-    indexedDB.deleteDatabase('POSHULIO_DB');
-    localStorage.setItem('HGROUP_CLOUD_CONFIG', JSON.stringify({
-      storeId: 'toko1', enabled: true, supabaseUrl: supabase, supabaseAnonKey: 'anon-key', supabaseBucket: 'erp-media', displayName: 'Toko 1',
-    }));
-  }, { supabase: SUPABASE });
-  const page = await context.newPage();
-  page.on('dialog', dialog => void dialog.accept());
-  await page.goto('/');
-  await page.locator('#login-user').fill(username);
-  await page.locator('#login-pass').fill('123');
-  await page.getByRole('button', { name: /masuk/i }).click();
-  await expect(page.getByRole('button', { name: /keluar/i }).first()).toBeVisible();
-  return { context, page };
-};
-
-const cloudItem = (cloud: ReturnType<typeof createFakeCloud>, id: string): Item | undefined => cloud.read().items.find(item => item.id === id);
+const cloudItem = async (store: TestStore, id: string): Promise<Item | undefined> => (await readCloud(store)).items?.find(item => item.id === id);
 
 const sellOneOli = async (kasir: Page, qty = 1) => {
   await kasir.getByRole('button', { name: 'Kasir', exact: true }).click();
@@ -100,11 +35,9 @@ const sellOneOli = async (kasir: Page, qty = 1) => {
 
 test('harga baru owner & penjualan kasir yang terjadi bersamaan sama-sama tersimpan di cloud', async ({ browser }) => {
   test.setTimeout(180_000);
-  const cloud = createFakeCloud();
-  cloud.objects.set(DATA_PATH, encode(seedData()));
-
-  const owner = await openDevice(browser, cloud, 'admin');
-  const kasir = await openDevice(browser, cloud, 'kasir');
+  const store = await createTestStore(seedData(), 'sync');
+  const owner = await openDevice(browser, store, { username: 'admin' });
+  const kasir = await openDevice(browser, store, { username: 'kasir' });
 
   // Owner mengubah harga Oli 55.000 → 60.000 (belum terkirim: push menunggu jeda beberapa detik).
   await owner.page.getByRole('button', { name: 'Barang' }).click();
@@ -114,26 +47,26 @@ test('harga baru owner & penjualan kasir yang terjadi bersamaan sama-sama tersim
 
   // Kasir menjual 1 Oli di perangkat lain pada saat yang sama (transaksi terkunci, langsung ke cloud).
   await sellOneOli(kasir.page);
-  await expect.poll(() => cloud.read().sales.length).toBe(1);
-  expect(cloudItem(cloud, '1')!.stock).toBe(23);
+  await expect.poll(async () => (await readCloud(store)).sales?.length ?? 0, { timeout: 20_000 }).toBe(1);
+  expect((await cloudItem(store, '1'))!.stock).toBe(23);
 
   // Setelah owner sinkron, cloud harus punya harga baru DAN stok hasil penjualan kasir.
-  await expect.poll(() => cloudItem(cloud, '1')!.memberPrices[0], { timeout: 30_000 }).toBe(60000);
-  expect(cloudItem(cloud, '1')!.stock).toBe(23);
-  expect(cloud.read().sales).toHaveLength(1);
+  await expect.poll(async () => (await cloudItem(store, '1'))!.memberPrices[0], { timeout: 30_000 }).toBe(60000);
+  expect((await cloudItem(store, '1'))!.stock).toBe(23);
+  expect((await readCloud(store)).sales).toHaveLength(1);
 
   // Harga di perangkat owner tidak "kembali" ke harga lama setelah auto-pull.
-  const ownerLocal = await owner.page.evaluate(() => JSON.parse(localStorage.getItem('HGROUP_ENTERPRISE_DATA') || '{}'));
-  expect(ownerLocal.items.find((item: Item) => item.id === '1').memberPrices[0]).toBe(60000);
-  expect(ownerLocal.items.find((item: Item) => item.id === '1').stock).toBe(23);
+  const ownerLocal = await readLocal(owner.page);
+  expect(ownerLocal.items.find(item => item.id === '1')!.memberPrices[0]).toBe(60000);
+  expect(ownerLocal.items.find(item => item.id === '1')!.stock).toBe(23);
 
   // Kasir menarik data terbaru: harga baru terlihat, penjualan berikutnya memakai harga baru.
   await kasir.page.getByRole('button', { name: 'Sync' }).click();
   await sellOneOli(kasir.page);
-  await expect.poll(() => cloud.read().sales.length).toBe(2);
-  const newest = cloud.read().sales.find(sale => sale.items[0].price === 60000);
+  await expect.poll(async () => (await readCloud(store)).sales?.length ?? 0, { timeout: 20_000 }).toBe(2);
+  const newest = (await readCloud(store)).sales.find(sale => sale.items[0].price === 60000);
   expect(newest, 'penjualan kedua harus memakai harga 60.000').toBeTruthy();
-  expect(cloudItem(cloud, '1')!.stock).toBe(22);
+  expect((await cloudItem(store, '1'))!.stock).toBe(22);
 
   await owner.context.close();
   await kasir.context.close();
@@ -141,24 +74,21 @@ test('harga baru owner & penjualan kasir yang terjadi bersamaan sama-sama tersim
 
 test('barang yang dihapus owner tidak muncul lagi dari salinan perangkat kasir', async ({ browser }) => {
   test.setTimeout(180_000);
-  const cloud = createFakeCloud();
-  cloud.objects.set(DATA_PATH, encode(seedData()));
-
-  const owner = await openDevice(browser, cloud, 'admin');
-  const kasir = await openDevice(browser, cloud, 'kasir');
+  const store = await createTestStore(seedData(), 'sync');
+  const owner = await openDevice(browser, store, { username: 'admin' });
+  const kasir = await openDevice(browser, store, { username: 'kasir' });
 
   await owner.page.getByRole('button', { name: 'Barang' }).click();
   await owner.page.locator('tr', { hasText: 'Rantai Motor 428H' }).locator('button').last().click();
-  await expect.poll(() => cloud.read().items.some(item => item.id === '5'), { timeout: 30_000 }).toBe(false);
+  await expect.poll(async () => (await readCloud(store)).items.some(item => item.id === '5'), { timeout: 30_000 }).toBe(false);
 
   // Kasir masih punya salinan lama berisi Rantai Motor, lalu bertransaksi (push dari perangkat kasir).
   await sellOneOli(kasir.page);
-  await expect.poll(() => cloud.read().sales.length).toBe(1);
+  await expect.poll(async () => (await readCloud(store)).sales?.length ?? 0, { timeout: 20_000 }).toBe(1);
   await kasir.page.getByRole('button', { name: 'Sync' }).click();
 
-  expect(cloud.read().items.some(item => item.id === '5')).toBe(false);
-  const kasirLocal = await kasir.page.evaluate(() => JSON.parse(localStorage.getItem('HGROUP_ENTERPRISE_DATA') || '{}'));
-  expect(kasirLocal.items.some((item: Item) => item.id === '5')).toBe(false);
+  expect((await readCloud(store)).items.some(item => item.id === '5')).toBe(false);
+  await expect.poll(async () => (await readLocal(kasir.page)).items.some(item => item.id === '5')).toBe(false);
 
   await owner.context.close();
   await kasir.context.close();
@@ -166,27 +96,24 @@ test('barang yang dihapus owner tidak muncul lagi dari salinan perangkat kasir',
 
 test('dua kasir: satu offline menjual 2, satu online menjual 1 → stok akhir 21 di semua perangkat', async ({ browser }) => {
   test.setTimeout(180_000);
-  const cloud = createFakeCloud();
-  cloud.objects.set(DATA_PATH, encode(seedData()));
+  const store = await createTestStore(seedData(), 'sync');
+  const kasirA = await openDevice(browser, store, { username: 'kasir' });
+  const kasirB = await openDevice(browser, store, { username: 'admin' });
 
-  const kasirA = await openDevice(browser, cloud, 'kasir');
-  const kasirB = await openDevice(browser, cloud, 'admin');
-
-  cloud.setOffline(kasirA.context, true);
+  kasirA.setOffline(true);
   await sellOneOli(kasirA.page, 2); // tersimpan lokal karena cloud tidak terjangkau
   await sellOneOli(kasirB.page, 1);
-  await expect.poll(() => cloudItem(cloud, '1')!.stock).toBe(23);
+  await expect.poll(async () => (await cloudItem(store, '1'))!.stock, { timeout: 20_000 }).toBe(23);
 
-  cloud.setOffline(kasirA.context, false);
+  kasirA.setOffline(false);
   await kasirA.page.getByRole('button', { name: 'Sync' }).click();
   // Push ulang otomatis setelah koneksi kembali membawa penjualan offline ke cloud.
-  await expect.poll(() => cloud.read().sales.length, { timeout: 40_000 }).toBe(2);
-  expect(cloudItem(cloud, '1')!.stock).toBe(21);
+  await expect.poll(async () => (await readCloud(store)).sales?.length ?? 0, { timeout: 40_000 }).toBe(2);
+  expect((await cloudItem(store, '1'))!.stock).toBe(21);
 
   await kasirB.page.getByRole('button', { name: 'Sync' }).click();
   for (const device of [kasirA, kasirB]) {
-    const local = await device.page.evaluate(() => JSON.parse(localStorage.getItem('HGROUP_ENTERPRISE_DATA') || '{}'));
-    expect(local.items.find((item: Item) => item.id === '1').stock).toBe(21);
+    await expect.poll(async () => (await readLocal(device.page)).items.find(item => item.id === '1')!.stock).toBe(21);
   }
 
   await kasirA.context.close();

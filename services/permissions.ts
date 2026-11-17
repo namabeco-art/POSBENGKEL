@@ -16,7 +16,23 @@ export const TAB_PERMISSION_MAP: Record<string, PermissionKey> = {
   'settings': 'settings.manage',
   'ai-consultant': 'ai.use',
   'media-vault': 'ai.use',
+  // Mode Lengkap — memakai izin yang sudah ada agar user lama tidak perlu diatur ulang.
+  'service-orders': 'sale.create',
+  'deposits': 'sale.create',
+  'mechanics': 'report.view',
+  'warehouses': 'stock.view',
+  'purchase-returns': 'purchase.view',
+  'promotions': 'item.edit',
+  'ledger': 'accounting.view',
+  'advanced-reports': 'report.view',
 };
+
+/** Tab yang hanya muncul di mode Lengkap. */
+export const FULL_MODE_TABS = new Set([
+  'service-orders', 'deposits', 'mechanics', 'warehouses', 'purchase-returns', 'promotions', 'ledger', 'advanced-reports',
+]);
+
+export type AppModeName = 'SIMPLE' | 'LENGKAP';
 
 export const MODULE_ACTIONS: Array<{ id: string; label: string; permission: PermissionKey; group: string }> = [
   { id: 'dashboard', label: 'Dashboard', permission: 'dashboard.view', group: 'Utama' },
@@ -41,14 +57,15 @@ export const hasPermission = (user: User | null | undefined, permission: Permiss
   return user.permissions.includes(permission);
 };
 
-export const canAccessTab = (user: User | null | undefined, tabId: string): boolean => {
+export const canAccessTab = (user: User | null | undefined, tabId: string, mode: AppModeName = 'SIMPLE'): boolean => {
   const permission = TAB_PERMISSION_MAP[tabId];
   if (!permission) return false;
+  if (mode !== 'LENGKAP' && FULL_MODE_TABS.has(tabId)) return false;
   return hasPermission(user, permission);
 };
 
-export const getAccessibleTabs = (user: User | null | undefined): string[] =>
-  Object.keys(TAB_PERMISSION_MAP).filter(tabId => canAccessTab(user, tabId));
+export const getAccessibleTabs = (user: User | null | undefined, mode: AppModeName = 'SIMPLE'): string[] =>
+  Object.keys(TAB_PERMISSION_MAP).filter(tabId => canAccessTab(user, tabId, mode));
 
 /** Izin aksi detail (di luar akses menu) yang bisa diberikan per user. */
 export const ACTION_PERMISSIONS: Array<{ permission: PermissionKey; label: string; group: string }> = [

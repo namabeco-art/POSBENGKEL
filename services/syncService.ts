@@ -1,71 +1,34 @@
-import { getEnvConfig, getResolvedOpenRouterApiKey, getResolvedOpenRouterModel, getResolvedSupabaseAnonKey, getResolvedSupabaseBucket, getResolvedSupabaseUrl, hasEnvCloudConfig } from './appConfig';
+/**
+ * Sinkronisasi data toko ke Cloudflare (Worker + Durable Object per toko).
+ *
+ * - Data toko disimpan sebagai satu snapshot terenkode dengan nomor versi.
+ * - Setiap penyimpanan membawa versi yang dibaca (compare-and-swap). Jika perangkat lain menyimpan
+ *   di antaranya, server membalas 409 dan `syncWithCloud` menarik ulang, menggabungkan, lalu mencoba lagi —
+ *   jadi tidak ada perubahan yang tertimpa diam-diam.
+ * - Lock singkat (Durable Object) menjaga transaksi stok dari dua kasir tidak saling mendahului.
+ */
+import { getEnvConfig, hasEnvCloudConfig } from './appConfig';
 import { normalizeCloudProfile } from './cloudProfiles';
-import { CLOUD_AUTH_REQUIRED, getSupabaseAuthHeaders, isCloudAuthErrorResponse } from './cloudAuth';
+import { buildApiUrl, CLOUD_AUTH_REQUIRED, clearCloudSession, getCloudAuthHeaders, isValidStoreId, normalizeStoreId } from './cloudAuth';
 
 const STORAGE_CONFIG_KEY = 'HGROUP_CLOUD_CONFIG';
 const STORAGE_DB_LIST_KEY = 'HGROUP_SAVED_DB_LIST';
 
-type CloudConfig = {
+export type CloudConfig = {
   storeId: string;
   enabled: boolean;
-  openRouterApiKey?: string;
-  aiModel?: string;
-  supabaseUrl?: string;
-  supabaseAnonKey?: string;
-  supabaseBucket?: string;
   displayName?: string;
   region?: string;
-  // legacy aliases kept for backward compatibility in existing app flow
-  url?: string;
-  token?: string;
+  /** Kosong = API di domain yang sama dengan aplikasi (normal di Cloudflare). */
+  apiBaseUrl?: string;
+  openRouterApiKey?: string;
+  aiModel?: string;
 };
 
-const sanitizeSupabaseUrl = (url: string) => {
-  if (!url) return '';
-  let cleanUrl = url.trim().replace(/\/+$/, '');
-  if (!cleanUrl.startsWith('http')) cleanUrl = `https://${cleanUrl}`;
-  return cleanUrl;
-};
-
-const detectProvider = (url: string): 'upstash' | 'supabase' => {
-  const cleanUrl = url.toLowerCase();
-  if (cleanUrl.includes('upstash.io')) return 'upstash';
-  return 'supabase';
-};
-
-const withLegacyAliases = (config: CloudConfig): CloudConfig => ({
-  ...config,
-  url: config.supabaseUrl || config.url || '',
-  token: config.supabaseAnonKey || config.token || '',
-});
-
-const buildStorageObjectPath = (storeId: string, name: string) => `state/${storeId || 'default'}/${name}`;
-
-const buildStorageObjectUrl = (baseUrl: string, bucket: string, path: string) => {
-  const safePath = path.split('/').map(part => encodeURIComponent(part)).join('/');
-  return `${baseUrl}/storage/v1/object/${encodeURIComponent(bucket)}/${safePath}`;
-};
-
-const getSupabaseHeaders = (anonKey: string, contentType?: string) => {
-  const headers: Record<string, string> = {
-    apikey: anonKey,
-    Authorization: `Bearer ${anonKey}`,
-  };
-  if (contentType) headers['Content-Type'] = contentType;
-  return headers;
-};
-
-const getUpstashHeaders = (token: string, contentType?: string) => {
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${token}`,
-  };
-  if (contentType) headers['Content-Type'] = contentType;
-  return headers;
-};
+export const CLOUD_REQUEST_TIMEOUT_MS = 15000;
+const CONFLICT = 'CLOUD_VERSION_CONFLICT';
 
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
-
-export const CLOUD_REQUEST_TIMEOUT_MS = 12000;
 
 /** fetch dengan batas waktu — agar kasir tidak tertahan "MENYIMPAN..." saat jaringan menggantung. */
 const fetchWithTimeout = async (input: string, init: RequestInit = {}, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS) => {
@@ -78,543 +41,228 @@ const fetchWithTimeout = async (input: string, init: RequestInit = {}, timeoutMs
   }
 };
 
-/** Supabase Storage mengembalikan 400/404 "not_found" untuk objek yang belum ada. */
-const isMissingObjectResponse = async (response: Response) => {
-  if (response.status === 404) return true;
-  if (response.status !== 400) return false;
-  const body = await response.clone().text().catch(() => '');
-  return /not[_ ]?found/i.test(body);
-};
+const normalizeConfig = (raw: Partial<CloudConfig>): CloudConfig => normalizeCloudProfile({
+  storeId: normalizeStoreId(raw.storeId || ''),
+  enabled: Boolean(raw.enabled),
+  displayName: raw.displayName || '',
+  region: raw.region || '',
+  apiBaseUrl: (raw.apiBaseUrl || '').trim().replace(/\/+$/, ''),
+  // Simpan nilai mentah; pemakai memanggil getResolvedOpenRouterApiKey() (yang juga mengenali proxy AI server).
+  openRouterApiKey: (raw.openRouterApiKey || '').trim(),
+  aiModel: (raw.aiModel || '').trim(),
+}) as CloudConfig;
 
 export const getCloudConfig = (): CloudConfig => {
-  const envConfig = getEnvConfig();
-  const firstEnvStore = envConfig.stores[0];
-
+  const env = getEnvConfig();
+  let saved: Partial<CloudConfig> = {};
   try {
-    const saved = localStorage.getItem(STORAGE_CONFIG_KEY);
-    const runtimeConfig = saved ? JSON.parse(saved) : {};
-
-    const localConfig: CloudConfig = {
-      storeId: runtimeConfig.storeId || '',
-      enabled: Boolean(runtimeConfig.enabled),
-      openRouterApiKey: runtimeConfig.openRouterApiKey || runtimeConfig.geminiApiKey || '',
-      aiModel: runtimeConfig.aiModel || '',
-      supabaseUrl: runtimeConfig.supabaseUrl || runtimeConfig.url || '',
-      supabaseAnonKey: runtimeConfig.supabaseAnonKey || runtimeConfig.token || '',
-      supabaseBucket: runtimeConfig.supabaseBucket || '',
-      displayName: runtimeConfig.displayName || '',
-      region: runtimeConfig.region || '',
-    };
-
-    if (hasEnvCloudConfig()) {
-      const matchingEnv = envConfig.stores.find(s => s.storeId === localConfig.storeId);
-      const base = matchingEnv || firstEnvStore;
-
-      return withLegacyAliases(normalizeCloudProfile({
-        storeId: localConfig.storeId || base.storeId,
-        enabled: localConfig.enabled || true,
-        openRouterApiKey: getResolvedOpenRouterApiKey(localConfig.openRouterApiKey),
-        aiModel: getResolvedOpenRouterModel(localConfig.aiModel),
-        supabaseUrl: sanitizeSupabaseUrl(matchingEnv?.supabaseUrl || getResolvedSupabaseUrl(localConfig.supabaseUrl)),
-        supabaseAnonKey: matchingEnv?.supabaseAnonKey || getResolvedSupabaseAnonKey(localConfig.supabaseAnonKey),
-        supabaseBucket: matchingEnv?.supabaseBucket || getResolvedSupabaseBucket(localConfig.supabaseBucket),
-        displayName: localConfig.displayName || matchingEnv?.displayName || base.displayName,
-        region: localConfig.region || matchingEnv?.region || base.region,
-      }));
-    }
-
-    return withLegacyAliases(normalizeCloudProfile({
-      ...localConfig,
-      openRouterApiKey: getResolvedOpenRouterApiKey(localConfig.openRouterApiKey),
-      aiModel: getResolvedOpenRouterModel(localConfig.aiModel),
-      supabaseUrl: sanitizeSupabaseUrl(getResolvedSupabaseUrl(localConfig.supabaseUrl)),
-      supabaseAnonKey: getResolvedSupabaseAnonKey(localConfig.supabaseAnonKey),
-      supabaseBucket: getResolvedSupabaseBucket(localConfig.supabaseBucket),
-    }));
-  } catch {
-    const base = firstEnvStore || {
-      storeId: envConfig.storeId,
-      supabaseUrl: envConfig.supabaseUrl,
-      supabaseAnonKey: envConfig.supabaseAnonKey,
-      supabaseBucket: envConfig.supabaseBucket,
-      displayName: '',
-      region: '',
-    };
-
-    return withLegacyAliases(normalizeCloudProfile({
-      storeId: base.storeId,
-      enabled: envConfig.cloudEnabled || Boolean(firstEnvStore),
-      openRouterApiKey: envConfig.openRouterApiKey,
-      aiModel: envConfig.openRouterModel,
-      supabaseUrl: sanitizeSupabaseUrl(base.supabaseUrl),
-      supabaseAnonKey: base.supabaseAnonKey,
-      supabaseBucket: base.supabaseBucket,
-      displayName: base.displayName || '',
-      region: base.region || '',
-    }));
+    saved = JSON.parse(localStorage.getItem(STORAGE_CONFIG_KEY) || '{}');
+  } catch { /* konfigurasi rusak diabaikan */ }
+  if (hasEnvCloudConfig()) {
+    return normalizeConfig({
+      ...saved,
+      storeId: env.storeId,
+      enabled: true,
+      displayName: saved.displayName || env.storeName,
+      apiBaseUrl: env.cloudApiUrl,
+    });
   }
+  return normalizeConfig({ ...saved, apiBaseUrl: saved.apiBaseUrl || env.cloudApiUrl });
 };
+
+export const getCloudApiBase = () => getCloudConfig().apiBaseUrl || '';
 
 export const hasCloudConfig = (): boolean => {
   const config = getCloudConfig();
-  return Boolean(config.enabled && config.storeId && (config.supabaseUrl || config.url) && (config.supabaseAnonKey || config.token));
+  return Boolean(config.enabled && isValidStoreId(config.storeId));
 };
 
-export const saveCloudConfig = (config: any) => {
-  const envConfig = getEnvConfig();
-  if (!envConfig.allowRuntimeSettings && hasEnvCloudConfig()) return;
-
-  const previousConfig = getCloudConfig();
-  const finalConfig = withLegacyAliases(normalizeCloudProfile({
-    ...config,
-    enabled: Boolean(config.enabled),
-    supabaseUrl: sanitizeSupabaseUrl(config.supabaseUrl || config.url || ''),
-    supabaseAnonKey: config.supabaseAnonKey || config.token || '',
-    supabaseBucket: config.supabaseBucket || 'erp-media',
-  }));
-
-  if (!finalConfig.enabled && previousConfig.enabled && previousConfig.storeId) {
-    saveToDbList(previousConfig);
-  }
-
-  localStorage.setItem(STORAGE_CONFIG_KEY, JSON.stringify(finalConfig));
-  if (finalConfig.enabled) saveToDbList(finalConfig);
+export const saveCloudConfig = (config: Partial<CloudConfig>) => {
+  const env = getEnvConfig();
+  if (!env.allowRuntimeSettings && hasEnvCloudConfig()) return;
+  const previous = getCloudConfig();
+  const next = normalizeConfig({ ...config, enabled: Boolean(config.enabled) });
+  if (!next.enabled && previous.enabled && previous.storeId) saveToDbList(previous);
+  localStorage.setItem(STORAGE_CONFIG_KEY, JSON.stringify(next));
+  if (next.enabled) saveToDbList(next);
 };
 
 export const getSavedDbList = (): CloudConfig[] => {
   try {
-    const saved = localStorage.getItem(STORAGE_DB_LIST_KEY);
-    return saved ? JSON.parse(saved) : [];
+    const saved = JSON.parse(localStorage.getItem(STORAGE_DB_LIST_KEY) || '[]');
+    return Array.isArray(saved) ? saved : [];
   } catch {
     return [];
   }
 };
 
 export const saveToDbList = (config: CloudConfig) => {
-  const envConfig = getEnvConfig();
-  if (!envConfig.allowRuntimeSettings && hasEnvCloudConfig()) return;
   if (!config.storeId) return;
-
-  const normalized = withLegacyAliases(normalizeCloudProfile({
-    ...config,
-    supabaseUrl: sanitizeSupabaseUrl(config.supabaseUrl || config.url || ''),
-    supabaseAnonKey: config.supabaseAnonKey || config.token || '',
-    supabaseBucket: config.supabaseBucket || 'erp-media',
-  }));
-
   const list = getSavedDbList();
-  const index = list.findIndex(item => item.storeId === normalized.storeId);
-  if (index >= 0) list[index] = normalized;
-  else list.push(normalized);
+  const entry = normalizeConfig(config);
+  const index = list.findIndex(item => item.storeId === entry.storeId);
+  if (index >= 0) list[index] = entry;
+  else list.push(entry);
   localStorage.setItem(STORAGE_DB_LIST_KEY, JSON.stringify(list));
 };
 
 export const deleteFromDbList = (storeId: string) => {
-  const envConfig = getEnvConfig();
-  if (!envConfig.allowRuntimeSettings && hasEnvCloudConfig()) return;
-  const list = getSavedDbList().filter(item => item.storeId !== storeId);
-  localStorage.setItem(STORAGE_DB_LIST_KEY, JSON.stringify(list));
+  localStorage.setItem(STORAGE_DB_LIST_KEY, JSON.stringify(getSavedDbList().filter(item => item.storeId !== storeId)));
 };
 
-export const pushConfigToCloud = async (config: CloudConfig) => {
-  const baseUrl = sanitizeSupabaseUrl(config.supabaseUrl || config.url || '');
-  const anonKey = config.supabaseAnonKey || config.token || '';
-  const bucket = config.supabaseBucket || 'erp-media';
-  if (!baseUrl || !anonKey || !config.storeId) return null;
-
-  const provider = detectProvider(baseUrl);
-  
-  if (provider === 'upstash') {
-    const key = `pos_config:${config.storeId}`;
-    const payload = JSON.stringify({
-      openRouterApiKey: config.openRouterApiKey || '',
-      aiModel: config.aiModel || 'openrouter/auto',
-      supabaseUrl: baseUrl,
-      supabaseAnonKey: anonKey,
-      supabaseBucket: bucket,
-      updatedAt: new Date().toISOString(),
-    });
-    
-    const response = await fetch(`${baseUrl}/set/${key}`, {
-      method: 'POST',
-      headers: getUpstashHeaders(anonKey),
-      body: payload,
-    });
-    if (!response.ok) throw new Error(`UPSTASH_PUSH_CONFIG_FAILED_${response.status}`);
-    return response.json();
-  }
-
-  const path = buildStorageObjectPath(config.storeId, 'config-ai.json');
-  const payload = JSON.stringify({
-    openRouterApiKey: config.openRouterApiKey || '',
-    aiModel: config.aiModel || 'openrouter/auto',
-    supabaseUrl: baseUrl,
-    supabaseAnonKey: anonKey,
-    supabaseBucket: bucket,
-    updatedAt: new Date().toISOString(),
-  });
-
-  const response = await fetch(buildStorageObjectUrl(baseUrl, bucket, path), {
-    method: 'POST',
-    headers: {
-      ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'application/json')),
-      'x-upsert': 'true',
-    },
-    body: payload,
-  });
-
-  if (!response.ok) {
-    const detail = await response.text().catch(() => '');
-    throw new Error(`Gagal menyimpan konfigurasi Supabase Cloud. ${detail}`);
-  }
-
-  return response.json().catch(() => ({ success: true }));
+/** Kode aktivasi untuk menyiapkan perangkat lain (Store ID + alamat API). Tidak berisi rahasia. */
+export const generateActivationCodeForConfig = (config: CloudConfig): string => {
+  if (!config.storeId) return '';
+  return btoa(JSON.stringify({ s: config.storeId, n: config.displayName || config.storeId, r: config.region || 'Cloud', a: config.apiBaseUrl || '' }));
 };
+
+export const generateActivationCode = () => generateActivationCodeForConfig(getCloudConfig());
 
 export const applyActivationCode = (code: string): boolean => {
   try {
     const decoded = JSON.parse(atob(code));
-    const supabaseUrl = decoded.su || decoded.u || '';
-    const supabaseAnonKey = decoded.sk || decoded.t || '';
-    if (supabaseUrl && supabaseAnonKey && decoded.s) {
-      saveCloudConfig({
-        storeId: decoded.s,
-        enabled: true,
-        openRouterApiKey: decoded.or || decoded.g || '',
-        aiModel: decoded.m || 'openrouter/auto',
-        supabaseUrl,
-        supabaseAnonKey,
-        supabaseBucket: decoded.sb || 'erp-media',
-        displayName: decoded.n || '',
-        region: decoded.r || '',
-      });
-      return true;
-    }
-    return false;
+    if (!decoded?.s || !isValidStoreId(normalizeStoreId(decoded.s))) return false;
+    saveCloudConfig({ storeId: decoded.s, enabled: true, displayName: decoded.n || '', region: decoded.r || '', apiBaseUrl: decoded.a || '' });
+    return true;
   } catch {
     return false;
   }
 };
 
-export const generateActivationCode = (): string => {
-  const config = getCloudConfig();
-  return generateActivationCodeForConfig(config);
-};
-
-export const generateActivationCodeForConfig = (config: CloudConfig): string => {
-  const supabaseUrl = config.supabaseUrl || config.url || '';
-  const supabaseAnonKey = config.supabaseAnonKey || config.token || '';
-  if (!supabaseUrl || !supabaseAnonKey) return '';
-  const payload = {
-    su: supabaseUrl,
-    sk: supabaseAnonKey,
-    sb: config.supabaseBucket || 'erp-media',
-    s: config.storeId,
-    or: config.openRouterApiKey,
-    m: config.aiModel,
-    n: config.displayName || config.storeId,
-    r: config.region || 'Cloud',
-  };
-  return btoa(JSON.stringify(payload));
-};
-
-const secureEncode = (data: any) => {
-  const str = JSON.stringify(data);
-  return btoa(unescape(encodeURIComponent(str)));
-};
+const secureEncode = (data: unknown) => btoa(unescape(encodeURIComponent(JSON.stringify(data))));
 
 const secureDecode = (base64: string) => {
   try {
-    const str = decodeURIComponent(escape(atob(base64)));
-    return JSON.parse(str);
+    return JSON.parse(decodeURIComponent(escape(atob(base64))));
   } catch {
     return null;
   }
 };
 
-export const sanitizeUrl = sanitizeSupabaseUrl;
+const activeStore = () => {
+  const config = getCloudConfig();
+  if (!config.enabled || !isValidStoreId(config.storeId)) return null;
+  return { storeId: config.storeId, apiBase: config.apiBaseUrl || '' };
+};
 
-export const smartTestConnection = async (
-  inputUrl: string,
-  inputToken: string,
-): Promise<{
-  success: boolean;
-  message: string;
-  diagCode: 'OK' | 'CORS_ERROR' | 'AUTH_ERROR' | 'NOT_FOUND' | 'GENERIC_ERROR';
-  finalUrl: string;
-  finalToken: string;
-}> => {
-  const url = sanitizeSupabaseUrl(inputUrl);
-  const provider = detectProvider(url);
+const storeUrl = (apiBase: string, storeId: string, path: string) => buildApiUrl(apiBase, `stores/${encodeURIComponent(storeId)}/${path}`);
 
+/** Tolak dengan penanda CLOUD_AUTH_REQUIRED dan hapus sesi lokal yang sudah dicabut server. */
+const authFailure = (detail: string) => {
+  clearCloudSession();
+  return new Error(`${CLOUD_AUTH_REQUIRED}::${detail}`);
+};
+
+export interface CloudState {
+  data: any | null;
+  version: number;
+}
+
+/** Ambil snapshot data toko beserta versinya. data = null bila toko belum punya data. */
+export const pullStateFromCloud = async (): Promise<CloudState | null> => {
+  const store = activeStore();
+  if (!store) return null;
+  const response = await fetchWithTimeout(storeUrl(store.apiBase, store.storeId, 'state'), { headers: getCloudAuthHeaders(store.storeId) });
+  if (response.status === 401) throw authFailure('Perangkat belum login ke cloud toko.');
+  // Jangan anggap error server sebagai "cloud kosong" — pemanggil bisa menimpa data cloud.
+  if (!response.ok) throw new Error(`CLOUD_PULL_FAILED_${response.status}`);
+  const version = Number(response.headers.get('X-State-Version') || '0');
+  if (response.status === 204) return { data: null, version };
+  const text = await response.text();
+  return { data: text ? secureDecode(text) : null, version };
+};
+
+/** Data toko dari cloud (tanpa versi). */
+export const pullFromCloud = async () => (await pullStateFromCloud())?.data ?? null;
+
+/** Simpan snapshot hanya jika versi cloud masih `baseVersion` (compare-and-swap). */
+export const pushStateToCloud = async (data: unknown, baseVersion: number): Promise<number> => {
+  const store = activeStore();
+  if (!store) throw new Error('Cloud belum diaktifkan.');
+  const response = await fetchWithTimeout(storeUrl(store.apiBase, store.storeId, 'state'), {
+    method: 'PUT',
+    headers: { ...getCloudAuthHeaders(store.storeId, 'text/plain'), 'If-Match': String(baseVersion) },
+    body: secureEncode(data),
+  }, 30_000);
+  if (response.status === 401) throw authFailure('Perangkat belum login ke cloud toko.');
+  if (response.status === 409) throw new Error(`${CONFLICT}::Data cloud berubah saat menyimpan.`);
+  if (!response.ok) throw new Error(`CLOUD_PUSH_FAILED_${response.status}`);
+  return Number(response.headers.get('X-State-Version') || baseVersion + 1);
+};
+
+const isConflict = (error: unknown) => String((error as any)?.message || '').startsWith(CONFLICT);
+
+/**
+ * Tarik → susun data baru dari data cloud terbaru → simpan dengan compare-and-swap.
+ * Jika perangkat lain menyimpan di antaranya, diulang dengan data cloud terbaru (maks. `attempts`).
+ * `compose` harus murni (boleh dipanggil berulang). Error dari `compose` diteruskan apa adanya.
+ */
+export const syncWithCloud = async <T,>(compose: (remote: any | null) => T, attempts = 4): Promise<{ remote: any | null; data: T; version: number }> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const state = await pullStateFromCloud();
+    if (!state) throw new Error('Cloud belum diaktifkan.');
+    const data = compose(state.data);
+    try {
+      const version = await pushStateToCloud(data, state.version);
+      return { remote: state.data, data, version };
+    } catch (error) {
+      if (!isConflict(error)) throw error;
+      lastError = error;
+      await sleep(150 * (attempt + 1));
+    }
+  }
+  throw lastError || new Error('Gagal menyimpan ke cloud: data terus berubah. Coba lagi.');
+};
+
+/** Cek koneksi ke server cloud (dipakai di Pengaturan). */
+export const testCloudConnection = async (apiBase = getCloudApiBase()) => {
   try {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-    if (provider === 'upstash') {
-      const response = await fetch(`${url}/get/ping`, {
-        headers: getUpstashHeaders(inputToken),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
-      if (response.ok) {
-        return { success: true, message: 'Koneksi Upstash Redis berhasil.', diagCode: 'OK', finalUrl: url, finalToken: inputToken };
-      }
-      return { success: false, message: response.status === 401 ? 'Token Upstash tidak valid.' : `Upstash Error ${response.status}`, diagCode: response.status === 401 ? 'AUTH_ERROR' : 'GENERIC_ERROR', finalUrl: url, finalToken: inputToken };
-    }
-
-    const response = await fetch(`${url}/auth/v1/health`, {
-      headers: getSupabaseHeaders(inputToken),
-      signal: controller.signal,
-    });
-
-    clearTimeout(timeoutId);
-
-    if (response.ok) {
-      return {
-        success: true,
-        message: 'Koneksi Supabase berhasil.',
-        diagCode: 'OK',
-        finalUrl: url,
-        finalToken: inputToken,
-      };
-    }
-
-    if (response.status === 401 || response.status === 403) {
-      return {
-        success: false,
-        message: 'Anon key Supabase tidak valid.',
-        diagCode: 'AUTH_ERROR',
-        finalUrl: url,
-        finalToken: inputToken,
-      };
-    }
-
-    if (response.status === 404) {
-      return {
-        success: false,
-        message: 'Endpoint Supabase tidak ditemukan. Cek project URL.',
-        diagCode: 'NOT_FOUND',
-        finalUrl: url,
-        finalToken: inputToken,
-      };
-    }
-
-    return {
-      success: false,
-      message: `HTTP Error ${response.status}`,
-      diagCode: 'GENERIC_ERROR',
-      finalUrl: url,
-      finalToken: inputToken,
-    };
+    const response = await fetchWithTimeout(buildApiUrl(apiBase, 'health'), {}, 10_000);
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && data?.ok) return { success: true, message: 'Server cloud Cloudflare terhubung.', ai: Boolean(data.ai) };
+    return { success: false, message: `Server menjawab HTTP ${response.status}. Periksa alamat API.`, ai: false };
   } catch {
-    return {
-      success: false,
-      message: 'CORS/Network Error.',
-      diagCode: 'CORS_ERROR',
-      finalUrl: url,
-      finalToken: inputToken,
-    };
+    return { success: false, message: 'Server cloud tidak terjangkau (offline atau alamat salah).', ai: false };
   }
 };
 
-export const withCloudInventoryLock = async <T>(
+/**
+ * Jalankan tugas dengan lock toko (Durable Object). Tanpa cloud → langsung dijalankan.
+ * Offline/ditolak → melempar error agar pemanggil menyimpan lokal dan sinkron belakangan.
+ */
+export const withCloudInventoryLock = async <T,>(
   task: () => Promise<T>,
   options?: { maxRetries?: number; retryMs?: number; lockTtlMs?: number },
 ): Promise<T> => {
-  const config = getCloudConfig();
-  const baseUrl = sanitizeSupabaseUrl(config.supabaseUrl || config.url || '');
-  const anonKey = config.supabaseAnonKey || config.token || '';
-  const bucket = config.supabaseBucket || 'erp-media';
-  const storeId = config.storeId || 'default';
-
-  // If cloud not configured, just run the task directly
-  if (!config.enabled || !baseUrl || !anonKey) {
-    return task();
-  }
-
-  // For single-store bengkel setup: skip lock entirely and just run the task.
-  // The lock mechanism is only needed for multi-terminal concurrent access.
-  // If lock fails, we still proceed with the task to avoid blocking the cashier.
-  const provider = detectProvider(baseUrl);
-  const maxRetries = options?.maxRetries ?? 5; // Reduced from 20 to 5
-  const retryMs = options?.retryMs ?? 500;
-  const lockTtlMs = options?.lockTtlMs ?? 10000; // 10 seconds
-
-  if (provider === 'upstash') {
-    const lockKey = `pos_lock:${storeId}:inventory`;
-    const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
-    let acquired = false;
-    let unreachable = false;
-
-    for (let i = 0; i < maxRetries; i += 1) {
-      try {
-        const response = await fetchWithTimeout(`${baseUrl}/set/${lockKey}/${owner}/NX/EX/${Math.ceil(lockTtlMs/1000)}`, {
-          method: 'POST',
-          headers: getUpstashHeaders(anonKey),
-        });
-        
-        if (response.ok) {
-          const body = await response.json().catch(() => ({}));
-          if (body.result === 'OK') {
-            acquired = true;
-            break;
-          }
-        }
-      } catch {
-        unreachable = true; // jaringan putus — simpan lokal, sinkron nanti
-        break;
-      }
-      await sleep(retryMs);
-    }
-
-    if (!acquired) throw new Error(unreachable ? 'Cloud tidak terjangkau (offline). Transaksi disimpan lokal.' : 'Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
-    try {
-      return await task();
-    } finally {
-      if (acquired) {
-        await fetchWithTimeout(`${baseUrl}/del/${lockKey}`, { method: 'POST', headers: getUpstashHeaders(anonKey) }).catch(() => undefined);
-      }
-    }
-  }
-
-  // Supabase Storage lock
-  const lockPath = buildStorageObjectPath(storeId, 'locks/inventory.lock.json');
-  const lockUrl = buildStorageObjectUrl(baseUrl, bucket, lockPath);
+  const store = activeStore();
+  if (!store) return task();
   const owner = `client-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
+  const maxRetries = options?.maxRetries ?? 8;
+  const retryMs = options?.retryMs ?? 400;
+  const lockUrl = storeUrl(store.apiBase, store.storeId, 'lock');
   let acquired = false;
-  let unreachable = false;
-  let authDenied = false;
 
-  for (let i = 0; i < maxRetries; i += 1) {
-    const payload = JSON.stringify({
-      owner,
-      createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now() + lockTtlMs).toISOString(),
-    });
-
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    let response: Response;
     try {
-      const createRes = await fetchWithTimeout(lockUrl, {
+      response = await fetchWithTimeout(lockUrl, {
         method: 'POST',
-        headers: {
-          ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'application/json')),
-          'x-upsert': 'false',
-        },
-        body: payload,
+        headers: getCloudAuthHeaders(store.storeId, 'application/json'),
+        body: JSON.stringify({ owner, ttlMs: options?.lockTtlMs ?? 15_000 }),
       });
-
-      if (createRes.ok) {
-        acquired = true;
-        break;
-      }
-      if (await isCloudAuthErrorResponse(createRes)) {
-        authDenied = true; // RLS menolak: perangkat belum login cloud toko
-        break;
-      }
-
-      // Check if existing lock is expired — if so, force overwrite
-      const lockDataRes = await fetchWithTimeout(lockUrl, { headers: await getSupabaseAuthHeaders(baseUrl, anonKey) });
-      if (lockDataRes.ok) {
-        const lockRaw = await lockDataRes.text().catch(() => '');
-        try {
-          const lockData = JSON.parse(lockRaw);
-          const expiresAt = new Date(lockData?.expiresAt || 0).getTime();
-          if (Number.isFinite(expiresAt) && expiresAt > 0 && expiresAt < Date.now()) {
-            // Lock expired — force delete and retry
-            await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: await getSupabaseAuthHeaders(baseUrl, anonKey) }).catch(() => undefined);
-            continue; // retry immediately
-          }
-        } catch { /* ignore parse error */ }
-      }
     } catch {
-      unreachable = true; // jaringan putus — simpan lokal, sinkron nanti
-      break;
+      throw new Error('Cloud tidak terjangkau (offline). Transaksi disimpan lokal.');
     }
-
+    if (response.status === 401) throw authFailure('Perangkat belum login ke cloud toko. Transaksi disimpan lokal.');
+    if (response.ok) { acquired = true; break; }
+    if (response.status !== 423) throw new Error(`Lock cloud gagal (HTTP ${response.status}). Transaksi disimpan lokal.`);
     await sleep(retryMs);
   }
-
-  if (authDenied) throw new Error(`${CLOUD_AUTH_REQUIRED}::Perangkat belum login ke cloud toko. Transaksi disimpan lokal.`);
-  if (!acquired) throw new Error(unreachable ? 'Cloud tidak terjangkau (offline). Transaksi disimpan lokal.' : 'Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
+  if (!acquired) throw new Error('Cloud sedang dipakai terminal lain. Transaksi akan disimpan lokal.');
   try {
     return await task();
   } finally {
-    if (acquired) {
-      await fetchWithTimeout(lockUrl, { method: 'DELETE', headers: await getSupabaseAuthHeaders(baseUrl, anonKey) }).catch(() => undefined);
-    }
+    await fetchWithTimeout(`${lockUrl}?owner=${encodeURIComponent(owner)}`, { method: 'DELETE', headers: getCloudAuthHeaders(store.storeId) }).catch(() => undefined);
   }
-};
-
-export const pushToCloud = async (data: any) => {
-  const config = getCloudConfig();
-  const baseUrl = sanitizeSupabaseUrl(config.supabaseUrl || config.url || '');
-  const anonKey = config.supabaseAnonKey || config.token || '';
-  const bucket = config.supabaseBucket || 'erp-media';
-  if (!config.enabled || !baseUrl || !anonKey || !config.storeId) return null;
-
-  const provider = detectProvider(baseUrl);
-  const encodedData = secureEncode(data);
-
-  if (provider === 'upstash') {
-    const key = `pos_state:${config.storeId}`;
-    const response = await fetchWithTimeout(`${baseUrl}/set/${key}`, {
-      method: 'POST',
-      headers: getUpstashHeaders(anonKey),
-      body: encodedData,
-    });
-    if (!response.ok) throw new Error(`UPSTASH_PUSH_FAILED_${response.status}`);
-    return response.json();
-  }
-
-  const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
-  const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
-    method: 'POST',
-    headers: {
-      ...(await getSupabaseAuthHeaders(baseUrl, anonKey, 'text/plain')),
-      'x-upsert': 'true',
-    },
-    body: encodedData,
-  });
-
-  if (!response.ok) {
-    if (await isCloudAuthErrorResponse(response)) throw new Error(`${CLOUD_AUTH_REQUIRED}::SUPABASE_PUSH_DENIED_${response.status}`);
-    throw new Error(`SUPABASE_PUSH_FAILED_${response.status}`);
-  }
-  return response.json().catch(() => ({ success: true }));
-};
-
-export const pullFromCloud = async () => {
-  const config = getCloudConfig();
-  const baseUrl = sanitizeSupabaseUrl(config.supabaseUrl || config.url || '');
-  const anonKey = config.supabaseAnonKey || config.token || '';
-  const bucket = config.supabaseBucket || 'erp-media';
-  if (!config.enabled || !baseUrl || !anonKey || !config.storeId) return null;
-
-  const provider = detectProvider(baseUrl);
-
-  if (provider === 'upstash') {
-    const key = `pos_state:${config.storeId}`;
-    const response = await fetchWithTimeout(`${baseUrl}/get/${key}`, {
-      headers: getUpstashHeaders(anonKey),
-    });
-    // Jangan anggap error server sebagai "cloud kosong" — pemanggil bisa menimpa data cloud.
-    if (!response.ok) throw new Error(`UPSTASH_PULL_FAILED_${response.status}`);
-    const body = await response.json();
-    if (!body?.result) return null;
-    return secureDecode(body.result);
-  }
-
-  const path = buildStorageObjectPath(config.storeId, 'app-data.txt');
-  const response = await fetchWithTimeout(buildStorageObjectUrl(baseUrl, bucket, path), {
-    headers: await getSupabaseAuthHeaders(baseUrl, anonKey),
-  });
-  if (!response.ok) {
-    // Bucket private menyembunyikan objek dari yang tidak berhak (tampak "not found"), jadi cek not_found dulu.
-    if (await isMissingObjectResponse(response)) return null; // workspace baru, belum ada data
-    if (await isCloudAuthErrorResponse(response)) throw new Error(`${CLOUD_AUTH_REQUIRED}::SUPABASE_PULL_DENIED_${response.status}`);
-    throw new Error(`SUPABASE_PULL_FAILED_${response.status}`);
-  }
-  const encodedData = await response.text().catch(() => '');
-  if (!encodedData) return null;
-  return secureDecode(encodedData);
 };

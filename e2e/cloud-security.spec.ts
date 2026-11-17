@@ -1,19 +1,12 @@
-import { expect, test, type BrowserContext, type Route } from '@playwright/test';
+import { expect, test } from '@playwright/test';
 import { mockAccounts, mockBranches, mockCustomers, mockUsers } from '../store';
 import type { AppData, Item, User } from '../types';
+import { cloudVersion, createTestStore, loginUser, openDevice, readCloud } from './cloudHarness';
 
 /**
- * Supabase palsu yang menegakkan RLS seperti supabase/setup.sql:
- * hanya request dengan token akun toko yang boleh membaca/menulis; selain itu bucket "kosong" dan tulis ditolak.
+ * Keamanan cloud toko di backend Cloudflare asli (lokal): hanya perangkat yang login akun cloud toko
+ * yang boleh membaca/menulis data; perangkat lain ditolak dan diberi peringatan.
  */
-
-const SUPABASE = 'https://secure-store.supabase.co';
-const BASE_URL = 'http://127.0.0.1:4173';
-const DATA_PATH = 'erp-media/state/toko1/app-data.txt';
-const ACCOUNT = { email: 'toko1@contoh.com', password: 'Rahasia#2026', token: 'tok-toko1' };
-
-const encode = (data: unknown) => Buffer.from(JSON.stringify(data), 'utf8').toString('base64');
-const decode = (raw: string) => JSON.parse(Buffer.from(raw, 'base64').toString('utf8'));
 
 const storeItems: Item[] = [
   { id: 'G1', code: 'GUL-001', barcode: '7771', name: 'Gula Pasir 1kg', category: 'Sembako', brand: 'Gulaku', basePrice: 15000, memberPrices: [17500, 0, 0, 0], units: [{ name: 'Pcs', conversion: 1, price: 17500 }], stock: 40, warehouseId: 'W1' },
@@ -33,100 +26,28 @@ const storeData = (): AppData => ({
   branches: mockBranches.map(branch => ({ ...branch })), aiConsultantHistory: [], floatingChatHistory: [],
 });
 
-const createSecureCloud = () => {
-  const objects = new Map<string, string>([[DATA_PATH, encode(storeData())]]);
-  const deniedWrites: string[] = [];
-  const handler = async (route: Route) => {
-    const request = route.request();
-    const url = new URL(request.url());
-    if (url.pathname === '/auth/v1/token') {
-      const body = JSON.parse(request.postData() || '{}');
-      if (url.searchParams.get('grant_type') === 'password' && body.email === ACCOUNT.email && body.password === ACCOUNT.password) {
-        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ access_token: ACCOUNT.token, refresh_token: 'ref', expires_in: 3600, user: { id: 'auth-user-1', email: ACCOUNT.email } }) });
-      }
-      return route.fulfill({ status: 400, contentType: 'application/json', body: JSON.stringify({ error: 'invalid_grant', error_description: 'Invalid login credentials' }) });
-    }
-    if (url.pathname.startsWith('/auth/v1/')) return route.fulfill({ status: 200, body: '{}' });
-
-    const authorized = request.headers()['authorization'] === `Bearer ${ACCOUNT.token}`;
-    const key = decodeURIComponent(url.pathname.replace('/storage/v1/object/', ''));
-    const method = request.method();
-    const notFound = () => route.fulfill({ status: 400, contentType: 'application/json', body: '{"statusCode":"404","error":"not_found","message":"Object not found"}' });
-    if (method === 'GET') {
-      if (!authorized || !objects.has(key)) return notFound(); // private bucket menyembunyikan objek
-      return route.fulfill({ status: 200, contentType: 'text/plain', body: objects.get(key)! });
-    }
-    if (method === 'POST') {
-      if (!authorized) {
-        deniedWrites.push(key);
-        return route.fulfill({ status: 400, contentType: 'application/json', body: '{"statusCode":"403","error":"Unauthorized","message":"new row violates row-level security policy"}' });
-      }
-      const upsert = (request.headers()['x-upsert'] || '').toLowerCase() === 'true';
-      if (!upsert && objects.has(key)) return route.fulfill({ status: 400, contentType: 'application/json', body: '{"statusCode":"409","error":"Duplicate"}' });
-      objects.set(key, request.postData() || '');
-      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ Key: key }) });
-    }
-    if (method === 'DELETE') {
-      if (!authorized) return notFound();
-      objects.delete(key);
-      return route.fulfill({ status: 200, body: '{}' });
-    }
-    return route.fulfill({ status: 200, body: '{}' });
-  };
-  return {
-    objects,
-    deniedWrites,
-    read: (): AppData => decode(objects.get(DATA_PATH)!),
-    attach: (context: BrowserContext) => context.route(`${SUPABASE}/**`, handler),
-  };
-};
-
-const newDevice = async (browser: import('@playwright/test').Browser, cloud: ReturnType<typeof createSecureCloud>) => {
-  const context = await browser.newContext({ baseURL: BASE_URL });
-  await cloud.attach(context);
-  await context.addInitScript(({ supabase }) => {
-    if (sessionStorage.getItem('__seeded')) return;
-    sessionStorage.setItem('__seeded', '1');
-    localStorage.clear();
-    indexedDB.deleteDatabase('POSHULIO_DB');
-    localStorage.setItem('HGROUP_CLOUD_CONFIG', JSON.stringify({
-      storeId: 'toko1', enabled: true, supabaseUrl: supabase, supabaseAnonKey: 'public-anon-key', supabaseBucket: 'erp-media', displayName: 'Toko Sembako 1',
-    }));
-  }, { supabase: SUPABASE });
-  const page = await context.newPage();
-  const dialogs: string[] = [];
-  page.on('dialog', dialog => { dialogs.push(dialog.message()); void dialog.accept(); });
-  await page.goto('/');
-  await expect(page.locator('#login-user')).toBeVisible({ timeout: 60_000 });
-  return { context, page, dialogs };
-};
-
-const login = async (page: import('@playwright/test').Page, username: string) => {
-  await page.locator('#login-user').fill(username);
-  await page.locator('#login-pass').fill('123');
-  await page.getByRole('button', { name: /masuk/i }).click();
-};
-
 test('perangkat baru harus login cloud toko; data toko dipakai utuh tanpa data contoh', async ({ browser }) => {
   test.setTimeout(120_000);
-  const cloud = createSecureCloud();
-  const { page, context } = await newDevice(browser, cloud);
+  const store = await createTestStore(storeData(), 'sec');
+  const { page, context } = await openDevice(browser, store, { connected: false, displayName: 'Toko Sembako 1' });
 
   // Belum terhubung: user toko (sari) belum ada di perangkat ini.
-  await login(page, 'sari');
+  await page.locator('#login-user').fill('sari');
+  await page.locator('#login-pass').fill('123');
+  await page.getByRole('button', { name: /masuk/i }).click();
   await expect(page.getByText('Username atau Password salah!')).toBeVisible();
 
   await page.getByRole('button', { name: /Hubungkan perangkat ke cloud toko Toko Sembako 1/ }).click();
-  await page.getByLabel('Email akun cloud toko').fill(ACCOUNT.email);
-  await page.getByLabel('Password akun cloud toko').fill('salah');
+  await page.getByLabel('Email akun cloud toko').fill(store.email);
+  await page.getByLabel('Password akun cloud toko').fill('salah-sekali');
   await page.getByRole('button', { name: /Hubungkan ke Cloud/ }).click();
   await expect(page.getByText('Email atau password cloud salah.')).toBeVisible();
 
-  await page.getByLabel('Password akun cloud toko').fill(ACCOUNT.password);
+  await page.getByLabel('Password akun cloud toko').fill(store.password);
   await page.getByRole('button', { name: /Hubungkan ke Cloud/ }).click();
-  await expect(page.getByText(`terhubung sebagai ${ACCOUNT.email}`)).toBeVisible();
+  await expect(page.getByText(`terhubung sebagai ${store.email}`)).toBeVisible();
 
-  await login(page, 'sari');
+  await loginUser(page, 'sari');
   await page.getByRole('button', { name: 'Kasir', exact: true }).click();
   await page.getByPlaceholder('Cari barang / scan barcode...').fill('Oli');
   await expect(page.getByText('Oops! Produk Tidak Ada')).toBeVisible(); // barang contoh tidak ikut masuk
@@ -136,42 +57,80 @@ test('perangkat baru harus login cloud toko; data toko dipakai utuh tanpa data c
   await page.getByRole('button', { name: /SELESAI & SIMPAN/i }).click();
   await expect(page.getByText('TRANSAKSI BERHASIL')).toBeVisible();
 
-  const data = cloud.read();
+  const data = await readCloud(store);
   expect(data.sales).toHaveLength(1);
   expect(data.items.find(item => item.id === 'G1')!.stock).toBe(39);
   expect(data.items.map(item => item.id).sort()).toEqual(['G1', 'M1']);
   expect(data.users.map(user => user.username).sort()).toEqual(['admin', 'sari']);
-  expect(cloud.deniedWrites).toEqual([]);
   await context.close();
 });
 
 test('perangkat tanpa login cloud tidak bisa menimpa data toko dan diberi peringatan', async ({ browser }) => {
   test.setTimeout(120_000);
-  const cloud = createSecureCloud();
-  const before = cloud.objects.get(DATA_PATH);
-  const { page, context } = await newDevice(browser, cloud);
+  const store = await createTestStore(storeData(), 'sec');
+  const before = await cloudVersion(store);
+  const { page, context } = await openDevice(browser, store, { connected: false, displayName: 'Toko Sembako 1' });
 
-  // Login dengan user bawaan lokal, lalu ubah data → push ke cloud ditolak RLS.
-  await login(page, 'admin');
+  // Login dengan user bawaan lokal, lalu ubah data → simpan ke cloud ditolak server (401).
+  await loginUser(page, 'admin');
   await page.getByRole('button', { name: 'Barang' }).click();
   await page.locator('tr', { hasText: 'Busi NGK C7HSA' }).locator('button').nth(1).click();
   await page.getByText('Harga Level 1').locator('xpath=following-sibling::input').fill('26000');
   await page.getByRole('button', { name: /Update Master Barang/i }).click();
 
   await expect(page.getByText(/belum terkirim ke cloud/)).toBeVisible({ timeout: 20_000 });
-  expect(cloud.deniedWrites.length).toBeGreaterThan(0);
-  expect(cloud.objects.get(DATA_PATH)).toBe(before); // data toko tidak tersentuh
+  expect(await cloudVersion(store)).toBe(before); // data toko tidak tersentuh
+  expect((await readCloud(store)).items.map(item => item.id).sort()).toEqual(['G1', 'M1']);
 
   // Hubungkan lewat banner → Pengaturan, peringatan hilang dan data toko masuk.
   await page.getByRole('button', { name: 'Hubungkan di Pengaturan' }).click();
-  await page.getByLabel('Email akun cloud toko').fill(ACCOUNT.email);
-  await page.getByLabel('Password akun cloud toko').fill(ACCOUNT.password);
+  await page.getByLabel('Email akun cloud toko').fill(store.email);
+  await page.getByLabel('Password akun cloud toko').fill(store.password);
   await page.getByRole('button', { name: /Hubungkan ke Cloud/ }).click();
-  await expect(page.getByText(`terhubung sebagai ${ACCOUNT.email}`)).toBeVisible();
+  await expect(page.getByText(`terhubung sebagai ${store.email}`)).toBeVisible();
   await expect(page.getByText(/belum terkirim ke cloud/)).toHaveCount(0);
 
   await page.getByRole('button', { name: 'Barang' }).click();
   await expect(page.getByText('Gula Pasir 1kg')).toBeVisible();
   await expect(page.getByText('Busi NGK C7HSA')).toHaveCount(0);
   await context.close();
+});
+
+test('owner mendaftarkan toko baru dari aplikasi; ganti password mengeluarkan perangkat lain', async ({ browser }) => {
+  test.setTimeout(120_000);
+  // Toko yang belum terdaftar: perangkat owner mendaftarkannya lewat panel Keamanan Cloud.
+  const storeId = `reg-${Date.now().toString(36)}`;
+  const store = { storeId, email: `${storeId}@toko.test`, password: 'PasswordToko#1', token: '' };
+  const owner = await openDevice(browser, store, { connected: false });
+  await loginUser(owner.page, 'admin');
+  await owner.page.getByRole('button', { name: 'Pengaturan', exact: true }).click();
+  await owner.page.getByRole('button', { name: /Hubungkan perangkat ke cloud toko/ }).click();
+  await owner.page.getByRole('button', { name: /Daftarkan toko baru/ }).click();
+  await owner.page.getByLabel('Email akun cloud toko').fill(store.email);
+  await owner.page.getByLabel('Password akun cloud toko').fill(store.password);
+  await owner.page.getByLabel('Ulangi password').fill(store.password);
+  await owner.page.getByLabel('Kode pendaftaran toko').fill('kode-salah');
+  await owner.page.getByRole('button', { name: /Daftarkan & Hubungkan/ }).click();
+  await expect(owner.page.getByText('Kode pendaftaran toko salah.')).toBeVisible();
+  await owner.page.getByLabel('Kode pendaftaran toko').fill('dev-setup-key');
+  await owner.page.getByRole('button', { name: /Daftarkan & Hubungkan/ }).click();
+  await expect(owner.page.getByText(`terhubung sebagai ${store.email}`)).toBeVisible();
+
+  // Data perangkat owner terunggah ke cloud toko baru.
+  const ownerToken = await owner.page.evaluate(() => JSON.parse(localStorage.getItem('POS_CLOUD_SESSION_CF') || '{}').token);
+  await expect.poll(async () => (await readCloud({ ...store, token: ownerToken })).items?.length ?? 0, { timeout: 30_000 }).toBeGreaterThan(0);
+
+  // Perangkat kasir login, lalu owner mengganti password → sesi kasir dicabut.
+  const kasir = await openDevice(browser, store, { username: 'kasir' });
+  await owner.page.getByRole('button', { name: 'Ganti password' }).click();
+  await owner.page.getByLabel('Password lama').fill(store.password);
+  await owner.page.getByLabel('Password baru').fill('PasswordBaru#2');
+  await owner.page.getByLabel('Ulangi password').fill('PasswordBaru#2');
+  await owner.page.getByRole('button', { name: 'Simpan password baru' }).click();
+  await expect(owner.page.getByText(/Perangkat lain harus login ulang/)).toBeVisible();
+
+  await kasir.page.getByRole('button', { name: 'Sync' }).click();
+  await expect(kasir.page.getByText(/belum terkirim ke cloud/)).toBeVisible({ timeout: 20_000 });
+  await owner.context.close();
+  await kasir.context.close();
 });

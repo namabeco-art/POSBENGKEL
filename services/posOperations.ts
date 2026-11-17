@@ -11,6 +11,8 @@ import {
   Customer,
 } from '../types';
 import { createId } from './idService';
+import { LEDGER_VERSION } from './ledger';
+import { DEFAULT_WAREHOUSE_ID, getWarehouseStock, shiftWarehouseStock } from './warehouses';
 
 const makeId = createId;
 const nowIso = () => new Date().toISOString();
@@ -49,6 +51,7 @@ const createMovement = (
   referenceNo: string,
   user: User,
   note?: string,
+  options: { warehouseId?: string; unitCost?: number } = {},
 ): InventoryMovement => ({
   id: makeId('MOV'),
   itemId: item.id,
@@ -60,11 +63,17 @@ const createMovement = (
   newStock,
   referenceNo,
   note,
-  warehouseId: item.warehouseId,
+  // Penjualan, retur, void & opname selalu di gudang utama; penerimaan PO bisa ke gudang lain.
+  warehouseId: options.warehouseId || DEFAULT_WAREHOUSE_ID,
   operatorName: user.name,
   operatorId: user.id,
   createdAt: nowIso(),
+  unitCost: options.unitCost ?? (item.basePrice || 0),
+  ledgerV: LEDGER_VERSION,
 });
+
+/** Barang jasa tidak punya stok. */
+export const isServiceItem = (item: Pick<Item, 'itemType'> | undefined) => item?.itemType === 'JASA';
 
 /** Perubahan harga modal (HPP rata-rata) akibat penerimaan barang dari supplier. */
 export interface CostChange {
@@ -106,6 +115,12 @@ export const completeSale = (
     if (!isValidQty(saleItem.qty)) throw new Error(`Qty jual ${saleItem.name} tidak valid.`);
     if (!Number.isFinite(saleItem.price) || saleItem.price < 0) throw new Error(`Harga jual ${saleItem.name} tidak valid.`);
 
+    // Jasa/ongkos servis: tidak mengurangi stok.
+    if (isServiceItem(currentItem)) {
+      saleItems.push({ ...saleItem, isJasa: true });
+      continue;
+    }
+
     // Barang paket: stok yang berkurang adalah stok komponen penyusunnya.
     if (currentItem.isBundle && currentItem.components?.length) {
       const consumed: NonNullable<SaleItem['components']> = [];
@@ -114,7 +129,7 @@ export const completeSale = (
         const componentIndex = draftItems.findIndex(item => item.id === component.itemId);
         if (componentIndex < 0) throw new Error(`Komponen ${component.name} untuk paket ${currentItem.name} tidak ditemukan.`);
         const componentItem = draftItems[componentIndex];
-        if (componentItem.stock < need) throw new Error(`Stok ${componentItem.name} (komponen paket ${currentItem.name}) tidak mencukupi.`);
+        if (getWarehouseStock(componentItem, DEFAULT_WAREHOUSE_ID) < need) throw new Error(`Stok ${componentItem.name} (komponen paket ${currentItem.name}) tidak mencukupi.`);
         const newStock = componentItem.stock - need;
         draftItems[componentIndex] = { ...componentItem, stock: newStock };
         movements.push(createMovement(componentItem, need, componentItem.stock, newStock, 'SALE', 'OUT', sale.invoiceNo, user, `Paket ${currentItem.name}`));
@@ -124,7 +139,7 @@ export const completeSale = (
       continue;
     }
 
-    if (currentItem.stock < saleItem.qty) throw new Error(`Stok ${saleItem.name} tidak mencukupi.`);
+    if (getWarehouseStock(currentItem, DEFAULT_WAREHOUSE_ID) < saleItem.qty) throw new Error(`Stok ${saleItem.name} tidak mencukupi.`);
     const newStock = currentItem.stock - saleItem.qty;
     draftItems[targetIndex] = { ...currentItem, stock: newStock };
     movements.push(createMovement(currentItem, saleItem.qty, currentItem.stock, newStock, 'SALE', 'OUT', sale.invoiceNo, user));
@@ -179,6 +194,7 @@ const restoreSaleLineStock = (
   movements: InventoryMovement[],
   note?: string,
 ) => {
+  if (saleLine.isJasa) return; // jasa tidak punya stok
   if (saleLine.components?.length) {
     const ratio = baseQty / saleLine.qty;
     for (const component of saleLine.components) {
@@ -296,6 +312,7 @@ export const receivePurchaseOrderStock = (
   po: PurchaseOrder,
   updates: { itemId: string; receivedQty: number }[],
   user: User,
+  warehouseId: string = po.warehouseId || DEFAULT_WAREHOUSE_ID,
 ): { items: Item[]; movements: InventoryMovement[]; audit: AuditLog; costChanges: CostChange[] } => {
   const nextItems = [...items];
   const movements: InventoryMovement[] = [];
@@ -314,14 +331,15 @@ export const receivePurchaseOrderStock = (
     if (itemIndex < 0) throw new Error(`Barang ${poItem.name} tidak ditemukan di master data.`);
 
     const currentItem = nextItems[itemIndex];
+    if (isServiceItem(currentItem)) throw new Error(`${currentItem.name} adalah jasa (tanpa stok) dan tidak bisa diterima dari PO.`);
     const newStock = currentItem.stock + update.receivedQty;
     const effectiveUnitCost = poItem.cost * (1 - Math.min(100, Math.max(0, po.discount || 0)) / 100);
     const weightedCost = newStock > 0
       ? ((currentItem.stock * currentItem.basePrice) + (update.receivedQty * effectiveUnitCost)) / newStock
       : effectiveUnitCost;
     const newCost = Math.round(weightedCost);
-    nextItems[itemIndex] = { ...currentItem, stock: newStock, basePrice: newCost };
-    movements.push(createMovement(currentItem, update.receivedQty, currentItem.stock, newStock, 'PURCHASE_RECEIPT', 'IN', po.id, user));
+    nextItems[itemIndex] = shiftWarehouseStock({ ...currentItem, stock: newStock, basePrice: newCost }, warehouseId, update.receivedQty);
+    movements.push(createMovement(currentItem, update.receivedQty, currentItem.stock, newStock, 'PURCHASE_RECEIPT', 'IN', po.id, user, undefined, { warehouseId, unitCost: Math.round(effectiveUnitCost) }));
     if (newCost !== currentItem.basePrice) {
       const existing = costChanges.find(change => change.itemId === currentItem.id);
       if (existing) existing.newCost = newCost;
@@ -350,22 +368,26 @@ export const adjustStock = (
   if (!Number.isFinite(actualStock) || actualStock < 0) throw new Error('Stok fisik tidak boleh negatif.');
 
   const target = items[itemIndex];
+  if (isServiceItem(target)) throw new Error(`${target.name} adalah jasa (tanpa stok).`);
+  // Hasil hitung fisik = stok gudang utama; stok di gudang lain (mode Lengkap) tetap.
+  const mainStock = getWarehouseStock(target, DEFAULT_WAREHOUSE_ID);
+  const newTotal = target.stock + (actualStock - mainStock);
   const nextItems = [...items];
-  nextItems[itemIndex] = { ...target, stock: actualStock };
+  nextItems[itemIndex] = { ...target, stock: newTotal };
 
   return {
     items: nextItems,
     movement: createMovement(
       target,
-      Math.abs(actualStock - target.stock),
+      Math.abs(newTotal - target.stock),
       target.stock,
-      actualStock,
+      newTotal,
       'STOCK_OPNAME',
       'ADJUSTMENT',
       referenceNo,
       user,
       note,
     ),
-    audit: createAudit('STOCK_ADJUSTED', 'INVENTORY', user.name, `Opname ${referenceNo} mengubah stok ${target.name} dari ${target.stock} ke ${actualStock}.`, itemId, target.name, user.id),
+    audit: createAudit('STOCK_ADJUSTED', 'INVENTORY', user.name, `Opname ${referenceNo} mengubah stok ${target.name} dari ${mainStock} ke ${actualStock}.`, itemId, target.name, user.id),
   };
 };

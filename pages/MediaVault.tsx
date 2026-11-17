@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { CheckCircle2, FileText, Loader2, RefreshCw, Trash2, Upload, XCircle, Eye, Sparkles } from 'lucide-react';
 import { MediaAsset, User } from '../types';
-import { deleteSupabaseMedia, isSupabaseMediaConfigured, refreshSupabaseSignedUrl, uploadMediaToSupabase } from '../services/mediaService';
+import { deleteCloudMedia, isCloudMediaConfigured, refreshMediaUrl, uploadMediaToCloud } from '../services/mediaService';
 import { extractTextFromImage, fileToBase64, parseOpenRouterError } from '../services/aiService';
 import { createId } from '../services/idService';
 import { getResolvedOpenRouterApiKey } from '../services/appConfig';
@@ -88,7 +88,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
     if (!files || files.length === 0) return;
 
     // Tanpa cloud: file asli tidak disimpan, tetapi teks hasil baca tetap bisa dipakai AI (disimpan lokal).
-    const cloudStorage = isSupabaseMediaConfigured();
+    const cloudStorage = isCloudMediaConfigured();
 
     setIsUploading(true);
     setStatus({ type: 'idle', message: '' });
@@ -107,7 +107,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
           useAsKnowledge: true,
         };
         if (cloudStorage) {
-          onAddMediaAsset(await uploadMediaToSupabase(file, currentUser.name, meta));
+          onAddMediaAsset(await uploadMediaToCloud(file, currentUser.name, meta));
           saved += 1;
         } else if (extractedText) {
           onAddMediaAsset({
@@ -125,7 +125,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
           warnings.push(`${file.name}: tidak disimpan (cloud belum aktif dan teks tidak terbaca).`);
         }
       }
-      const where = cloudStorage ? 'diunggah ke Supabase Storage' : 'disimpan sebagai teks di perangkat (cloud belum aktif, file asli tidak disimpan)';
+      const where = cloudStorage ? 'diunggah ke Cloudflare R2' : 'disimpan sebagai teks di perangkat (cloud belum aktif, file asli tidak disimpan)';
       setStatus({
         type: warnings.length > 0 && saved === 0 ? 'error' : 'success',
         message: `${saved} file ${where}.${warnings.length ? ` Perhatian: ${warnings.join(' | ')}` : ''}`,
@@ -140,15 +140,16 @@ const MediaVault: React.FC<MediaVaultProps> = ({
 
   const handleDelete = async (asset: MediaAsset) => {
     if (!window.confirm(`Hapus media "${asset.name}"?`)) return;
-    if (asset.sourceType === 'supabase') await deleteSupabaseMedia(asset);
+    if (asset.sourceType === 'cloud') await deleteCloudMedia(asset);
     onRemoveMediaAsset(asset.id);
   };
 
   const handleOpenFile = async (asset: MediaAsset) => {
+    // Tautan R2 bertanda tangan berlaku 7 hari — selalu minta yang baru sebelum dibuka.
     let url = asset.signedUrl;
-    if (!url && asset.storagePath) {
-      url = await refreshSupabaseSignedUrl(asset);
-      if (url) onPatchMediaAsset(asset.id, { signedUrl: url });
+    if (asset.storagePath && asset.sourceType === 'cloud') {
+      url = await refreshMediaUrl(asset);
+      if (url && url !== asset.signedUrl) onPatchMediaAsset(asset.id, { signedUrl: url });
     }
     if (url) window.open(url, '_blank');
   };
@@ -248,7 +249,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
                   >
                     {asset.useAsKnowledge ? 'AI Source: ON' : 'AI Source: OFF'}
                   </button>
-                  {asset.sourceType === 'supabase' ? (
+                  {asset.sourceType === 'cloud' ? (
                     <>
                       <button
                         onClick={() => handleOpenFile(asset)}
@@ -258,7 +259,7 @@ const MediaVault: React.FC<MediaVaultProps> = ({
                       </button>
                       <button
                         onClick={async () => {
-                          const newUrl = await refreshSupabaseSignedUrl(asset);
+                          const newUrl = await refreshMediaUrl(asset);
                           if (newUrl) onPatchMediaAsset(asset.id, { signedUrl: newUrl });
                         }}
                         className="p-2 rounded-lg border border-slate-300 bg-white text-slate-600"

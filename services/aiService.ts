@@ -1,3 +1,7 @@
+import { CLOUD_AI_PROXY_KEY } from './appConfig';
+import { buildApiUrl, getCloudAuthHeaders } from './cloudAuth';
+import { getCloudConfig } from './syncService';
+
 export interface OpenRouterRequest {
   apiKey: string;
   userMessage: string;
@@ -10,6 +14,31 @@ export interface OpenRouterRequest {
 
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_TIMEOUT_MS = 20000;
+
+/**
+ * Kirim ke OpenRouter. Jika kuncinya penanda proxy server, request lewat Worker Cloudflare
+ * (kunci OpenRouter tersimpan sebagai secret di server, tidak pernah sampai ke browser).
+ */
+const openRouterFetch = (apiKey: string, appName: string, init: { body: string }) => {
+  if (apiKey === CLOUD_AI_PROXY_KEY) {
+    const config = getCloudConfig();
+    return fetch(buildApiUrl(config.apiBaseUrl || '', `stores/${encodeURIComponent(config.storeId)}/ai`), {
+      method: 'POST',
+      headers: getCloudAuthHeaders(config.storeId, 'application/json'),
+      body: init.body,
+    });
+  }
+  return fetch(OPENROUTER_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+      'HTTP-Referer': globalThis.location?.origin || 'https://poshulio.pages.dev',
+      'X-Title': appName,
+    },
+    body: init.body,
+  });
+};
 
 const getTextFromContent = (content: any): string => {
   if (typeof content === 'string') return content;
@@ -58,14 +87,7 @@ export const parseOpenRouterError = (rawMessage: string) => {
 };
 
 const callOpenRouterModel = async (apiKey: string, model: string, userMessage: string, systemPrompt: string, appName: string) => {
-  const response = await withTimeout(fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': globalThis.location?.origin || 'https://poshulio.vercel.app',
-      'X-Title': appName,
-    },
+  const response = await withTimeout(openRouterFetch(apiKey, appName, {
     body: JSON.stringify({
       model,
       messages: [
@@ -176,14 +198,7 @@ export const extractTextFromImage = async ({
 };
 
 const callVisionModel = async (apiKey: string, model: string, imageBase64: string, mimeType: string, prompt: string, appName: string): Promise<string> => {
-  const response = await withTimeout(fetch(OPENROUTER_URL, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-      'HTTP-Referer': globalThis.location?.origin || 'https://poshulio.vercel.app',
-      'X-Title': appName,
-    },
+  const response = await withTimeout(openRouterFetch(apiKey, appName, {
     body: JSON.stringify({
       model,
       messages: [

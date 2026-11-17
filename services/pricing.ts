@@ -1,5 +1,6 @@
 import { Item, PriceChangeLog, PriceChangeSource } from '../types';
 import { createId } from './idService';
+import { DEFAULT_WAREHOUSE_ID, getWarehouseStock } from './warehouses';
 
 /**
  * Harga jual efektif untuk level pelanggan.
@@ -161,15 +162,20 @@ export const getItemCost = (item: Item, items: Item[]): number => {
   return item.basePrice || 0;
 };
 
+/** Stok yang bisa dijual di kasir = stok gudang utama. Jasa tidak dibatasi stok. */
+export const getSellableStock = (item: Item): number =>
+  item.itemType === 'JASA' ? Number.POSITIVE_INFINITY : getWarehouseStock(item, DEFAULT_WAREHOUSE_ID);
+
 /** Stok yang bisa dijual. Untuk paket: berapa paket yang bisa dirakit dari stok komponen. */
 export const getAvailableStock = (item: Item, items: Item[]): number => {
+  if (item.itemType === 'JASA') return Number.POSITIVE_INFINITY;
   if (item.isBundle && item.components?.length) {
     return Math.max(0, Math.min(...item.components.map(component => {
       const source = items.find(entry => entry.id === component.itemId);
-      return source && component.qty > 0 ? Math.floor(source.stock / component.qty) : 0;
+      return source && component.qty > 0 ? Math.floor(getSellableStock(source) / component.qty) : 0;
     })));
   }
-  return item.stock;
+  return getSellableStock(item);
 };
 
 /** Kebutuhan stok riil (satuan dasar, per barang non-paket) dari daftar baris keranjang. */
@@ -180,6 +186,7 @@ export const getStockDemand = (lines: Array<{ item: Item; baseQty: number }>): M
     demand.set(id, { item: null, name, qty: (current?.qty || 0) + qty });
   };
   lines.forEach(({ item, baseQty }) => {
+    if (item.itemType === 'JASA') return; // jasa tidak butuh stok
     if (item.isBundle && item.components?.length) {
       item.components.forEach(component => add(component.itemId, component.name, component.qty * baseQty));
     } else {
@@ -193,7 +200,7 @@ export const getStockDemand = (lines: Array<{ item: Item; baseQty: number }>): M
 export const findStockShortage = (lines: Array<{ item: Item; baseQty: number }>, items: Item[]): { name: string; needed: number; available: number } | null => {
   for (const [itemId, entry] of getStockDemand(lines)) {
     const source = items.find(item => item.id === itemId);
-    const available = source?.stock ?? 0;
+    const available = source ? getSellableStock(source) : 0;
     if (entry.qty > available) return { name: source?.name || entry.name, needed: entry.qty, available };
   }
   return null;

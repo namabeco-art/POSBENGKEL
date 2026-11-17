@@ -7,7 +7,9 @@ import {
   Building2,
   Truck
 } from 'lucide-react';
-import { PurchaseOrder, Supplier, Item, User, PriceChangeSource } from '../types';
+import { PurchaseOrder, Supplier, Item, User, PriceChangeSource, PurchaseReturn, Warehouse } from '../types';
+import { getPurchaseOrderOutstanding } from '../services/fullOps';
+import { DEFAULT_WAREHOUSE_ID, withDefaultWarehouse } from '../services/warehouses';
 import { printPurchaseOrder } from '../services/printService';
 import CostChangeReview from '../components/CostChangeReview';
 import type { CostChange } from '../services/posOperations';
@@ -24,9 +26,17 @@ interface PurchasingProps {
   onPayPO: (poId: string, amount?: number, note?: string, method?: string) => Promise<void>;
   /** Jika tersedia, setelah penerimaan barang user ditawari menyesuaikan harga jual mengikuti modal baru. */
   onUpdateItemsBulk?: (patches: Array<Partial<Item> & { id: string }>, source?: PriceChangeSource, note?: string) => void;
+  /** Mode Lengkap: gudang tujuan penerimaan & potongan hutang dari retur beli. */
+  isFullMode?: boolean;
+  warehouses?: Warehouse[];
+  purchaseReturns?: PurchaseReturn[];
 }
 
-const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, items, currentUser, onAddPO, onReceivePO, onPayPO, onUpdateItemsBulk }) => {
+const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, items, currentUser, onAddPO, onReceivePO, onPayPO, onUpdateItemsBulk, isFullMode = false, warehouses = [], purchaseReturns = [] }) => {
+  const [targetWarehouseId, setTargetWarehouseId] = useState(DEFAULT_WAREHOUSE_ID);
+  const warehouseOptions = withDefaultWarehouse(warehouses).filter(warehouse => warehouse.isActive !== false);
+  /** Sisa hutang PO (sudah dikurangi pembayaran dan retur beli potong hutang). */
+  const outstandingOf = (po: PurchaseOrder) => getPurchaseOrderOutstanding(po, purchaseReturns);
   const [costReview, setCostReview] = useState<{ referenceNo: string; changes: CostChange[] } | null>(null);
   const [activeSubTab, setActiveSubTab] = useState('po');
   const [isNewPOModalOpen, setIsNewPOModalOpen] = useState(false);
@@ -116,7 +126,8 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
       status: 'PENDING',
       isPaid: false,
       paidAmount: 0,
-      paymentNotes: []
+      paymentNotes: [],
+      ...(isFullMode && targetWarehouseId !== DEFAULT_WAREHOUSE_ID ? { warehouseId: targetWarehouseId } : {}),
     };
 
     setIsSaving(true);
@@ -145,7 +156,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     if (selectedPOToPay) {
       setIsSaving(true);
       try {
-        await onPayPO(selectedPOToPay.id, paymentAmount || (selectedPOToPay.total - (selectedPOToPay.paidAmount || 0)), paymentNotes, paymentMethod);
+        await onPayPO(selectedPOToPay.id, paymentAmount || outstandingOf(selectedPOToPay), paymentNotes, paymentMethod);
         const paidPoId = selectedPOToPay.id;
         setSelectedPOToPay(null);
         setPaymentNotes('');
@@ -182,7 +193,8 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
     });
   }, [purchaseOrders, activeSubTab, searchTerm]);
 
-  const filteredItems = useMemo(() => items.filter(item => 
+  // Jasa dan paket tidak dibeli dari supplier (stok paket berasal dari komponennya).
+  const filteredItems = useMemo(() => items.filter(item => item.itemType !== 'JASA' && !item.isBundle).filter(item => 
     item.name.toLowerCase().includes(itemSearchTerm.toLowerCase()) || 
     item.barcode.includes(itemSearchTerm) ||
     item.code.toLowerCase().includes(itemSearchTerm.toLowerCase())
@@ -291,7 +303,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
                             <ArrowDownCircle size={18} className="md:hidden"/><span className="hidden md:inline">TERIMA</span>
                           </button>
                         )}
-                        {!po.isPaid && hasPermission(currentUser, 'purchase.pay') && <button onClick={() => { setSelectedPOToPay(po); setPaymentAmount(po.total - (po.paidAmount || 0)); }} className="p-3 md:px-3 md:py-2 bg-emerald-50 text-emerald-700 border-2 border-emerald-200 rounded-xl active:scale-90"><DollarSign size={18}/></button>}
+                        {!po.isPaid && hasPermission(currentUser, 'purchase.pay') && <button onClick={() => { setSelectedPOToPay(po); setPaymentAmount(outstandingOf(po)); }} className="p-3 md:px-3 md:py-2 bg-emerald-50 text-emerald-700 border-2 border-emerald-200 rounded-xl active:scale-90"><DollarSign size={18}/></button>}
                       </div>
                     </td>
                   </tr>
@@ -486,6 +498,13 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
 
                    {/* Footer Actions - PERSISTENT ON MOBILE */}
                    <div className="p-3 md:p-6 lg:p-8 bg-slate-900 border-t border-slate-700 space-y-3 md:space-y-6 shrink-0 relative z-20 shadow-[0_-10px_25px_-5px_rgba(0,0,0,0.3)]">
+                      {isFullMode && warehouseOptions.length > 1 && (
+                        <label className="flex items-center gap-2 text-xs font-bold text-slate-300">Gudang penerimaan
+                          <select aria-label="Gudang penerimaan" className="bg-white/20 rounded-lg px-2 py-1 text-white text-xs" value={targetWarehouseId} onChange={event => setTargetWarehouseId(event.target.value)}>
+                            {warehouseOptions.map(warehouse => <option key={warehouse.id} value={warehouse.id} className="text-slate-900">{warehouse.name}</option>)}
+                          </select>
+                        </label>
+                      )}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-2 md:gap-4">
                          <div className="bg-white/10 p-2 md:p-4 rounded-xl md:rounded-2xl border border-white/10 shadow-sm">
                             <label className="text-[7px] md:text-[8px] font-black text-slate-400 uppercase tracking-widest block mb-1">Termin (HARI)</label>
@@ -596,7 +615,7 @@ const Purchasing: React.FC<PurchasingProps> = ({ purchaseOrders, suppliers, item
               <div className="space-y-6">
                  <div className="p-6 bg-emerald-50 border-2 border-emerald-200 rounded-[1.5rem] flex flex-col items-center">
                     <div className="text-emerald-800 font-black text-[10px] uppercase tracking-[0.2em] mb-2 text-center">Total Tagihan Dibayar</div>
-                    <div className="text-3xl font-black text-emerald-900 tracking-tighter">Rp {(selectedPOToPay.total - (selectedPOToPay.paidAmount || 0)).toLocaleString()}</div>
+                    <div className="text-3xl font-black text-emerald-900 tracking-tighter">Rp {outstandingOf(selectedPOToPay).toLocaleString()}</div>
                  </div>
 
                  {/* Focus Feature: Catatan Pelunasan */}

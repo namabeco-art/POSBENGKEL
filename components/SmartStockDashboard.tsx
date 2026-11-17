@@ -46,7 +46,7 @@ const SmartStockDashboard: React.FC<SmartStockDashboardProps> = ({ items, sales,
       } catch { /* skip unparseable dates */ }
     });
 
-    return items.map(item => {
+    return items.filter(item => item.itemType !== 'JASA').map(item => {
       const stats = salesMap[item.id] || { totalQty: 0, totalRevenue: 0, lastSoldDate: '', lastSoldAt: '' };
       const dailyAvg = stats.totalQty / 30;
       const daysUntilEmpty = dailyAvg > 0 ? Math.round(item.stock / dailyAvg) : 999;

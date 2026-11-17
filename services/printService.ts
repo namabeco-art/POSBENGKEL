@@ -1,5 +1,6 @@
 import { Sale, PurchaseOrder, StoreProfile } from '../types';
 import { describeSaleLine } from './pricing';
+import { PAYMENT_METHOD_LABEL } from './salePayments';
 
 const escapeHtml = (value: unknown): string => String(value ?? '')
   .replace(/&/g, '&amp;')
@@ -75,8 +76,11 @@ export const printReceipt = (sale: Sale, profile?: StoreProfile) => {
           <div class="bold">${escapeHtml(item.name.toUpperCase())}</div>
           <div class="item-row">
             <span>${escapeHtml(describeSaleLine(item).qtyText)} x ${describeSaleLine(item).priceText}</span>
-            <span>${rupiah(item.total)}</span>
+            <span>${rupiah(item.discountAmount ? (item.grossTotal ?? item.total + item.discountAmount) : item.total)}</span>
           </div>
+          ${item.discountAmount ? `<div class="item-row"><span>${item.isPromoGift ? 'BONUS PROMO' : `DISKON ${escapeHtml(item.discountText || '')}`}</span><span>-${rupiah(item.discountAmount)}</span></div>` : ''}
+          ${item.serialNumbers?.length ? `<div>SN: ${escapeHtml(item.serialNumbers.join(', '))}</div>` : ''}
+          ${item.warrantyDays ? `<div>Garansi ${item.warrantyDays} hari</div>` : ''}
         `).join('')}
         <div class="line"></div>
         <div class="item-row">
@@ -92,10 +96,12 @@ export const printReceipt = (sale: Sale, profile?: StoreProfile) => {
           <span>TOTAL</span>
           <span>${rupiah(sale.total)}</span>
         </div>
-        <div class="item-row">
+        ${sale.payments?.length
+          ? sale.payments.map(payment => `<div class="item-row"><span>${escapeHtml(PAYMENT_METHOD_LABEL[payment.method] || payment.method).toUpperCase()}</span><span>${rupiah(payment.method === 'TUNAI' ? sale.amountReceived : payment.amount)}</span></div>`).join('')
+          : `<div class="item-row">
           <span>BAYAR (${escapeHtml(sale.paymentMethod || sale.paymentType)})</span>
           <span>${rupiah(sale.amountReceived)}</span>
-        </div>
+        </div>`}
         <div class="item-row">
           <span>KEMBALI</span>
           <span>${rupiah(sale.changeAmount)}</span>

@@ -1,6 +1,10 @@
 import { expect, test, type Page } from '@playwright/test';
 import { mockAccounts, mockBranches, mockCustomers, mockItems, mockSuppliers, mockUsers } from '../store';
 import type { AppData, Item } from '../types';
+import { buildJournals, computeAccountBalances } from '../services/ledger';
+
+/** Saldo akun seperti yang ditampilkan aplikasi: saldo awal + jurnal otomatis. */
+const ledgerBalance = (data: any, code: string) => computeAccountBalances(data.accounts, buildJournals(data)).find(account => account.code === code)!.balance;
 
 const STORAGE_KEY = 'HGROUP_ENTERPRISE_DATA';
 
@@ -73,7 +77,7 @@ test('kasir menjual oli per Dus (12) lalu owner membatalkan (void) transaksinya'
   let data = await stored(page);
   expect(data.items.find(item => item.id === '1')!.stock).toBe(0);
   expect(data.sales[0].items[0]).toMatchObject({ qty: 24, unitName: 'Dus (12)', unitQty: 2, unitPrice: 600000, total: 1_200_000 });
-  expect(data.accounts.find(account => account.code === '1-1000')!.balance).toBe(5_000_000 + 1_200_000);
+  expect(ledgerBalance(data, '1-1000')).toBe(5_000_000 + 1_200_000);
 
   await page.getByRole('button', { name: 'Penjualan' }).click();
   await page.locator('tbody tr').first().getByRole('button').first().click();
@@ -84,8 +88,9 @@ test('kasir menjual oli per Dus (12) lalu owner membatalkan (void) transaksinya'
   data = await stored(page);
   expect(data.items.find(item => item.id === '1')!.stock).toBe(24);
   expect(data.sales[0].voidReason).toBe('Salah input qty');
-  expect(data.accounts.find(account => account.code === '1-1000')!.balance).toBe(5_000_000);
-  expect(data.accounts.find(account => account.code === '4-1100')!.balance).toBe(0);
+  expect(ledgerBalance(data, '1-1000')).toBe(5_000_000);
+  expect(ledgerBalance(data, '4-1100')).toBe(0);
+  expect(ledgerBalance(data, '5-1100')).toBe(0); // HPP ikut dibatalkan
   await expect(page.locator('tbody tr').first()).toContainText('Void');
 
   // Omzet dashboard tidak menghitung transaksi void.

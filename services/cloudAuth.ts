@@ -1,28 +1,25 @@
 /**
- * Login perangkat ke cloud toko (Supabase Auth) — tanpa dependency tambahan, memakai REST API GoTrue.
+ * Login perangkat ke cloud toko (Cloudflare Worker + Durable Object).
  *
- * Model keamanan: data toko di Supabase Storage hanya bisa dibaca/ditulis oleh akun yang terdaftar
- * sebagai anggota workspace (lihat supabase/setup.sql). Owner membuat satu akun cloud (email + password)
- * untuk toko, lalu tiap perangkat login sekali. Login staf (admin/kasir/gudang) tetap seperti biasa.
+ * Model keamanan: data toko hanya bisa dibaca/ditulis perangkat yang login dengan akun cloud toko
+ * (email + password, di-hash PBKDF2 di server). Owner mendaftarkan toko sekali memakai kode pendaftaran
+ * (SETUP_KEY milik server), lalu tiap perangkat login sekali. Login staf (admin/kasir/gudang) tetap sama.
  */
+import { setCloudAiAvailable } from './appConfig';
 
-const SESSION_KEY = 'POS_CLOUD_SESSION';
-/** Token diperbarui jika sisa masa berlakunya kurang dari ini. */
-const REFRESH_MARGIN_MS = 60_000;
-const AUTH_TIMEOUT_MS = 15_000;
+const SESSION_KEY = 'POS_CLOUD_SESSION_CF';
+const REQUEST_TIMEOUT_MS = 15_000;
 
 export interface CloudSession {
-  /** URL project Supabase pemilik sesi — sesi tidak dipakai untuk project lain. */
-  url: string;
-  accessToken: string;
-  refreshToken: string;
-  /** Epoch ms saat access token kedaluwarsa. */
-  expiresAt: number;
+  storeId: string;
+  token: string;
   email: string;
-  userId: string;
+  connectedAt: string;
 }
 
-const normalizeUrl = (url: string) => url.trim().replace(/\/+$/, '');
+export const CLOUD_AUTH_REQUIRED = 'CLOUD_AUTH_REQUIRED';
+
+const listeners = new Set<(session: CloudSession | null) => void>();
 
 const readSession = (): CloudSession | null => {
   try {
@@ -38,136 +35,141 @@ const writeSession = (session: CloudSession | null) => {
     if (session) localStorage.setItem(SESSION_KEY, JSON.stringify(session));
     else localStorage.removeItem(SESSION_KEY);
   } catch { /* storage diblokir */ }
+  if (!session) setCloudAiAvailable(false);
   listeners.forEach(listener => listener(session));
 };
 
-const listeners = new Set<(session: CloudSession | null) => void>();
-
-/** Dipanggil saat sesi berubah (login, logout, sesi kedaluwarsa). */
+/** Dipanggil saat sesi berubah (login, logout, sesi ditolak server). */
 export const onCloudSessionChange = (listener: (session: CloudSession | null) => void) => {
   listeners.add(listener);
   return () => { listeners.delete(listener); };
 };
 
-/** Sesi aktif untuk project Supabase tertentu (atau null). */
-export const getCloudSession = (url?: string): CloudSession | null => {
+/** Sesi aktif untuk toko tertentu (atau null). */
+export const getCloudSession = (storeId?: string): CloudSession | null => {
   const session = readSession();
   if (!session) return null;
-  if (url && normalizeUrl(url) !== session.url) return null;
+  if (storeId && storeId.trim().toLowerCase() !== session.storeId) return null;
   return session;
 };
 
-const authRequest = async (baseUrl: string, anonKey: string, path: string, body: unknown, accessToken?: string) => {
+/**
+ * Hapus sesi lokal (mis. server membalas 401 — token dicabut karena password diganti).
+ * Perangkat yang memang belum pernah login tidak memicu peringatan "sesi dicabut".
+ */
+export const clearCloudSession = () => {
+  if (readSession()) writeSession(null);
+};
+
+export const normalizeStoreId = (storeId: string) => storeId.trim().toLowerCase().replace(/\s+/g, '_');
+
+export const isValidStoreId = (storeId: string) => /^[a-z0-9][a-z0-9_-]{2,63}$/.test(storeId);
+
+export const buildApiUrl = (apiBase: string, path: string) => `${(apiBase || '').replace(/\/+$/, '')}/api/${path.replace(/^\/+/, '')}`;
+
+const deviceLabel = () => {
+  const agent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  const platform = /Android/i.test(agent) ? 'Android' : /iPhone|iPad/i.test(agent) ? 'iOS' : /Windows/i.test(agent) ? 'Windows' : /Mac/i.test(agent) ? 'Mac' : 'Perangkat';
+  return `${platform} • ${new Date().toLocaleDateString('id-ID')}`;
+};
+
+const request = async (url: string, init: RequestInit) => {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AUTH_TIMEOUT_MS);
+  const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
   try {
-    const response = await fetch(`${normalizeUrl(baseUrl)}/auth/v1/${path}`, {
-      method: 'POST',
-      headers: {
-        apikey: anonKey,
-        'Content-Type': 'application/json',
-        ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-      },
-      body: JSON.stringify(body),
-      signal: controller.signal,
-    });
+    const response = await fetch(url, { ...init, signal: controller.signal });
     const data = await response.json().catch(() => ({}));
-    return { response, data };
+    return { response, data: data as Record<string, any> };
+  } catch {
+    throw new Error('Tidak bisa menghubungi server cloud. Periksa koneksi internet.');
   } finally {
     clearTimeout(timer);
   }
 };
 
-const toSession = (url: string, data: any): CloudSession => ({
-  url: normalizeUrl(url),
-  accessToken: data.access_token,
-  refreshToken: data.refresh_token,
-  expiresAt: Date.now() + (Number(data.expires_in) || 3600) * 1000,
-  email: data.user?.email || '',
-  userId: data.user?.id || '',
-});
+/** Cek server & apakah proxy AI tersedia. */
+export const checkCloudHealth = async (apiBase: string) => {
+  const { response, data } = await request(buildApiUrl(apiBase, 'health'), { method: 'GET' });
+  if (!response.ok || data.ok !== true) throw new Error(`Server cloud tidak merespons dengan benar (HTTP ${response.status}).`);
+  return { ai: Boolean(data.ai) };
+};
 
-/** Login perangkat ke cloud toko dengan email & password akun Supabase. */
-export const signInCloud = async (url: string, anonKey: string, email: string, password: string): Promise<CloudSession> => {
-  if (!url || !anonKey) throw new Error('Isi URL & anon key Supabase dulu di Pengaturan.');
-  let result;
+const refreshAiAvailability = async (apiBase: string) => {
   try {
-    result = await authRequest(url, anonKey, 'token?grant_type=password', { email: email.trim(), password });
-  } catch {
-    throw new Error('Tidak bisa menghubungi server cloud. Periksa koneksi internet.');
-  }
-  const { response, data } = result;
-  if (!response.ok || !data?.access_token) {
-    const message = String(data?.error_description || data?.msg || data?.message || '');
-    if (/invalid login credentials/i.test(message)) throw new Error('Email atau password cloud salah.');
-    if (/email not confirmed/i.test(message)) throw new Error('Email akun cloud belum dikonfirmasi di Supabase.');
-    throw new Error(`Login cloud gagal${message ? `: ${message}` : ` (HTTP ${response.status})`}.`);
-  }
-  const session = toSession(url, data);
+    setCloudAiAvailable((await checkCloudHealth(apiBase)).ai);
+  } catch { /* abaikan — AI opsional */ }
+};
+
+const finishLogin = (storeId: string, data: Record<string, any>, apiBase: string) => {
+  const session: CloudSession = { storeId, token: String(data.token), email: String(data.email || ''), connectedAt: new Date().toISOString() };
   writeSession(session);
+  void refreshAiAvailability(apiBase);
   return session;
 };
 
-export const signOutCloud = async (anonKey?: string) => {
+const failure = (data: Record<string, any>, status: number, fallback: string) =>
+  new Error(String(data.message || '') || `${fallback} (HTTP ${status}).`);
+
+/** Login perangkat ke cloud toko. */
+export const signInCloud = async (apiBase: string, storeIdRaw: string, email: string, password: string): Promise<CloudSession> => {
+  const storeId = normalizeStoreId(storeIdRaw);
+  if (!isValidStoreId(storeId)) throw new Error('Store ID belum diisi dengan benar di Pengaturan → Cloud Sync.');
+  const { response, data } = await request(buildApiUrl(apiBase, `stores/${encodeURIComponent(storeId)}/login`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email: email.trim(), password, label: deviceLabel() }),
+  });
+  if (!response.ok || !data.token) throw failure(data, response.status, 'Login cloud gagal');
+  return finishLogin(storeId, data, apiBase);
+};
+
+/** Daftarkan toko baru di cloud (sekali, oleh owner) memakai kode pendaftaran server. */
+export const registerCloudStore = async (apiBase: string, storeIdRaw: string, email: string, password: string, setupKey: string): Promise<CloudSession> => {
+  const storeId = normalizeStoreId(storeIdRaw);
+  if (!isValidStoreId(storeId)) throw new Error('Store ID hanya huruf kecil, angka, - atau _ (3–64 karakter).');
+  const { response, data } = await request(buildApiUrl(apiBase, `stores/${encodeURIComponent(storeId)}/register`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Setup-Key': setupKey.trim() },
+    body: JSON.stringify({ email: email.trim(), password, label: deviceLabel() }),
+  });
+  if (!response.ok || !data.token) throw failure(data, response.status, 'Pendaftaran toko gagal');
+  return finishLogin(storeId, data, apiBase);
+};
+
+export const signOutCloud = async (apiBase: string) => {
   const session = readSession();
   writeSession(null);
-  if (session && anonKey) {
-    await authRequest(session.url, anonKey, 'logout', {}, session.accessToken).catch(() => undefined);
+  if (session) {
+    await request(buildApiUrl(apiBase, `stores/${encodeURIComponent(session.storeId)}/logout`), {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${session.token}` },
+    }).catch(() => undefined);
   }
 };
 
-let refreshing: Promise<string | null> | null = null;
-
-/**
- * Access token yang masih berlaku untuk project ini, diperbarui otomatis bila hampir kedaluwarsa.
- * Mengembalikan null bila perangkat belum login (request memakai anon key dan akan ditolak RLS).
- */
-export const getCloudAccessToken = async (url: string, anonKey: string): Promise<string | null> => {
-  const session = getCloudSession(url);
-  if (!session) return null;
-  if (session.expiresAt - Date.now() > REFRESH_MARGIN_MS) return session.accessToken;
-  if (!refreshing) {
-    refreshing = (async () => {
-      try {
-        const { response, data } = await authRequest(url, anonKey, 'token?grant_type=refresh_token', { refresh_token: session.refreshToken });
-        if (!response.ok || !data?.access_token) {
-          // Refresh token dicabut/kedaluwarsa: perangkat harus login ulang.
-          if (response.status >= 400 && response.status < 500) writeSession(null);
-          return null;
-        }
-        const next = toSession(url, { ...data, user: data.user || { email: session.email, id: session.userId } });
-        writeSession(next);
-        return next.accessToken;
-      } catch {
-        // Offline: pakai token lama selagi belum benar-benar kedaluwarsa.
-        return session.expiresAt > Date.now() ? session.accessToken : null;
-      } finally {
-        refreshing = null;
-      }
-    })();
-  }
-  return refreshing;
+/** Ganti password akun cloud. Semua perangkat lain keluar; perangkat ini tetap login. */
+export const changeCloudPassword = async (apiBase: string, currentPassword: string, newPassword: string) => {
+  const session = readSession();
+  if (!session) throw new Error('Perangkat belum login cloud.');
+  const { response, data } = await request(buildApiUrl(apiBase, `stores/${encodeURIComponent(session.storeId)}/password`), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.token}` },
+    body: JSON.stringify({ currentPassword, newPassword }),
+  });
+  if (!response.ok || !data.token) throw failure(data, response.status, 'Ganti password gagal');
+  writeSession({ ...session, token: String(data.token) });
 };
 
-/** Header Supabase: token login perangkat bila ada, kalau tidak anon key (akses publik/legacy). */
-export const getSupabaseAuthHeaders = async (url: string, anonKey: string, contentType?: string): Promise<Record<string, string>> => {
-  const token = await getCloudAccessToken(url, anonKey);
-  const headers: Record<string, string> = {
-    apikey: anonKey,
-    Authorization: `Bearer ${token || anonKey}`,
-  };
+/** Header otorisasi untuk toko aktif (kosong bila belum login). */
+export const getCloudAuthHeaders = (storeId: string, contentType?: string): Record<string, string> => {
+  const session = getCloudSession(storeId);
+  const headers: Record<string, string> = {};
+  if (session) headers.Authorization = `Bearer ${session.token}`;
   if (contentType) headers['Content-Type'] = contentType;
   return headers;
 };
 
-export const CLOUD_AUTH_REQUIRED = 'CLOUD_AUTH_REQUIRED';
-
-/** Respons yang menandakan akses ditolak RLS / perangkat belum login. */
-export const isCloudAuthErrorResponse = async (response: Response): Promise<boolean> => {
-  if (response.status === 401 || response.status === 403) return true;
-  if (response.status !== 400) return false;
-  const body = await response.clone().text().catch(() => '');
-  return /row-level security|unauthorized|"statusCode"\s*:\s*"?40[13]|jwt expired|invalid jwt/i.test(body);
-};
+/** Respons yang menandakan perangkat belum login / sesinya dicabut. */
+export const isCloudAuthErrorResponse = (response: Response) => response.status === 401;
 
 export const isCloudAuthError = (error: unknown) => String((error as any)?.message || '').startsWith(CLOUD_AUTH_REQUIRED);

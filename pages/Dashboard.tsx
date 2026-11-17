@@ -101,7 +101,7 @@ const Dashboard: React.FC<DashboardProps> = ({ items, sales, customers, accounts
     [cashSessions, currentUser.id],
   );
 
-  const lowStockItems = useMemo(() => items.filter(item => !item.isBundle && item.stock <= (item.reorderLevel || 10)).slice(0, 5), [items]);
+  const lowStockItems = useMemo(() => items.filter(item => !item.isBundle && item.itemType !== 'JASA' && item.stock <= (item.reorderLevel || 10)).slice(0, 5), [items]);
   const canSeeCost = hasPermission(currentUser, 'item.edit') || hasPermission(currentUser, 'report.view');
   const lastClosedSession = useMemo(
     () => cashSessions.filter(session => session.userId === currentUser.id && session.status === 'CLOSED')

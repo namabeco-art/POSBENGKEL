@@ -11,9 +11,11 @@
  *   from another device's stale copy.
  */
 
-import { AppData, DeletedRecord, InventoryMovement, Item, StoreProfile } from '../types';
+import { AppData, AppSettings, Customer, DeletedRecord, InventoryMovement, Item, PurchaseOrder, StoreProfile } from '../types';
 import { CUSTOMER_FIELD_GROUPS, ITEM_FIELD_GROUPS, mergeEntityByFieldGroups } from './syncMeta';
 import { PRICE_HISTORY_LIMIT } from './pricing';
+import { BALANCE_FIELD } from './customerLedger';
+import { DEFAULT_WAREHOUSE_ID, warehouseMovementDelta } from './warehouses';
 
 type EntityWithId = { id: string; createdAt?: string; updatedAt?: string; [key: string]: any };
 type EntityWithCode = { code: string; updatedAt?: string; [key: string]: any };
@@ -152,12 +154,13 @@ const reconcileStockWithMovements = (
     if (onlyLocal.length === 0 && onlyRemote.length === 0) return item;
 
     // Patokan: opname terakhir (berdasarkan waktu) dari gabungan mutasi barang ini.
+    // Hanya STOCK_OPNAME — mutasi TRANSFER antar gudang juga ADJUSTMENT tetapi tidak mengubah stok total.
     const allForItem = new Map<string, InventoryMovement>();
     [...localMovements, ...remoteMovements].forEach(movement => {
       if (movement.itemId === item.id) allForItem.set(movement.id, movement);
     });
     const sorted = Array.from(allForItem.values()).sort((a, b) => (a.createdAt || '').localeCompare(b.createdAt || ''));
-    const anchorIndex = sorted.map(movement => movement.direction).lastIndexOf('ADJUSTMENT');
+    const anchorIndex = sorted.map(movement => movement.type).lastIndexOf('STOCK_OPNAME');
 
     let stock: number;
     if (anchorIndex >= 0) {
@@ -165,8 +168,80 @@ const reconcileStockWithMovements = (
     } else {
       stock = remoteItem.stock + onlyLocal.reduce((sum, movement) => sum + movementDelta(movement), 0);
     }
-    if (!Number.isFinite(stock) || stock === item.stock) return item;
-    return { ...item, stock };
+
+    // Stok gudang selain gudang utama: versi cloud + mutasi gudang tsb yang hanya ada di perangkat ini.
+    const warehouseShift = new Map<string, number>();
+    onlyLocal.forEach(movement => {
+      if (!movement.warehouseId || movement.warehouseId === DEFAULT_WAREHOUSE_ID) return;
+      warehouseShift.set(movement.warehouseId, (warehouseShift.get(movement.warehouseId) || 0) + warehouseMovementDelta(movement));
+    });
+    const touchesWarehouses = [...onlyLocal, ...onlyRemote].some(movement => movement.warehouseId && movement.warehouseId !== DEFAULT_WAREHOUSE_ID);
+    let stockByWarehouse = item.stockByWarehouse;
+    if (touchesWarehouses) {
+      const nextMap: Record<string, number> = { ...(remoteItem.stockByWarehouse || {}) };
+      warehouseShift.forEach((delta, warehouseId) => { nextMap[warehouseId] = (nextMap[warehouseId] || 0) + delta; });
+      Object.keys(nextMap).forEach(key => { if (!nextMap[key]) delete nextMap[key]; });
+      stockByWarehouse = Object.keys(nextMap).length ? nextMap : undefined;
+    }
+
+    const stockChanged = Number.isFinite(stock) && stock !== item.stock;
+    const warehouseChanged = JSON.stringify(stockByWarehouse || {}) !== JSON.stringify(item.stockByWarehouse || {});
+    if (!stockChanged && !warehouseChanged) return item;
+    return { ...item, ...(stockChanged ? { stock } : {}), stockByWarehouse };
+  });
+};
+
+/**
+ * Rekonsiliasi saldo pelanggan (piutang, poin, deposit) dari buku besar pelanggan — sama seperti stok:
+ * saldo = versi cloud + perubahan yang hanya ada di perangkat ini. Dua kasir offline yang sama-sama
+ * menjual kredit ke pelanggan yang sama → piutang keduanya tercatat, tidak saling menimpa.
+ */
+const reconcileCustomerBalances = (mergedCustomers: Customer[], local: Partial<AppData>, remote: Partial<AppData>): Customer[] => {
+  const localEntries = local.customerLedger || [];
+  const remoteEntries = remote.customerLedger || [];
+  const localIds = new Set(localEntries.map(entry => entry.id));
+  const remoteIds = new Set(remoteEntries.map(entry => entry.id));
+  const localOnly = new Map<string, number>();
+  const touched = new Set<string>();
+  localEntries.forEach(entry => {
+    if (remoteIds.has(entry.id)) return;
+    const key = `${entry.customerId}|${entry.kind}`;
+    localOnly.set(key, (localOnly.get(key) || 0) + entry.delta);
+    touched.add(key);
+  });
+  remoteEntries.forEach(entry => {
+    if (!localIds.has(entry.id)) touched.add(`${entry.customerId}|${entry.kind}`);
+  });
+  if (touched.size === 0) return mergedCustomers;
+
+  const remoteCustomers = new Map((remote.customers || []).map(customer => [customer.id, customer]));
+  const localCustomers = new Set((local.customers || []).map(customer => customer.id));
+  return mergedCustomers.map(customer => {
+    const remoteCustomer = remoteCustomers.get(customer.id);
+    if (!remoteCustomer || !localCustomers.has(customer.id)) return customer;
+    let next = customer;
+    (Object.keys(BALANCE_FIELD) as Array<keyof typeof BALANCE_FIELD>).forEach(kind => {
+      const key = `${customer.id}|${kind}`;
+      if (!touched.has(key)) return;
+      const field = BALANCE_FIELD[kind];
+      const value = Math.max(0, Number(remoteCustomer[field] || 0) + (localOnly.get(key) || 0));
+      if (value !== Number(next[field] || 0)) next = { ...next, [field]: value };
+    });
+    return next;
+  });
+};
+
+/** Nilai bayar PO tidak boleh lebih kecil dari total bukti bayar (dua perangkat membayar PO yang sama). */
+const reconcilePurchasePayments = (orders: PurchaseOrder[], data: Partial<AppData>): PurchaseOrder[] => {
+  const paidByPo = new Map<string, number>();
+  (data.paymentRecords || []).forEach(payment => {
+    if (payment.referenceType !== 'PURCHASE_ORDER' || payment.direction !== 'OUT') return;
+    paidByPo.set(payment.referenceNo, (paidByPo.get(payment.referenceNo) || 0) + payment.amount);
+  });
+  return orders.map(order => {
+    const recorded = paidByPo.get(order.id) || 0;
+    if (recorded <= (order.paidAmount || 0)) return order;
+    return { ...order, paidAmount: recorded, isPaid: order.isPaid || recorded >= order.total };
   });
 };
 
@@ -191,6 +266,12 @@ const mergeStoreProfile = (local?: StoreProfile, remote?: StoreProfile): StorePr
   return isLocalNewer(local, remote) ? local : remote;
 };
 
+const mergeAppSettings = (local?: AppSettings, remote?: AppSettings): AppSettings | undefined => {
+  if (!local) return remote;
+  if (!remote) return local;
+  return isLocalNewer(local, remote) ? local : remote;
+};
+
 /**
  * Smart merge of local and remote AppData.
  * Returns merged data that preserves changes from both sides.
@@ -199,11 +280,13 @@ export const mergeAppData = (local: Partial<AppData>, remote: Partial<AppData>):
   const deletedRecords = mergeDeletedRecords(local.deletedRecords, remote.deletedRecords);
   const deleted = new Set(deletedRecords.map(recordKey));
 
+  const paymentRecords = mergeAppendOnly(local.paymentRecords || [], remote.paymentRecords || []);
+
   return {
     // Mutable master data — newest change wins, field groups for high-contention entities.
     users: withoutDeleted('users', mergeMutable(local.users || [], remote.users || []), deleted),
     items: withoutDeleted('items', reconcileStockWithMovements(mergeMutable(local.items || [], remote.items || [], ITEM_FIELD_GROUPS), local, remote), deleted),
-    customers: withoutDeleted('customers', mergeMutable(local.customers || [], remote.customers || [], CUSTOMER_FIELD_GROUPS), deleted),
+    customers: withoutDeleted('customers', reconcileCustomerBalances(mergeMutable(local.customers || [], remote.customers || [], CUSTOMER_FIELD_GROUPS), local, remote), deleted),
     suppliers: withoutDeleted('suppliers', mergeMutable(local.suppliers || [], remote.suppliers || []), deleted),
     accounts: mergeByCode(local.accounts || [], remote.accounts || []),
     branches: withoutDeleted('branches', mergeMutable(local.branches || [], remote.branches || []), deleted),
@@ -211,10 +294,22 @@ export const mergeAppData = (local: Partial<AppData>, remote: Partial<AppData>):
     // Append-only transaction logs use union; mutable workflow documents use newest change.
     sales: mergeAppendOnly(local.sales || [], remote.sales || []),
     returns: mergeMutable(local.returns || [], remote.returns || []),
-    purchaseOrders: withoutDeleted('purchaseOrders', mergeMutable(local.purchaseOrders || [], remote.purchaseOrders || []), deleted),
+    purchaseOrders: reconcilePurchasePayments(withoutDeleted('purchaseOrders', mergeMutable(local.purchaseOrders || [], remote.purchaseOrders || []), deleted), { paymentRecords }),
     inventoryMovements: mergeAppendOnly(local.inventoryMovements || [], remote.inventoryMovements || []),
     auditLogs: mergeAppendOnly(local.auditLogs || [], remote.auditLogs || []).slice(0, AUDIT_LOG_LIMIT),
-    paymentRecords: mergeAppendOnly(local.paymentRecords || [], remote.paymentRecords || []),
+    paymentRecords,
+
+    // Mode Lengkap
+    appSettings: mergeAppSettings(local.appSettings, remote.appSettings),
+    customerLedger: mergeAppendOnly(local.customerLedger || [], remote.customerLedger || []),
+    manualJournals: withoutDeleted('manualJournals', mergeAppendOnly(local.manualJournals || [], remote.manualJournals || []), deleted),
+    mechanics: withoutDeleted('mechanics', mergeMutable(local.mechanics || [], remote.mechanics || []), deleted),
+    commissionPayments: mergeAppendOnly(local.commissionPayments || [], remote.commissionPayments || []),
+    heldCarts: withoutDeleted('heldCarts', mergeMutable(local.heldCarts || [], remote.heldCarts || []), deleted),
+    serviceOrders: withoutDeleted('serviceOrders', mergeMutable(local.serviceOrders || [], remote.serviceOrders || []), deleted),
+    warehouses: withoutDeleted('warehouses', mergeMutable(local.warehouses || [], remote.warehouses || []), deleted),
+    stockTransfers: mergeAppendOnly(local.stockTransfers || [], remote.stockTransfers || []),
+    purchaseReturns: mergeAppendOnly(local.purchaseReturns || [], remote.purchaseReturns || []),
     cashSessions: mergeMutable(local.cashSessions || [], remote.cashSessions || []),
     cashExpenses: withoutDeleted('cashExpenses', mergeAppendOnly(local.cashExpenses || [], remote.cashExpenses || []), deleted),
     inventoryLogs: mergeAppendOnly((local.inventoryLogs || []) as any[], (remote.inventoryLogs || []) as any[]),

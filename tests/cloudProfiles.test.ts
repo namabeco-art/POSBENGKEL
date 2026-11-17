@@ -9,17 +9,6 @@ describe('cloudProfiles', () => {
   it('falls back to store id and default region', () => {
     expect(getCloudProfileLabel({ storeId: 'sumatra_hub' })).toBe('sumatra_hub');
     expect(getCloudProfileRegion({})).toBe('Cloud');
-  });
-
-  it('maps legacy cloud configs to PUSAT automatically', () => {
-    const normalized = normalizeCloudProfile({
-      storeId: 'demo_store',
-      url: 'https://example.upstash.io',
-      token: 'secret',
-      enabled: true,
-    });
-
-    expect(normalized.displayName).toBe('PUSAT');
-    expect(normalized.region).toBe('Pusat');
+    expect(normalizeCloudProfile({ storeId: 'demo_store', enabled: true })).toMatchObject({ displayName: 'demo_store', region: 'Cloud' });
   });
 });

@@ -13,6 +13,7 @@ import { printSimpleReport, exportToExcel } from '../services/printService';
 import SmartStockDashboard from '../components/SmartStockDashboard';
 import PiutangDashboard from '../components/PiutangDashboard';
 import ProfitAnalysis from '../components/ProfitAnalysis';
+import { describeSalePayments, getSaleCashAmount } from '../services/salePayments';
 
 interface ReportingProps {
   items: Item[];
@@ -61,7 +62,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
   const salesMetrics = useMemo(() => {
     const revenue = sales.reduce((sum, x) => sum + x.total, 0);
     const count = sales.length;
-    const cashShare = sales.filter(s => s.paymentType === 'TUNAI').reduce((sum, x) => sum + x.total, 0);
+    const cashShare = sales.reduce((sum, x) => sum + getSaleCashAmount(x), 0);
     const nonCashShare = revenue - cashShare;
     const totalProfit = sales.reduce((sum, s) => sum + calculateSaleProfit(s), 0);
     return { revenue, count, cashShare, nonCashShare, totalProfit };
@@ -146,7 +147,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
         columns = ['No Faktur', 'Tanggal', 'Pelanggan', 'Total Omzet', 'Total Laba', 'Metode'];
         data = (filtered as Sale[]).map(s => {
           const profit = calculateSaleProfit(s);
-          return [s.invoiceNo, s.date, s.customerName, s.total, profit, s.paymentType];
+          return [s.invoiceNo, s.date, s.customerName, s.total, profit, describeSalePayments(s)];
         });
         break;
       case 'kas':
@@ -378,7 +379,7 @@ const Reporting: React.FC<ReportingProps> = ({ items, customers, suppliers, acco
                       <td className="px-8 py-5 uppercase">{s.customerName}</td>
                       <td className="px-8 py-5 text-right text-slate-900">Rp {s.total.toLocaleString()}</td>
                       <td className="px-8 py-5 text-right text-emerald-600">Rp {calculateSaleProfit(s).toLocaleString()}</td>
-                      <td className="px-8 py-5 text-center"><span className="bg-slate-100 px-2 py-0.5 rounded text-[8px] font-black uppercase">{s.paymentType}</span></td>
+                      <td className="px-8 py-5 text-center"><span className="bg-slate-100 px-2 py-0.5 rounded text-[8px] font-black uppercase">{describeSalePayments(s)}</span></td>
                    </tr>
                  ))}
                  {activeReport === 'kas' && (filteredData as Account[]).filter(a => a.type === 'ASSET' && (a.name.includes('Kas') || a.name.includes('Bank'))).map(a => (

@@ -3,7 +3,8 @@ import { useShallow } from 'zustand/shallow';
 import { 
   AppData, User, Item, Customer, Supplier, Account, PurchaseOrder, 
   Sale, SaleReturn, InventoryMovement, AuditLog, CashSession, PaymentRecord, PromotionCampaign, 
-  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage, CashExpense, PriceChangeLog, DeletedRecord, StoreProfile
+  MediaAsset, AIUndoEntry, Branch, InventoryLog, ChatMessage, CashExpense, PriceChangeLog, DeletedRecord, StoreProfile,
+  AppSettings, CustomerLedgerEntry, ManualJournal, Mechanic, CommissionPayment, HeldCart, ServiceOrder, Warehouse, StockTransfer, PurchaseReturn
 } from './types';
 import { 
   mockUsers, mockItems, mockCustomers, mockSuppliers, mockAccounts, 
@@ -43,6 +44,16 @@ export interface AppState extends AppData {
   priceHistory: PriceChangeLog[];
   deletedRecords: DeletedRecord[];
   storeProfile?: StoreProfile;
+  appSettings?: AppSettings;
+  customerLedger: CustomerLedgerEntry[];
+  manualJournals: ManualJournal[];
+  mechanics: Mechanic[];
+  commissionPayments: CommissionPayment[];
+  heldCarts: HeldCart[];
+  serviceOrders: ServiceOrder[];
+  warehouses: Warehouse[];
+  stockTransfers: StockTransfer[];
+  purchaseReturns: PurchaseReturn[];
 
   // Config fields
   openRouterApiKey?: string;
@@ -76,6 +87,11 @@ export interface AppState extends AppData {
   /** Catat penghapusan agar data tidak muncul lagi dari salinan perangkat lain saat sinkronisasi. */
   recordDeletion: (collection: string, ids: string[]) => void;
   setStoreProfile: (profile: StoreProfile) => void;
+  setAppSettings: (settings: AppSettings) => void;
+  setMechanics: (updater: Updater<Mechanic[]>) => void;
+  setHeldCarts: (updater: Updater<HeldCart[]>) => void;
+  setServiceOrders: (updater: Updater<ServiceOrder[]>) => void;
+  setWarehouses: (updater: Updater<Warehouse[]>) => void;
 }
 
 export const useAppStore = create<AppState>((set, get) => ({
@@ -102,6 +118,16 @@ export const useAppStore = create<AppState>((set, get) => ({
   priceHistory: [],
   deletedRecords: [],
   storeProfile: undefined,
+  appSettings: undefined,
+  customerLedger: [],
+  manualJournals: [],
+  mechanics: [],
+  commissionPayments: [],
+  heldCarts: [],
+  serviceOrders: [],
+  warehouses: [],
+  stockTransfers: [],
+  purchaseReturns: [],
 
   // Implement applyData logic
   applyData: (data) => set((prev) => {
@@ -129,6 +155,16 @@ export const useAppStore = create<AppState>((set, get) => ({
       priceHistory: Array.isArray(data.priceHistory) ? data.priceHistory : prev.priceHistory,
       deletedRecords: Array.isArray(data.deletedRecords) ? data.deletedRecords : prev.deletedRecords,
       storeProfile: data.storeProfile && typeof data.storeProfile === 'object' ? data.storeProfile : prev.storeProfile,
+      appSettings: data.appSettings && typeof data.appSettings === 'object' ? data.appSettings : prev.appSettings,
+      customerLedger: Array.isArray(data.customerLedger) ? data.customerLedger : prev.customerLedger,
+      manualJournals: Array.isArray(data.manualJournals) ? data.manualJournals : prev.manualJournals,
+      mechanics: Array.isArray(data.mechanics) ? data.mechanics : prev.mechanics,
+      commissionPayments: Array.isArray(data.commissionPayments) ? data.commissionPayments : prev.commissionPayments,
+      heldCarts: Array.isArray(data.heldCarts) ? data.heldCarts : prev.heldCarts,
+      serviceOrders: Array.isArray(data.serviceOrders) ? data.serviceOrders : prev.serviceOrders,
+      warehouses: Array.isArray(data.warehouses) ? data.warehouses : prev.warehouses,
+      stockTransfers: Array.isArray(data.stockTransfers) ? data.stockTransfers : prev.stockTransfers,
+      purchaseReturns: Array.isArray(data.purchaseReturns) ? data.purchaseReturns : prev.purchaseReturns,
       openRouterApiKey: data.openRouterApiKey || prev.openRouterApiKey,
       aiModel: data.aiModel || prev.aiModel,
       supabaseUrl: data.supabaseUrl || prev.supabaseUrl,
@@ -185,6 +221,11 @@ export const useAppStore = create<AppState>((set, get) => ({
     }));
   },
   setStoreProfile: (profile) => set((state) => ({ storeProfile: stampEntity(state.storeProfile as any, profile as any, nowIso()) })),
+  setAppSettings: (settings) => set((state) => ({ appSettings: stampEntity(state.appSettings as any, settings as any, nowIso()) })),
+  setMechanics: (updater) => set((state) => ({ mechanics: stampCollection(state.mechanics, resolve(updater, state.mechanics), nowIso()) })),
+  setHeldCarts: (updater) => set((state) => ({ heldCarts: stampCollection(state.heldCarts, resolve(updater, state.heldCarts), nowIso()) })),
+  setServiceOrders: (updater) => set((state) => ({ serviceOrders: stampCollection(state.serviceOrders, resolve(updater, state.serviceOrders), nowIso()) })),
+  setWarehouses: (updater) => set((state) => ({ warehouses: stampCollection(state.warehouses, resolve(updater, state.warehouses), nowIso()) })),
 }));
 
 
@@ -243,4 +284,9 @@ export const useAppActions = () => useAppStoreShallow(state => ({
   appendPriceHistory: state.appendPriceHistory,
   recordDeletion: state.recordDeletion,
   setStoreProfile: state.setStoreProfile,
+  setAppSettings: state.setAppSettings,
+  setMechanics: state.setMechanics,
+  setHeldCarts: state.setHeldCarts,
+  setServiceOrders: state.setServiceOrders,
+  setWarehouses: state.setWarehouses,
 }));

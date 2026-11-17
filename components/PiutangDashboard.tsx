@@ -5,6 +5,7 @@ import {
 } from 'lucide-react';
 import { Customer, Sale } from '../types';
 import CustomerPaymentModal from './CustomerPaymentModal';
+import { getSaleCreditAmount } from '../services/salePayments';
 
 interface PiutangDashboardProps {
   customers: Customer[];
@@ -27,7 +28,7 @@ const PiutangDashboard: React.FC<PiutangDashboardProps> = ({ customers, sales, o
       .filter(c => c.currentDebt > 0)
       .map(customer => {
         // Find last credit sale for this customer
-        const creditSales = sales.filter(s => s.customerId === customer.id && s.paymentType === 'KREDIT');
+        const creditSales = sales.filter(s => s.customerId === customer.id && getSaleCreditAmount(s) > 0);
         const lastCreditSale = creditSales[0]; // sales are sorted newest first
         const oldestUnpaid = creditSales[creditSales.length - 1];
         

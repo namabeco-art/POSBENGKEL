@@ -9,12 +9,12 @@
 import { AppData } from '../types';
 
 export const ITEM_FIELD_GROUPS: Record<string, string[]> = {
-  stock: ['stock'],
+  stock: ['stock', 'stockByWarehouse'],
   price: ['basePrice', 'memberPrices', 'units'],
 };
 
 export const CUSTOMER_FIELD_GROUPS: Record<string, string[]> = {
-  balance: ['currentDebt', 'rewardPoints'],
+  balance: ['currentDebt', 'rewardPoints', 'depositBalance'],
 };
 
 const META_KEYS = new Set(['updatedAt', 'fieldUpdatedAt']);
@@ -109,6 +109,10 @@ export const MUTABLE_COLLECTIONS: Array<{ name: keyof AppData; key?: string; gro
   { name: 'purchaseOrders' },
   { name: 'cashSessions' },
   { name: 'promotions' },
+  { name: 'mechanics' },
+  { name: 'heldCarts' },
+  { name: 'serviceOrders' },
+  { name: 'warehouses' },
 ];
 
 export const stampAppData = <T extends Partial<AppData>>(previous: Partial<AppData>, next: T, now = new Date().toISOString()): T => {
@@ -125,6 +129,9 @@ export const stampAppData = <T extends Partial<AppData>>(previous: Partial<AppDa
   }
   if (next.storeProfile && next.storeProfile !== previous.storeProfile) {
     result.storeProfile = stampEntity(previous.storeProfile as any, next.storeProfile as any, now);
+  }
+  if (next.appSettings && next.appSettings !== previous.appSettings) {
+    result.appSettings = stampEntity(previous.appSettings as any, next.appSettings as any, now);
   }
   return result as T;
 };

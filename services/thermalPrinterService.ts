@@ -99,8 +99,10 @@ export const printReceiptWebSerial = async (sale: Sale, profile?: StoreProfile) 
     cmds += item.name + NEWLINE;
     const label = describeSaleLine(item);
     const priceLine = `${label.qtyText} x ${label.priceText}`;
-    const totalLine = rp(item.total);
+    const totalLine = rp(item.discountAmount ? (item.grossTotal ?? item.total + item.discountAmount) : item.total);
     cmds += formatLine(priceLine, totalLine) + NEWLINE;
+    if (item.discountAmount) cmds += formatLine(item.isPromoGift ? 'Bonus promo' : `Diskon ${item.discountText || ''}`, '-' + rp(item.discountAmount)) + NEWLINE;
+    if (item.serialNumbers?.length) cmds += `SN: ${item.serialNumbers.join(', ')}` + NEWLINE;
   }
   cmds += '--------------------------------' + NEWLINE;
   
@@ -110,7 +112,11 @@ export const printReceiptWebSerial = async (sale: Sale, profile?: StoreProfile) 
     cmds += formatLine('Diskon', '-' + rp(sale.discountAmount)) + NEWLINE;
   }
   cmds += BOLD_ON + formatLine('TOTAL', rp(sale.total)) + BOLD_OFF + NEWLINE;
-  cmds += formatLine(sale.paymentMethod || sale.paymentType, rp(sale.amountReceived)) + NEWLINE;
+  if (sale.payments?.length) {
+    for (const payment of sale.payments) cmds += formatLine(payment.method, rp(payment.method === 'TUNAI' ? sale.amountReceived : payment.amount)) + NEWLINE;
+  } else {
+    cmds += formatLine(sale.paymentMethod || sale.paymentType, rp(sale.amountReceived)) + NEWLINE;
+  }
   cmds += formatLine('KEMBALI', rp(sale.changeAmount)) + NEWLINE;
   
   // Footer

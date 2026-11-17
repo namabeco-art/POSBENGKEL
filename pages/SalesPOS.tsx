@@ -25,13 +25,23 @@ import {
   ShoppingBag,
   Sparkles,
   PackageX,
-  ChevronLeft
+  ChevronLeft,
+  Pause,
+  ClipboardList,
+  Gift,
+  Wrench
 } from 'lucide-react';
-import { Item, User, Customer, Sale, PromotionCampaign, CashSession, StoreProfile } from '../types';
+import { Item, User, Customer, Sale, SaleItem, PromotionCampaign, CashSession, StoreProfile, AppSettings, Mechanic, HeldCart, ServiceOrder } from '../types';
 import { printReceipt } from '../services/printService';
 import { printReceiptWebSerial, isThermalPrinterEnabled } from '../services/thermalPrinterService';
 import { createDocumentNo, createId } from '../services/idService';
-import { findStockShortage, getAvailableStock, getSellPrice, getSellUnits, type SellUnit } from '../services/pricing';
+import { findStockShortage, getAvailableStock, getItemCost, getSellableStock, getSellPrice, getSellUnits, type SellUnit } from '../services/pricing';
+import { parseLineDiscount } from '../services/discount';
+import { computePromoGifts, computePromotionDiscount, getTransactionPromotions } from '../services/promotions';
+import { computeLineCommission } from '../services/commission';
+import { describeSalePayments, summarizePaymentType } from '../services/salePayments';
+import { openCustomerDisplayWindow, publishCustomerDisplay } from '../services/customerDisplay';
+import SplitPaymentPanel, { type SplitPaymentResult } from '../components/SplitPaymentPanel';
 
 interface CartItem {
   /** Kunci baris: barang + satuan (satu barang bisa dijual per Botol dan per Dus sekaligus). */
@@ -44,21 +54,37 @@ interface CartItem {
   selectedPrice: number;
   /** Jumlah dalam satuan yang dipilih. */
   qty: number;
+  /** Mode Lengkap: diskon baris ("10+5" atau "5000"). */
+  discountText?: string;
+  /** Mode Lengkap: mekanik/sales yang mengerjakan baris ini (komisi). */
+  mechanicId?: string;
+  /** Mode Lengkap: nomor seri dipisah koma. */
+  serialText?: string;
+  /** Harga hasil negosiasi Work Order — tidak ikut berubah saat harga master berubah. */
+  priceOverride?: number;
 }
+
+const lineGross = (line: CartItem) => line.qty * line.selectedPrice;
+const lineDiscount = (line: CartItem) => parseLineDiscount(line.discountText, lineGross(line));
+const lineNet = (line: CartItem) => lineGross(line) - lineDiscount(line);
+const parseSerials = (text?: string) => (text || '').split(/[,;\n]/).map(value => value.trim()).filter(Boolean);
 
 const lineKey = (itemId: string, unitName: string) => `${itemId}|${unitName}`;
 
 /** Kebutuhan stok riil per satuan baris (paket → komponen; Dus → isi dalam satuan dasar). */
 const perUnitDemand = (line: CartItem): Array<[string, number]> =>
-  line.item.isBundle && line.item.components?.length
-    ? line.item.components.map(component => [component.itemId, component.qty * line.conversion])
-    : [[line.item.id, line.conversion]];
+  line.item.itemType === 'JASA'
+    ? []
+    : line.item.isBundle && line.item.components?.length
+      ? line.item.components.map(component => [component.itemId, component.qty * line.conversion])
+      : [[line.item.id, line.conversion]];
 
 /** Batasi qty tiap baris agar total kebutuhan stok (termasuk komponen paket) tidak melebihi stok. */
 const clampCartToStock = (lines: CartItem[], items: Item[]): CartItem[] => {
-  const remaining = new Map(items.map(item => [item.id, item.stock]));
+  const remaining = new Map(items.map(item => [item.id, getSellableStock(item)]));
   return lines.map(line => {
     const demand = perUnitDemand(line);
+    if (demand.length === 0) return line; // jasa
     const maxQty = Math.min(...demand.map(([itemId, perUnit]) => (perUnit > 0 ? Math.floor((remaining.get(itemId) ?? 0) / perUnit) : Infinity)));
     const qty = Math.max(0, Math.min(line.qty, maxQty));
     demand.forEach(([itemId, perUnit]) => remaining.set(itemId, (remaining.get(itemId) ?? 0) - perUnit * qty));
@@ -73,13 +99,31 @@ interface SalesPOSProps {
   promotions: PromotionCampaign[];
   cashSessions?: CashSession[];
   storeProfile?: StoreProfile;
-  onCompleteSale: (sale: Sale) => Promise<Sale>;
+  onCompleteSale: (sale: Sale, options?: { heldCartId?: string }) => Promise<Sale>;
   onNavigate?: (tab: string) => void;
+  // ---- Mode Lengkap
+  isFullMode?: boolean;
+  appSettings?: AppSettings;
+  mechanics?: Mechanic[];
+  heldCarts?: HeldCart[];
+  onHoldCart?: (cart: HeldCart) => void;
+  onDeleteHeldCart?: (id: string) => void;
+  /** Work Order yang dikirim dari menu Servis untuk difakturkan. */
+  serviceOrder?: ServiceOrder | null;
+  onServiceOrderConsumed?: () => void;
 }
 
 const formatRp = (value: number) => `Rp ${Math.round(value || 0).toLocaleString('id-ID')}`;
 
-const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, promotions, cashSessions = [], storeProfile, onCompleteSale, onNavigate }) => {
+const SalesPOS: React.FC<SalesPOSProps> = ({
+  currentUser, items, customers, promotions, cashSessions = [], storeProfile, onCompleteSale, onNavigate,
+  isFullMode = false, appSettings, mechanics = [], heldCarts = [], onHoldCart, onDeleteHeldCart, serviceOrder, onServiceOrderConsumed,
+}) => {
+  const activeMechanics = useMemo(() => mechanics.filter(mechanic => mechanic.isActive), [mechanics]);
+  /** Transaksi tahan yang sedang dilanjutkan (dihapus otomatis setelah terjual). */
+  const [resumedHeldCartId, setResumedHeldCartId] = useState<string | null>(null);
+  const [linkedServiceOrder, setLinkedServiceOrder] = useState<{ id: string; orderNo: string; dpAmount: number } | null>(null);
+  const [showHeldList, setShowHeldList] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedCategory, setSelectedCategory] = useState('Semua');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -135,32 +179,56 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
 
   useEffect(() => { setCurrentPage(1); }, [searchTerm, selectedCategory]);
 
+  // Nilai baris setelah diskon baris (diskon baris hanya ada di mode Lengkap).
   const subtotal = useMemo(() => {
-    return cart.reduce((sum, c) => sum + (c.selectedPrice * c.qty), 0);
+    return cart.reduce((sum, c) => sum + lineNet(c), 0);
   }, [cart]);
 
-  const availablePromos = useMemo(() => {
-    const now = Date.now();
-    return promotions.filter(promo => {
-      if (!promo.isActive) return false;
-      const start = new Date(promo.startAt).getTime();
-      const end = promo.endAt ? new Date(promo.endAt).getTime() : null;
-      const inWindow = now >= start && (end === null || now <= end);
-      const levelPass = selectedCustomer.level >= (promo.minCustomerLevel || 1);
-      return inWindow && levelPass;
-    });
-  }, [promotions, selectedCustomer.level]);
+  // Promo faktur yang berlaku sekarang (rentang tanggal, hari/jam, level, minimal belanja).
+  const availablePromos = useMemo(
+    () => getTransactionPromotions(promotions, new Date(), selectedCustomer.level, subtotal),
+    [promotions, selectedCustomer.level, subtotal],
+  );
 
   const selectedPromo = useMemo(
     () => availablePromos.find(promo => promo.id === promoName) || null,
     [availablePromos, promoName],
   );
 
-  const promoDiscount = useMemo(() => {
-    if (!selectedPromo) return 0;
-    if (selectedPromo.type === 'PERCENT') return Math.round(subtotal * (selectedPromo.value / 100));
-    return Math.round(selectedPromo.value);
-  }, [selectedPromo, subtotal]);
+  const promoDiscount = useMemo(() => computePromotionDiscount(selectedPromo, subtotal), [selectedPromo, subtotal]);
+
+  /** Bonus Beli X Gratis Y (mode Lengkap) — ditambahkan otomatis sebagai baris bernilai Rp 0. */
+  const promoGifts = useMemo(() => {
+    if (!isFullMode) return [];
+    const bought = new Map<string, number>();
+    cart.forEach(line => bought.set(line.item.id, (bought.get(line.item.id) || 0) + line.qty * line.conversion));
+    return computePromoGifts(promotions, bought, new Date(), selectedCustomer.level).flatMap(gift => {
+      const item = items.find(entry => entry.id === gift.freeItemId);
+      if (!item) return [];
+      const shortage = findStockShortage([...cart.map(line => ({ item: line.item, baseQty: line.qty * line.conversion })), { item, baseQty: gift.freeQty }], items);
+      const price = getSellPrice(item, 1);
+      // Bonus butuh harga acuan (> 0) agar tercatat sebagai diskon 100%; stok harus cukup.
+      return [{ ...gift, item, price, outOfStock: Boolean(shortage) || !(price > 0) }];
+    });
+  }, [isFullMode, cart, promotions, items, selectedCustomer.level]);
+
+  const lineDiscountTotal = useMemo(() => cart.reduce((sum, line) => sum + lineDiscount(line), 0), [cart]);
+
+  /** Peringatan harga di bawah modal / margin minimal per baris (mode Lengkap). */
+  const marginWarnings = useMemo(() => {
+    if (!isFullMode) return new Map<string, string>();
+    const minMargin = appSettings?.minMarginPercent || 0;
+    const warnings = new Map<string, string>();
+    cart.forEach(line => {
+      const baseQty = line.qty * line.conversion;
+      if (baseQty <= 0 || line.item.itemType === 'JASA') return;
+      const cost = getItemCost(line.item, items) * baseQty;
+      const net = lineNet(line);
+      if (cost > 0 && net < cost) warnings.set(line.id, `Di bawah modal (rugi ${formatRp(cost - net)})`);
+      else if (minMargin > 0 && net > 0 && ((net - cost) / net) * 100 < minMargin) warnings.set(line.id, `Margin < ${minMargin}%`);
+    });
+    return warnings;
+  }, [isFullMode, cart, items, appSettings?.minMarginPercent]);
 
   const appliedManualDiscount = Math.min(Math.max(0, manualDiscount), Math.max(0, subtotal - promoDiscount));
   const total = useMemo(() => {
@@ -211,6 +279,12 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
           notices.push(`Satuan ${c.unitName} untuk ${latest.name} tidak tersedia lagi; dikeluarkan dari keranjang.`);
           changed = true;
           return [];
+        }
+        if (c.priceOverride !== undefined) {
+          // Harga hasil negosiasi Work Order dipertahankan; data barang tetap diperbarui.
+          if (latest === c.item) return [c];
+          changed = true;
+          return [{ ...c, item: latest }];
         }
         if (unit.price !== c.selectedPrice && latest !== c.item) {
           // Perubahan level pelanggan saja tidak perlu notifikasi; perubahan harga master perlu.
@@ -287,15 +361,23 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     const handleKeyDown = (e: KeyboardEvent) => {
       try {
         const isInput = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
-        if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2') return;
+        const fullModeKeys = isFullMode && ['F3', 'F4', 'F7', 'F8', 'F9'].includes(e.key);
+        if (isInput && document.activeElement !== inputRef.current && e.key !== 'F1' && e.key !== 'F2' && !fullModeKeys) return;
+
+        // Mode Lengkap: F3 tahan, F4 daftar tahan, F7 layar pelanggan, F8 bayar, F9 transaksi baru.
+        if (fullModeKeys && !showCheckout) {
+          e.preventDefault();
+          if (e.key === 'F3') holdCurrentCart();
+          else if (e.key === 'F4') setShowHeldList(true);
+          else if (e.key === 'F7') openCustomerDisplayWindow();
+          else if (e.key === 'F8') openCheckout();
+          else if (e.key === 'F9' && (cart.length === 0 || window.confirm('Kosongkan keranjang dan mulai transaksi baru?'))) finalizeAndReset();
+          return;
+        }
 
         if (e.key === 'F1') {
           e.preventDefault();
-          if (cart.length > 0 && !showCheckout) {
-            setPaymentType('TUNAI');
-            setAmountReceived(total);
-            setShowCheckout(true);
-          }
+          if (!showCheckout) openCheckout();
           return;
         }
 
@@ -331,7 +413,8 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
       window.removeEventListener('keydown', handleKeyDown);
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [items, cart, total, showCheckout, addToCart]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, cart, total, showCheckout, addToCart, isFullMode]);
 
   const updateQty = (id: string, delta: number) => {
     commitCart(cart.map(c => (c.id === id ? { ...c, qty: Math.max(1, c.qty + delta) } : c)));
@@ -351,6 +434,162 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
         return c;
       }));
     }
+  };
+
+  /** Baris penjualan (termasuk diskon baris, mekanik, serial, dan bonus promo) untuk disimpan. */
+  const buildSaleItems = (): SaleItem[] => {
+    const storeDefault = appSettings?.defaultCommissionPercent || 0;
+    const lines: SaleItem[] = cart.map(c => {
+      const gross = lineGross(c);
+      const discount = lineDiscount(c);
+      const net = gross - discount;
+      const baseQty = c.qty * c.conversion;
+      const mechanic = c.mechanicId ? mechanics.find(entry => entry.id === c.mechanicId) : undefined;
+      const serials = parseSerials(c.serialText);
+      return {
+        itemId: c.item.id,
+        name: c.item.name,
+        qty: baseQty, // satuan dasar untuk stok & retur
+        price: c.selectedPrice / c.conversion,
+        total: net,
+        unitName: c.unitName,
+        unitQty: c.qty,
+        unitPrice: c.selectedPrice,
+        conversion: c.conversion,
+        ...(discount > 0 ? { grossTotal: gross, discountAmount: discount, discountText: c.discountText } : {}),
+        ...(c.item.itemType === 'JASA' ? { isJasa: true } : {}),
+        ...(mechanic ? {
+          mechanicId: mechanic.id,
+          mechanicName: mechanic.name,
+          commissionAmount: computeLineCommission(c.item, { qty: baseQty, total: net }, mechanic, storeDefault),
+        } : {}),
+        ...(serials.length ? { serialNumbers: serials } : {}),
+        ...(c.item.warrantyDays ? { warrantyDays: c.item.warrantyDays } : {}),
+      };
+    });
+    promoGifts.filter(gift => !gift.outOfStock).forEach(gift => {
+      const gross = Math.round(gift.price * gift.freeQty);
+      lines.push({
+        itemId: gift.item.id,
+        name: `${gift.item.name} (Bonus ${gift.promoName})`,
+        qty: gift.freeQty,
+        price: gift.price,
+        total: 0,
+        grossTotal: gross,
+        discountAmount: gross,
+        discountText: '100%',
+        isPromoGift: true,
+      });
+    });
+    return lines;
+  };
+
+  /** Validasi khusus mode Lengkap sebelum bayar: nomor seri & konfirmasi harga di bawah modal. */
+  const validateFullModeCart = (): boolean => {
+    for (const line of cart) {
+      if (!line.item.trackSerial) continue;
+      const serials = parseSerials(line.serialText);
+      const needed = line.qty * line.conversion;
+      if (serials.length !== needed) {
+        alert(`${line.item.name} wajib ${needed} nomor seri (terisi ${serials.length}). Pisahkan dengan koma.`);
+        return false;
+      }
+    }
+    if (marginWarnings.size > 0) {
+      const list = cart.filter(line => marginWarnings.has(line.id)).map(line => `• ${line.item.name}: ${marginWarnings.get(line.id)}`).join('\n');
+      if (!window.confirm(`Ada harga yang perlu dicek:\n${list}\n\nTetap lanjutkan?`)) return false;
+    }
+    return true;
+  };
+
+  const openCheckout = () => {
+    if (cart.length === 0) return;
+    if (isFullMode && !validateFullModeCart()) return;
+    setPaymentType('TUNAI');
+    setAmountReceived(total);
+    setShowCheckout(true);
+  };
+
+  /** Simpan transaksi mode Lengkap (pembayaran campuran). */
+  const handleFinishSplit = async (result: SplitPaymentResult) => {
+    const invoiceId = createDocumentNo('INV');
+    const saleData: Sale = {
+      id: createId('SALE'),
+      invoiceNo: invoiceId,
+      date: new Date().toLocaleDateString('id-ID') + ' ' + new Date().toLocaleTimeString('id-ID'),
+      customerId: selectedCustomer.id,
+      customerName: selectedCustomer.name,
+      items: buildSaleItems(),
+      subtotal,
+      discountAmount: promoDiscount + appliedManualDiscount,
+      promoName: selectedPromo?.name,
+      pointsEarned: Math.floor(total / 10000),
+      tax: 0,
+      total,
+      payments: result.payments,
+      paymentType: summarizePaymentType(result.payments),
+      paymentMethod: describeSalePayments({ payments: result.payments, paymentType: 'TUNAI', total }),
+      amountReceived: result.cashReceived,
+      changeAmount: result.change,
+      operatorName: currentUser.name,
+      ...(linkedServiceOrder ? { serviceOrderId: linkedServiceOrder.id, serviceOrderNo: linkedServiceOrder.orderNo } : {}),
+    };
+    setIsSaving(true);
+    try {
+      const savedSale = await onCompleteSale(saleData, { heldCartId: resumedHeldCartId || undefined });
+      setLastCompletedSale(savedSale);
+      setShowSuccessModal(true);
+      publishCustomerDisplay({ storeName: storeProfile?.name || 'POS Hulio', customerName: selectedCustomer.name, lines: [], subtotal, discount: promoDiscount + appliedManualDiscount, total, paid: result.cashReceived || total, change: result.change, message: 'Terima kasih!', updatedAt: new Date().toISOString() });
+    } catch (error: any) {
+      alert(error?.message || 'Transaksi gagal disimpan.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  /** Tahan transaksi untuk dilanjutkan nanti (mode Lengkap). */
+  const holdCurrentCart = () => {
+    if (!onHoldCart || cart.length === 0) return;
+    const label = window.prompt('Keterangan transaksi yang ditahan (mis. nama pelanggan / plat motor):', selectedCustomer.id === 'UMUM' ? '' : selectedCustomer.name);
+    if (label === null) return;
+    onHoldCart({
+      id: resumedHeldCartId || createId('HOLD'),
+      label: label.trim() || `Tahan ${new Date().toLocaleTimeString('id-ID')}`,
+      customerId: selectedCustomer.id,
+      customerName: selectedCustomer.name,
+      lines: cart.map(line => ({
+        itemId: line.item.id, name: line.item.name, unitName: line.unitName, conversion: line.conversion, qty: line.qty,
+        discountText: line.discountText, mechanicId: line.mechanicId, serialNumbers: parseSerials(line.serialText),
+      })),
+      serviceOrderId: linkedServiceOrder?.id,
+      createdAt: new Date().toISOString(),
+      operatorName: currentUser.name,
+      operatorId: currentUser.id,
+    });
+    finalizeAndReset();
+  };
+
+  const resumeHeldCart = (held: HeldCart) => {
+    if (cart.length > 0 && !window.confirm('Keranjang saat ini akan diganti. Lanjutkan?')) return;
+    const customer = customers.find(entry => entry.id === held.customerId) || { ...UMUM_CUSTOMER, name: held.customerName || 'Umum' };
+    const restored: CartItem[] = [];
+    const missing: string[] = [];
+    held.lines.forEach(line => {
+      const item = items.find(entry => entry.id === line.itemId);
+      const unit = item ? getSellUnits(item, customer.level).find(entry => entry.name === line.unitName) : undefined;
+      if (!item || !unit || unit.price <= 0) { missing.push(line.name); return; }
+      restored.push({
+        id: lineKey(item.id, unit.name), item, unitName: unit.name, conversion: unit.conversion, selectedPrice: unit.price, qty: line.qty,
+        discountText: line.discountText, mechanicId: line.mechanicId, serialText: line.serialNumbers?.join(', '),
+      });
+    });
+    setSelectedCustomer(customer);
+    setCart(clampCartToStock(restored, items));
+    setResumedHeldCartId(held.id);
+    const order = held.serviceOrderId ? { id: held.serviceOrderId, orderNo: '', dpAmount: 0 } : null;
+    setLinkedServiceOrder(order);
+    setShowHeldList(false);
+    if (missing.length) setCartNotices([`Tidak bisa dipulihkan (barang/satuan tidak ada atau harga 0): ${missing.join(', ')}`]);
   };
 
   const handleFinishTransaction = async () => {
@@ -418,8 +657,58 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
     // Transaksi berikutnya kembali ke pelanggan umum & tunai — mencegah salah tagih ke pelanggan sebelumnya.
     setSelectedCustomer(UMUM_CUSTOMER);
     setPaymentType('TUNAI');
+    setResumedHeldCartId(null);
+    setLinkedServiceOrder(null);
     inputRef.current?.focus();
   };
+
+  // Work Order dari menu Servis → isi keranjang dengan harga WO, pelanggan, dan mekanik.
+  useEffect(() => {
+    if (!serviceOrder) return;
+    onServiceOrderConsumed?.();
+    if (cart.length > 0 && !window.confirm(`Keranjang saat ini akan diganti dengan ${serviceOrder.orderNo}. Lanjutkan?`)) return;
+    const customer = customers.find(entry => entry.id === serviceOrder.customerId) || { ...UMUM_CUSTOMER, name: serviceOrder.customerName || 'Umum' };
+    const loaded: CartItem[] = [];
+    const missing: string[] = [];
+    serviceOrder.lines.forEach((line, index) => {
+      const item = items.find(entry => entry.id === line.itemId);
+      if (!item) { missing.push(line.name); return; }
+      const baseUnit = getSellUnits(item, customer.level)[0];
+      loaded.push({
+        id: `${lineKey(item.id, baseUnit.name)}|wo${index}`,
+        item, unitName: baseUnit.name, conversion: 1, selectedPrice: line.price, priceOverride: line.price, qty: line.qty,
+        mechanicId: line.mechanicId || (item.itemType === 'JASA' ? serviceOrder.mechanicId : undefined),
+      });
+    });
+    const clamped = clampCartToStock(loaded, items);
+    const short = clamped.filter((line, index) => line.qty !== loaded[index].qty).map(line => line.item.name);
+    setSelectedCustomer(customer);
+    setCart(clamped.filter(line => line.qty > 0));
+    setLinkedServiceOrder({ id: serviceOrder.id, orderNo: serviceOrder.orderNo, dpAmount: serviceOrder.dpAmount || 0 });
+    setResumedHeldCartId(null);
+    const notices = [`Faktur untuk ${serviceOrder.orderNo} (${serviceOrder.customerName}).`];
+    if (missing.length) notices.push(`Barang tidak ditemukan: ${missing.join(', ')}`);
+    if (short.length) notices.push(`Stok tidak cukup, qty disesuaikan: ${short.join(', ')}`);
+    setCartNotices(notices);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [serviceOrder]);
+
+  // Layar pelanggan (monitor kedua) mengikuti isi keranjang.
+  useEffect(() => {
+    if (!isFullMode || showSuccessModal) return;
+    publishCustomerDisplay({
+      storeName: storeProfile?.name || 'POS Hulio',
+      customerName: selectedCustomer.name,
+      lines: [
+        ...cart.map(line => ({ name: line.item.name, qtyText: `${line.qty} ${line.unitName} x ${formatRp(line.selectedPrice)}`, total: lineNet(line), discount: lineDiscount(line) || undefined })),
+        ...promoGifts.filter(gift => !gift.outOfStock).map(gift => ({ name: `${gift.item.name} (bonus)`, qtyText: `${gift.freeQty} gratis`, total: 0 })),
+      ],
+      subtotal,
+      discount: promoDiscount + appliedManualDiscount,
+      total,
+      updatedAt: new Date().toISOString(),
+    });
+  }, [isFullMode, showSuccessModal, cart, promoGifts, subtotal, promoDiscount, appliedManualDiscount, total, selectedCustomer.name, storeProfile?.name]);
 
   const handlePrint = async () => {
     if (!lastCompletedSale) return;
@@ -500,7 +789,10 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                                 <p className="text-xs text-slate-400 mt-0.5">{cust.phone}</p>
                              </div>
                           </div>
-                          <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600">Lv.{cust.level}</span>
+                          <span className="flex flex-col items-end gap-0.5">
+                            <span className="px-2 py-0.5 rounded-md text-[11px] font-medium bg-slate-100 text-slate-600">Lv.{cust.level}</span>
+                            {isFullMode && (cust.depositBalance || 0) > 0 && <span className="text-[10px] font-semibold text-emerald-600">Deposit {formatRp(cust.depositBalance || 0)}</span>}
+                          </span>
                        </button>
                      ))}
                   </div>
@@ -526,6 +818,12 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                <button type="button" onClick={() => setCartNotices([])} className="text-blue-500 hover:text-blue-700" aria-label="Tutup pemberitahuan"><X size={14}/></button>
              </div>
              {cartNotices.map((notice, index) => <p key={index}>• {notice}</p>)}
+           </div>
+         )}
+         {linkedServiceOrder && (
+           <div className="p-2.5 bg-indigo-50 border border-indigo-200 rounded-xl text-xs text-indigo-800 flex items-center gap-2" role="status">
+             <Wrench size={14} className="shrink-0" />
+             <span>Faktur Work Order <b>{linkedServiceOrder.orderNo || '(tahan)'}</b>{linkedServiceOrder.dpAmount > 0 ? ` • DP ${formatRp(linkedServiceOrder.dpAmount)} tersedia di deposit` : ''}</span>
            </div>
          )}
          {cart.length === 0 ? (
@@ -576,14 +874,52 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                          <button type="button" onClick={() => updateQty(c.id, 1)} className="w-9 h-9 flex items-center justify-center hover:bg-slate-200 text-slate-600 active:bg-slate-300"><Plus size={14}/></button>
                       </div>
                       <div className="text-right">
-                        <p className="font-semibold text-slate-900 text-sm">{formatRp(c.qty * c.selectedPrice)}</p>
-                        <p className="text-[10px] text-slate-400">@ {formatRp(c.selectedPrice)}</p>
+                        <p className="font-semibold text-slate-900 text-sm">{formatRp(lineNet(c))}</p>
+                        <p className="text-[10px] text-slate-400">@ {formatRp(c.selectedPrice)}{lineDiscount(c) > 0 ? ` • disk ${formatRp(lineDiscount(c))}` : ''}</p>
                       </div>
                    </div>
+                   {isFullMode && (
+                     <div className="mt-2 grid grid-cols-2 gap-1.5">
+                       <input
+                         aria-label={`Diskon ${c.item.name}`}
+                         className="text-xs border border-slate-200 rounded-md px-2 py-1.5"
+                         placeholder="Diskon: 10+5 / 5000"
+                         value={c.discountText || ''}
+                         onChange={event => setCart(cart.map(line => (line.id === c.id ? { ...line, discountText: event.target.value } : line)))}
+                       />
+                       {activeMechanics.length > 0 ? (
+                         <select
+                           aria-label={`Mekanik ${c.item.name}`}
+                           className="text-xs border border-slate-200 rounded-md px-1.5 py-1.5 bg-white"
+                           value={c.mechanicId || ''}
+                           onChange={event => setCart(cart.map(line => (line.id === c.id ? { ...line, mechanicId: event.target.value || undefined } : line)))}
+                         >
+                           <option value="">Mekanik/Sales —</option>
+                           {activeMechanics.map(mechanic => <option key={mechanic.id} value={mechanic.id}>{mechanic.name}</option>)}
+                         </select>
+                       ) : <span />}
+                       {c.item.trackSerial && (
+                         <input
+                           aria-label={`Nomor seri ${c.item.name}`}
+                           className={`col-span-2 text-xs border rounded-md px-2 py-1.5 ${parseSerials(c.serialText).length === c.qty * c.conversion ? 'border-emerald-300' : 'border-amber-400'}`}
+                           placeholder={`Nomor seri (${c.qty * c.conversion}), pisahkan koma`}
+                           value={c.serialText || ''}
+                           onChange={event => setCart(cart.map(line => (line.id === c.id ? { ...line, serialText: event.target.value } : line)))}
+                         />
+                       )}
+                       {marginWarnings.has(c.id) && <p className="col-span-2 text-[10px] font-semibold text-red-600 flex items-center gap-1"><AlertTriangle size={11} /> {marginWarnings.get(c.id)}</p>}
+                     </div>
+                   )}
                 </div>
              </div>
            ))
          )}
+         {promoGifts.map(gift => (
+           <div key={gift.promoId} className={`flex items-center gap-2 p-2.5 rounded-xl border text-xs ${gift.outOfStock ? 'border-red-200 bg-red-50 text-red-700' : 'border-emerald-200 bg-emerald-50 text-emerald-800'}`}>
+             <Gift size={14} className="shrink-0" />
+             <span className="flex-1">Bonus {gift.promoName}: <b>{gift.freeQty} {gift.item.name}</b>{gift.outOfStock ? (gift.price > 0 ? ' — stok tidak cukup, bonus tidak diberikan' : ' — harga barang bonus belum diatur, bonus tidak diberikan') : ' (Rp 0)'}</span>
+           </div>
+         ))}
        </div>
 
        {/* Bottom total + pay button */}
@@ -593,6 +929,12 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                 <span>Subtotal</span>
                 <span>Rp {subtotal.toLocaleString('id-ID')}</span>
              </div>
+             {isFullMode && lineDiscountTotal > 0 && (
+               <div className="flex justify-between items-center text-xs text-emerald-300">
+                 <span>Diskon barang (sudah di subtotal)</span>
+                 <span>- Rp {lineDiscountTotal.toLocaleString('id-ID')}</span>
+               </div>
+             )}
              {(promoDiscount + appliedManualDiscount) > 0 && (
                <div className="flex justify-between items-center text-xs text-emerald-400">
                  <span>Diskon</span>
@@ -606,10 +948,16 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                 </div>
              </div>
           </div>
+ {isFullMode && (
+            <div className="grid grid-cols-2 gap-2">
+              <button type="button" disabled={cart.length === 0} onClick={holdCurrentCart} className="py-2 rounded-lg bg-white/10 hover:bg-white/20 disabled:opacity-40 text-xs font-semibold flex items-center justify-center gap-1.5"><Pause size={14} /> Tahan (F3)</button>
+              <button type="button" onClick={() => setShowHeldList(true)} className="py-2 rounded-lg bg-white/10 hover:bg-white/20 text-xs font-semibold flex items-center justify-center gap-1.5"><ClipboardList size={14} /> Ditahan ({heldCarts.length}) F4</button>
+            </div>
+          )}
           <button 
             type="button"
             disabled={cart.length === 0} 
-            onClick={() => { setPaymentType('TUNAI'); setAmountReceived(total); setShowCheckout(true); }} 
+            onClick={openCheckout} 
             className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-700 disabled:text-slate-500 text-white font-semibold text-base rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 active:scale-[0.97]"
           >
             <Banknote size={20} /> Bayar
@@ -645,6 +993,11 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
               <button type="button" onClick={() => setViewMode('grid')} className={`p-2 rounded-md transition-all ${viewMode === 'grid' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}><LayoutGrid size={16}/></button>
               <button type="button" onClick={() => setViewMode('list')} className={`p-2 rounded-md transition-all ${viewMode === 'list' ? 'bg-white shadow-sm text-indigo-600' : 'text-slate-400'}`}><List size={16}/></button>
            </div>
+           {isFullMode && (
+             <button type="button" onClick={openCustomerDisplayWindow} className="hidden md:flex p-2.5 bg-white border border-slate-200 rounded-xl text-slate-600 hover:text-indigo-600" title="Layar pelanggan (F7)" aria-label="Buka layar pelanggan">
+               <Monitor size={18} />
+             </button>
+           )}
            {/* Mobile cart button - large touch target */}
            <button 
             type="button"
@@ -696,7 +1049,7 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                           <div className="w-full h-full flex items-center justify-center text-slate-300"><ShoppingBag size={32} /></div>
                         )}
                         <div className={`absolute top-2 right-2 md:top-3 md:right-3 backdrop-blur-md text-white text-[9px] md:text-[10px] font-bold px-2 py-0.5 md:px-3 md:py-1 rounded-full shadow-lg ${isOutOfStock ? 'bg-red-600' : 'bg-slate-900/80'}`}>
-                          {isOutOfStock ? 'HABIS' : availableStock}
+                          {isOutOfStock ? 'HABIS' : Number.isFinite(availableStock) ? availableStock : 'JASA'}
                         </div>
                         {isOutOfStock && (
                           <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
@@ -816,6 +1169,15 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                   <input type="number" min={0} max={Math.max(0, subtotal - promoDiscount)} className="w-full p-3 bg-slate-50 border-2 border-slate-200 rounded-xl font-black text-[10px] outline-none" placeholder="Diskon manual" value={manualDiscount} onChange={e => setManualDiscount(Math.min(Math.max(0, parseInt(e.target.value) || 0), Math.max(0, subtotal - promoDiscount)))} />
                 </div>
 
+                {isFullMode ? (
+                  <SplitPaymentPanel
+                    total={total}
+                    customer={selectedCustomer}
+                    defaultDeposit={linkedServiceOrder ? Math.min(linkedServiceOrder.dpAmount || selectedCustomer.depositBalance || 0, total) : 0}
+                    isSaving={isSaving}
+                    onSubmit={handleFinishSplit}
+                  />
+                ) : (<>
                 <div className="grid grid-cols-3 gap-3 md:gap-3">
                    <button 
                      type="button"
@@ -907,9 +1269,10 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                     <div className="text-xs font-bold text-amber-600 mt-2">Transaksi akan dicatat sebagai kredit pelanggan.</div>
                   </div>
                 )}
+                </>)}
               </div>
               
-              <button 
+              {!isFullMode && <button 
                 type="button"
                 disabled={isAmountShort || isSaving}
                 onClick={handleFinishTransaction} 
@@ -920,8 +1283,31 @@ const SalesPOS: React.FC<SalesPOSProps> = ({ currentUser, items, customers, prom
                 }`}
               >
                 {isSaving ? 'MENYIMPAN...' : isAmountShort ? 'JUMLAH KURANG' : 'SELESAI & SIMPAN'} <ChevronRight size={20}/>
-              </button>
+              </button>}
            </div>
+        </div>
+      )}
+
+      {showHeldList && (
+        <div className="fixed inset-0 bg-slate-950/70 backdrop-blur-sm flex items-center justify-center z-[220] p-4" role="dialog" aria-label="Transaksi ditahan">
+          <div className="bg-white w-full max-w-lg rounded-2xl shadow-2xl max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between px-5 py-4 border-b border-slate-100">
+              <h3 className="font-bold text-slate-900">Transaksi ditahan ({heldCarts.length})</h3>
+              <button type="button" onClick={() => setShowHeldList(false)} className="p-2 text-slate-400 hover:text-slate-700" aria-label="Tutup"><X size={18} /></button>
+            </div>
+            <div className="overflow-y-auto p-3 space-y-2">
+              {heldCarts.length === 0 ? <p className="text-sm text-slate-400 text-center py-8">Tidak ada transaksi yang ditahan.</p> : heldCarts.map(held => (
+                <div key={held.id} className="flex items-center gap-3 p-3 border border-slate-100 rounded-xl">
+                  <div className="flex-1 min-w-0">
+                    <p className="font-semibold text-sm text-slate-800 truncate">{held.label}</p>
+                    <p className="text-xs text-slate-500">{held.customerName} • {held.lines.length} baris • {new Date(held.createdAt).toLocaleString('id-ID')} • {held.operatorName}</p>
+                  </div>
+                  <button type="button" onClick={() => resumeHeldCart(held)} className="px-3 py-2 bg-indigo-600 text-white rounded-lg text-xs font-semibold">Lanjutkan</button>
+                  {onDeleteHeldCart && <button type="button" onClick={() => window.confirm(`Hapus transaksi tahan "${held.label}"?`) && onDeleteHeldCart(held.id)} className="p-2 text-slate-400 hover:text-red-600" aria-label={`Hapus ${held.label}`}><Trash2 size={16} /></button>}
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
       )}
 

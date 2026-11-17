@@ -15,9 +15,11 @@ import {
   Wand2,
   TrendingUp
 } from 'lucide-react';
-import { Item, Customer, Supplier, BundleComponent, PriceChangeLog, PriceChangeSource } from '../types';
+import { Item, Customer, Supplier, BundleComponent, PriceChangeLog, PriceChangeSource, AppSettings, Warehouse, ItemType } from '../types';
 import PriceManager from '../components/PriceManager';
 import CustomerPaymentModal from '../components/CustomerPaymentModal';
+import BarcodeLabelModal from '../components/BarcodeLabelModal';
+import { DEFAULT_WAREHOUSE_ID, getWarehouseStock } from '../services/warehouses';
 import { createId } from '../services/idService';
 import { downloadCsv, findColumn, parseCsv } from '../services/csv';
 import { getAvailableStock, getBaseUnitName, getItemCost, getMarginPercent, getSellPrice, parseRupiah } from '../services/pricing';
@@ -64,6 +66,10 @@ interface MasterDataProps {
   canCreate?: boolean;
   canEdit?: boolean;
   canDelete?: boolean;
+  /** Mode Lengkap: tipe jasa, komisi, nomor seri/garansi, label barcode, saldo deposit. */
+  isFullMode?: boolean;
+  appSettings?: AppSettings;
+  warehouses?: Warehouse[];
 }
 
 const MasterData: React.FC<MasterDataProps> = ({
@@ -71,8 +77,9 @@ const MasterData: React.FC<MasterDataProps> = ({
   onAddItem, onImportItems, onUpdateItem, onUpdateItemsBulk, onAdjustStockBulk, onReceiveCustomerPayment,
   onAddCustomer, onUpdateCustomer, onAddSupplier, onUpdateSupplier,
   onDeleteItem, onDeleteCustomer, onDeleteSupplier,
-  canCreate = true, canEdit = true, canDelete = true
+  canCreate = true, canEdit = true, canDelete = true, isFullMode = false, appSettings,
 }) => {
+  const [showLabels, setShowLabels] = useState(false);
   const [payingCustomer, setPayingCustomer] = useState<Customer | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -124,6 +131,7 @@ const MasterData: React.FC<MasterDataProps> = ({
     basePrice: 0, priceL1: 0, priceL2: 0, priceL3: 0, priceL4: 0,
     stock: 0, imageUrl: '', isBundle: false, components: [] as BundleComponent[],
     baseUnitName: 'Pcs', extraUnits: [] as UnitDraft[],
+    itemType: 'BARANG' as ItemType, commissionPercent: 0, commissionAmount: 0, trackSerial: false, warrantyDays: 0,
   });
 
   const [isSelectingComponent, setIsSelectingComponent] = useState(false);
@@ -206,6 +214,11 @@ const MasterData: React.FC<MasterDataProps> = ({
       components: item.components || [],
       baseUnitName: getBaseUnitName(item),
       extraUnits: (item.units || []).filter(unit => unit.conversion > 1).map(unit => ({ name: unit.name, conversion: unit.conversion, price: unit.price })),
+      itemType: item.itemType || 'BARANG',
+      commissionPercent: item.commissionPercent || 0,
+      commissionAmount: item.commissionAmount || 0,
+      trackSerial: Boolean(item.trackSerial),
+      warrantyDays: item.warrantyDays || 0,
     });
     setIsModalOpen(true);
   };
@@ -287,13 +300,19 @@ const MasterData: React.FC<MasterDataProps> = ({
       imageUrl: newItem.imageUrl.trim() || undefined,
       isBundle: newItem.isBundle,
       components: newItem.components,
+      // Field mode Lengkap — undefined jika kosong agar data tetap ringkas.
+      itemType: newItem.itemType === 'JASA' ? 'JASA' as const : undefined,
+      commissionPercent: newItem.commissionPercent > 0 ? newItem.commissionPercent : undefined,
+      commissionAmount: newItem.commissionAmount > 0 ? newItem.commissionAmount : undefined,
+      trackSerial: newItem.trackSerial && newItem.itemType !== 'JASA' ? true : undefined,
+      warrantyDays: newItem.warrantyDays > 0 ? newItem.warrantyDays : undefined,
     };
 
     if (existing && onUpdateItem) {
       onUpdateItem({ ...existing, ...itemData }); // stok tetap dari data terbaru (diatur lewat Stok Opname)
     } else if (onAddItem) {
       // Stok paket dihitung dari komponen; stok sendiri tidak dipakai.
-      onAddItem({ id: createId('ITEM'), ...itemData, stock: newItem.isBundle ? 0 : Math.max(0, newItem.stock || 0), warehouseId: 'W1', isActive: true });
+      onAddItem({ id: createId('ITEM'), ...itemData, stock: newItem.isBundle || newItem.itemType === 'JASA' ? 0 : Math.max(0, newItem.stock || 0), warehouseId: 'W1', isActive: true });
     }
     setIsModalOpen(false);
     resetItemForm();
@@ -327,6 +346,7 @@ const MasterData: React.FC<MasterDataProps> = ({
       basePrice: 0, priceL1: 0, priceL2: 0, priceL3: 0, priceL4: 0,
       stock: 0, imageUrl: '', isBundle: false, components: [],
       baseUnitName: 'Pcs', extraUnits: [],
+      itemType: 'BARANG', commissionPercent: 0, commissionAmount: 0, trackSerial: false, warrantyDays: 0,
     });
     setEditingId(null);
     setIsAddingCategory(false);
@@ -493,17 +513,19 @@ const MasterData: React.FC<MasterDataProps> = ({
       const now = new Date();
       const batchId = createId('SO');
       const change = bulkEditForm.stockChange;
-      onAdjustStockBulk(targets.map((item, index) => {
-        const actualStock = Math.max(0, item.stock + change);
+      // Jasa & paket tidak punya stok sendiri; stok yang diubah = stok gudang utama.
+      onAdjustStockBulk(targets.filter(item => item.itemType !== 'JASA' && !item.isBundle).map((item, index) => {
+        const mainStock = getWarehouseStock(item, DEFAULT_WAREHOUSE_ID);
+        const actualStock = Math.max(0, mainStock + change);
         return {
           id: `${batchId}-${index + 1}`,
           date: now.toLocaleDateString('id-ID'),
           createdAt: now.toISOString(),
           itemId: item.id,
           itemName: item.name,
-          systemStock: item.stock,
+          systemStock: mainStock,
           actualStock,
-          difference: actualStock - item.stock,
+          difference: actualStock - mainStock,
           notes: `Edit massal stok (${change > 0 ? '+' : ''}${change})`,
           status: 'SELESAI',
         };
@@ -579,6 +601,11 @@ const MasterData: React.FC<MasterDataProps> = ({
           <button onClick={handleExport} className="flex items-center gap-2 p-3 bg-blue-50 border border-blue-300 rounded-xl text-blue-700 hover:bg-blue-100 transition-all shadow-sm active:scale-95" title="Export Excel">
             <FileSpreadsheet size={18}/><span className="hidden lg:block text-[11px] font-bold uppercase">Export</span>
           </button>
+          {isFullMode && (
+            <button onClick={() => (selectedItemIds.length > 0 ? setShowLabels(true) : alert('Centang barang yang akan dicetak labelnya.'))} className="flex items-center gap-2 p-3 bg-violet-50 border border-violet-300 rounded-xl text-violet-700 hover:bg-violet-100 transition-all shadow-sm active:scale-95" title="Cetak label barcode">
+              <Barcode size={18}/><span className="hidden lg:block text-[11px] font-bold uppercase">Label{selectedItemIds.length > 0 ? ` (${selectedItemIds.length})` : ''}</span>
+            </button>
+          )}
           {canEdit && selectedItemIds.length > 0 && (
             <button 
               onClick={() => setIsBulkEditModalOpen(true)}
@@ -667,7 +694,7 @@ const MasterData: React.FC<MasterDataProps> = ({
               {currentItems.map((item) => (
                 <tr key={item.id} className={`hover:bg-blue-50/40 transition-colors group ${selectedItemIds.includes(item.id) ? 'bg-blue-50/60' : ''}`}>
                   <td className="px-6 py-5 border-r border-slate-100">
-                    <button onClick={() => toggleItemSelection(item.id)} className="text-slate-300 hover:text-blue-600 transition-colors">
+                    <button onClick={() => toggleItemSelection(item.id)} aria-label={`Pilih ${item.name}`} aria-pressed={selectedItemIds.includes(item.id)} className="text-slate-300 hover:text-blue-600 transition-colors">
                       {selectedItemIds.includes(item.id) ? <CheckSquare size={20} className="text-blue-600"/> : <Square size={20}/>}
                     </button>
                   </td>
@@ -685,6 +712,7 @@ const MasterData: React.FC<MasterDataProps> = ({
                         <div className="flex items-center gap-2 mb-1">
                           <div className="font-bold text-slate-900 text-base leading-tight truncate">{item.name}</div>
                           {item.isBundle && <span className="shrink-0 text-[8px] font-bold bg-orange-100 text-orange-600 px-1.5 py-0.5 rounded border border-orange-200 uppercase tracking-tight">Paket</span>}
+                          {item.trackSerial && <span className="shrink-0 text-[8px] font-bold bg-sky-100 text-sky-700 px-1.5 py-0.5 rounded border border-sky-200 uppercase tracking-tight">Serial</span>}
                         </div>
                         <div className="flex items-center gap-2 overflow-hidden">
                            <span className="shrink-0 text-[10px] font-bold text-white uppercase tracking-wider bg-slate-800 px-2 py-0.5 rounded shadow-sm">CODE: {item.code}</span>
@@ -721,7 +749,7 @@ const MasterData: React.FC<MasterDataProps> = ({
                      })()}
                   </td>
                   <td className="px-8 py-5 text-right border-r border-slate-100">
-                    {(() => {
+                    {item.itemType === 'JASA' ? <div className="text-xs font-bold text-amber-700 bg-amber-50 border border-amber-200 rounded-full px-2 py-1 inline-block">JASA</div> : (() => {
                       const stock = getAvailableStock(item, items);
                       return (
                         <>
@@ -901,6 +929,7 @@ const MasterData: React.FC<MasterDataProps> = ({
                               <span className="bg-emerald-600 text-white px-3 py-1 rounded-lg text-[10px] font-bold uppercase tracking-widest shadow-sm">Level {(contact as Customer).level}</span>
                               <div className={`font-bold text-base tracking-tighter ${(contact as Customer).currentDebt > 0 ? 'text-red-600' : 'text-slate-900'}`}>Piutang: Rp {(contact as Customer).currentDebt.toLocaleString('id-ID')}</div>
                               <div className="text-[10px] font-bold text-slate-500 uppercase tracking-tighter">Limit: Rp {(contact as Customer).creditLimit.toLocaleString()}</div>
+                              {isFullMode && ((contact as Customer).depositBalance || 0) > 0 && <div className="text-[10px] font-bold text-emerald-700 uppercase tracking-tighter">Deposit: Rp {((contact as Customer).depositBalance || 0).toLocaleString('id-ID')}</div>}
                            </div>
                         </td>
                      )}
@@ -927,6 +956,9 @@ const MasterData: React.FC<MasterDataProps> = ({
     <div className="font-sans">
       {type === 'items' && renderItemsTable()}
       {type === 'contacts' && renderContactsTable()}
+      {showLabels && (
+        <BarcodeLabelModal items={items.filter(item => selectedItemIds.includes(item.id))} costCipher={appSettings?.costCipher} onClose={() => setShowLabels(false)} />
+      )}
       
       {isModalOpen && (
         <div className="fixed inset-0 bg-slate-900/70 backdrop-blur-xl z-[150] flex items-center justify-center p-0 md:p-6 overflow-hidden">
@@ -945,9 +977,38 @@ const MasterData: React.FC<MasterDataProps> = ({
                       <label className="text-[11px] font-bold text-slate-700 uppercase tracking-widest block mb-4">Tipe Produk</label>
                       <div className="flex bg-slate-200 p-1 rounded-2xl">
                          <button type="button" onClick={() => setNewItem(prev => ({ ...prev, isBundle: false, components: [] }))} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-xs transition-all ${!newItem.isBundle ? 'bg-white text-blue-700 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}><Package size={16}/> REGULER</button>
-                         <button type="button" onClick={() => setNewItem(prev => ({ ...prev, isBundle: true }))} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-xs transition-all ${newItem.isBundle ? 'bg-white text-orange-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}><Box size={16}/> PAKET / BUNDLE</button>
+                         <button type="button" onClick={() => setNewItem(prev => ({ ...prev, isBundle: true, itemType: 'BARANG' }))} className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl font-bold text-xs transition-all ${newItem.isBundle ? 'bg-white text-orange-600 shadow-md' : 'text-slate-500 hover:text-slate-700'}`}><Box size={16}/> PAKET / BUNDLE</button>
                       </div>
                    </div>
+
+                   {isFullMode && (
+                     <div className="p-6 bg-indigo-50/60 border-2 border-indigo-100 rounded-3xl space-y-4">
+                       <p className="text-[11px] font-bold text-indigo-800 uppercase tracking-widest">Mode Lengkap</p>
+                       {!newItem.isBundle && (
+                         <div className="flex bg-indigo-100 p-1 rounded-2xl">
+                           <button type="button" onClick={() => setNewItem(prev => ({ ...prev, itemType: 'BARANG' }))} className={`flex-1 py-2.5 rounded-xl font-bold text-xs ${newItem.itemType !== 'JASA' ? 'bg-white text-indigo-700 shadow' : 'text-indigo-500'}`}>BARANG (ada stok)</button>
+                           <button type="button" onClick={() => setNewItem(prev => ({ ...prev, itemType: 'JASA', trackSerial: false, stock: 0 }))} className={`flex-1 py-2.5 rounded-xl font-bold text-xs ${newItem.itemType === 'JASA' ? 'bg-white text-amber-700 shadow' : 'text-indigo-500'}`}>JASA / ONGKOS (tanpa stok)</button>
+                         </div>
+                       )}
+                       <div className="grid grid-cols-2 gap-3">
+                         <label className="text-[11px] font-bold text-slate-600 block">Komisi mekanik (%)
+                           <input type="number" min={0} max={100} className="mt-1 w-full p-3 bg-white border border-slate-300 rounded-xl font-bold" value={newItem.commissionPercent || ''} onChange={e => setNewItem({ ...newItem, commissionPercent: Math.min(100, Math.max(0, Number(e.target.value) || 0)) })} />
+                         </label>
+                         <label className="text-[11px] font-bold text-slate-600 block">atau Komisi Rp / satuan
+                           <input type="number" min={0} className="mt-1 w-full p-3 bg-white border border-slate-300 rounded-xl font-bold" value={newItem.commissionAmount || ''} onChange={e => setNewItem({ ...newItem, commissionAmount: Math.max(0, Number(e.target.value) || 0) })} />
+                         </label>
+                         {newItem.itemType !== 'JASA' && (
+                           <label className="flex items-center gap-2 text-xs font-bold text-slate-700 col-span-2 md:col-span-1">
+                             <input type="checkbox" checked={newItem.trackSerial} onChange={e => setNewItem({ ...newItem, trackSerial: e.target.checked })} /> Wajib nomor seri saat dijual
+                           </label>
+                         )}
+                         <label className="text-[11px] font-bold text-slate-600 block col-span-2 md:col-span-1">Garansi (hari)
+                           <input type="number" min={0} className="mt-1 w-full p-3 bg-white border border-slate-300 rounded-xl font-bold" value={newItem.warrantyDays || ''} onChange={e => setNewItem({ ...newItem, warrantyDays: Math.max(0, Math.round(Number(e.target.value) || 0)) })} />
+                         </label>
+                       </div>
+                       <p className="text-[10px] text-slate-500">Komisi rupiah dipakai jika diisi; jika kosong, jasa memakai komisi default mekanik.</p>
+                     </div>
+                   )}
 
                    <div className="space-y-6">
                       <div className="col-span-2">
@@ -1067,7 +1128,7 @@ const MasterData: React.FC<MasterDataProps> = ({
                         </div>
                         <div className="col-span-2 md:col-span-1">
                            <label className="text-[11px] font-bold text-blue-700 uppercase tracking-widest block mb-2">{editingId ? 'Stok Saat Ini' : 'Stok Awal'}</label>
-                           <input type="number" min={0} disabled={!!editingId || newItem.isBundle} className={`w-full border border-slate-300 rounded-2xl p-4 font-bold outline-none focus:border-blue-500 ${editingId || newItem.isBundle ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white text-slate-900'}`} value={editingId ? (items.find(i => i.id === editingId)?.stock ?? newItem.stock) : newItem.isBundle ? 0 : newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
+                           <input type="number" min={0} disabled={!!editingId || newItem.isBundle || newItem.itemType === 'JASA'} className={`w-full border border-slate-300 rounded-2xl p-4 font-bold outline-none focus:border-blue-500 ${editingId || newItem.isBundle ? 'bg-slate-100 text-slate-500 cursor-not-allowed' : 'bg-white text-slate-900'}`} value={editingId ? (items.find(i => i.id === editingId)?.stock ?? newItem.stock) : newItem.isBundle ? 0 : newItem.stock} onChange={e => setNewItem({...newItem, stock: parseInt(e.target.value) || 0})} />
                            {newItem.isBundle
                              ? <p className="text-[10px] text-slate-500 mt-1">Stok paket dihitung otomatis dari stok komponen. Saat paket terjual, stok komponen yang berkurang.</p>
                              : editingId && <p className="text-[10px] text-slate-500 mt-1">Ubah stok lewat menu Stok Opname agar tercatat di kartu stok.</p>}

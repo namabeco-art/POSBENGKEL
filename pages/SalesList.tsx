@@ -20,6 +20,7 @@ import {
 import { Sale, StoreProfile } from '../types';
 import { printReceipt } from '../services/printService';
 import { describeSaleLine } from '../services/pricing';
+import { describeSalePayments, saleUsesPaymentType } from '../services/salePayments';
 
 interface SalesListProps {
   sales: Sale[];
@@ -43,7 +44,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, storeProfile, onInitiateRe
     return sales.filter(s => {
       const matchesSearch = s.invoiceNo.toLowerCase().includes(searchTerm.toLowerCase()) || 
                            s.customerName.toLowerCase().includes(searchTerm.toLowerCase());
-      const matchesFilter = filterType === 'SEMUA' || s.paymentType === filterType;
+      const matchesFilter = filterType === 'SEMUA' || saleUsesPaymentType(s, filterType as 'TUNAI' | 'NON-TUNAI' | 'KREDIT');
       
       // Date filter logic
       let matchesDate = true;
@@ -206,7 +207,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, storeProfile, onInitiateRe
                   </td>
                   <td className="px-5 md:px-8 py-4 md:py-5">
                     <div className="font-black text-slate-800 uppercase tracking-tight text-[10px] md:text-sm truncate max-w-[100px] md:max-w-none">{sale.customerName}</div>
-                    <div className="md:hidden text-[8px] font-black text-blue-500 uppercase mt-0.5">{sale.paymentType}</div>
+                    <div className="md:hidden text-[8px] font-black text-blue-500 uppercase mt-0.5">{describeSalePayments(sale)}</div>
                   </td>
                   <td className="px-5 md:px-8 py-4 md:py-5 text-right">
                     <div className={`font-black text-xs md:text-base tracking-tighter ${sale.status === 'VOID' ? 'text-slate-400 line-through' : 'text-slate-900'}`}>Rp {sale.total.toLocaleString('id-ID')}</div>
@@ -217,7 +218,7 @@ const SalesList: React.FC<SalesListProps> = ({ sales, storeProfile, onInitiateRe
                          sale.paymentType === 'TUNAI' ? 'bg-emerald-50 text-emerald-600 border-emerald-100' : 'bg-blue-50 text-blue-600 border-blue-100'
                        }`}>
                          {sale.paymentType === 'TUNAI' ? <Banknote size={12}/> : <CreditCard size={12}/>}
-                         {sale.paymentMethod || sale.paymentType}
+                         {describeSalePayments(sale)}
                        </span>
                     </div>
                   </td>
@@ -283,8 +284,9 @@ const SalesList: React.FC<SalesListProps> = ({ sales, storeProfile, onInitiateRe
                     <div className="bg-slate-50 p-5 md:p-6 rounded-[1.5rem] md:rounded-3xl border border-slate-200 space-y-2 md:space-y-3">
                        <div className="text-[8px] md:text-[9px] font-black text-slate-400 uppercase tracking-widest flex items-center gap-2"><CreditCard size={12}/> Metode Bayar</div>
                        <div className="font-black text-slate-800 text-sm md:text-lg uppercase leading-tight flex items-center gap-2">
-                         {selectedSale.paymentType} 
-                         {selectedSale.paymentMethod && <span className="text-[10px] md:text-xs font-bold text-blue-500">({selectedSale.paymentMethod})</span>}
+                         {selectedSale.payments?.length
+                           ? <span className="text-sm md:text-base">{selectedSale.payments.map(payment => `${payment.method} Rp ${payment.amount.toLocaleString('id-ID')}`).join(' + ')}</span>
+                           : <>{selectedSale.paymentType} {selectedSale.paymentMethod && <span className="text-[10px] md:text-xs font-bold text-blue-500">({selectedSale.paymentMethod})</span>}</>}
                        </div>
                        <div className="flex items-center justify-between pt-2 border-t border-slate-200/50">
                           <span className="text-[8px] md:text-[9px] font-bold text-slate-400 uppercase">Diterima</span>

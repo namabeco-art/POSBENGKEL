@@ -4,6 +4,7 @@ import { Calculator, BookOpen, Receipt, ArrowUpRight, ArrowDownLeft, Plus, X, La
 import KasHarian from '../components/KasHarian';
 import LaporanPajak from '../components/LaporanPajak';
 import { createId } from '../services/idService';
+import { getSaleCashAmount } from '../services/salePayments';
 
 interface AccountingProps {
   accounts: Account[];
@@ -24,8 +25,8 @@ const Accounting: React.FC<AccountingProps> = ({ accounts, sales = [], cashSessi
   // Calculate today's cash sales for KasHarian
   const todayCashData = useMemo(() => {
     const today = new Date().toLocaleDateString('id-ID');
-    const todaySales = sales.filter(s => s.date.startsWith(today) && s.paymentType === 'TUNAI');
-    const salesCashToday = todaySales.reduce((sum, s) => sum + s.total, 0);
+    const todaySales = sales.filter(s => s.date.startsWith(today));
+    const salesCashToday = todaySales.reduce((sum, s) => sum + getSaleCashAmount(s), 0);
     const openSession = cashSessions.find(cs => cs.status === 'OPEN' && cs.userId === currentUser.id);
     const openingCash = openSession?.openingCash || 0;
     return { openingCash, salesCashToday };

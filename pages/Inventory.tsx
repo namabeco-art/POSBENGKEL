@@ -8,6 +8,10 @@ import {
 import { Item, InventoryMovement } from '../types';
 import { createId } from '../services/idService';
 import { downloadCsv, findColumn, parseCsv } from '../services/csv';
+import { DEFAULT_WAREHOUSE_ID, getWarehouseStock } from '../services/warehouses';
+
+/** Opname menghitung stok fisik di gudang utama (gudang lain diatur lewat Transfer Stok). */
+const mainStock = (item: Item) => getWarehouseStock(item, DEFAULT_WAREHOUSE_ID);
 
 interface InventoryProps {
   items: Item[];
@@ -50,7 +54,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
     return Object.values(groups);
   }, [logs]);
 
-  const filteredItems = useMemo(() => items.filter(i => !i.isBundle).filter(i =>
+  const filteredItems = useMemo(() => items.filter(i => !i.isBundle && i.itemType !== 'JASA').filter(i =>
     i.name.toLowerCase().includes(searchTerm.toLowerCase()) ||  
     i.code.toLowerCase().includes(searchTerm.toLowerCase()) ||
     i.barcode.includes(searchTerm)
@@ -109,7 +113,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
     // Semua barang, agar petugas gudang tinggal mengisi kolom Stok Fisik.
     downloadCsv(`template_opname_${new Date().toISOString().slice(0, 10)}.csv`, [
       ['Kode Barang', 'Barcode', 'Nama Barang', 'Stok Sistem', 'Stok Fisik'],
-      ...items.filter(i => !i.isBundle).map(i => [i.code, i.barcode, i.name, i.stock, '']),
+      ...items.filter(i => !i.isBundle && i.itemType !== 'JASA').map(i => [i.code, i.barcode, i.name, mainStock(i), '']),
     ]);
   };
 
@@ -141,16 +145,16 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
         const item = items.find(i => (code && i.code === code) || (barcode && i.barcode === barcode));
         if (!item) { errors.push(`Baris ${index + 2}: barang ${code || barcode} tidak ditemukan`); return; }
         if (!Number.isFinite(physical) || physical < 0) { errors.push(`Baris ${index + 2}: stok fisik "${rawPhysical}" tidak valid`); return; }
-        if (physical === item.stock) return;
+        if (physical === mainStock(item)) return;
         logs.push({
           id: `${batchId}-${logs.length + 1}`,
           date: now.toLocaleDateString('id-ID'),
           createdAt: now.toISOString(),
           itemId: item.id,
           itemName: item.name,
-          systemStock: item.stock,
+          systemStock: mainStock(item),
           actualStock: physical,
-          difference: physical - item.stock,
+          difference: physical - mainStock(item),
           notes: `Opname massal (${file.name})`,
           status: 'SELESAI',
         });
@@ -178,14 +182,14 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
   const handleSubmitOpname = (e: React.FormEvent) => {
     e.preventDefault();
     if (!selectedItem) return;
-    const diff = physicalStock - selectedItem.stock;
+    const diff = physicalStock - mainStock(selectedItem);
     onAdjustStock({
       id: createId('SO'),
       date: new Date().toLocaleDateString('id-ID'),
       createdAt: new Date().toISOString(),
       itemId: selectedItem.id,
       itemName: selectedItem.name,
-      systemStock: selectedItem.stock,
+      systemStock: mainStock(selectedItem),
       actualStock: physicalStock,
       difference: diff,
       notes: notes,
@@ -379,7 +383,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
                                  </div>
                                  <div className="text-right shrink-0">
                                     <div className="text-[7px] font-black text-slate-300 uppercase">SYS STOK</div>
-                                    <div className="font-black text-blue-700 text-base">{item.stock}</div>
+                                    <div className="font-black text-blue-700 text-base">{mainStock(item)}</div>
                                  </div>
                               </button>
                             ))}
@@ -392,7 +396,7 @@ const Inventory: React.FC<InventoryProps> = ({ items, logs, movements = [], onAd
                                <img src={selectedItem.imageUrl} className="w-14 h-14 rounded-2xl object-cover border-2 border-white shadow-md" />
                                <div className="min-w-0">
                                   <div className="font-black text-blue-900 uppercase text-xs leading-tight truncate">{selectedItem.name}</div>
-                                  <div className="text-[9px] font-bold text-blue-500 uppercase tracking-widest mt-1">Sistem: {selectedItem.stock} UNIT</div>
+                                  <div className="text-[9px] font-bold text-blue-500 uppercase tracking-widest mt-1">Sistem: {mainStock(selectedItem)} UNIT</div>
                                </div>
                             </div>
                             <button type="button" onClick={() => setSelectedItem(null)} className="text-blue-500 font-black text-[10px] uppercase hover:underline shrink-0">Ganti</button>

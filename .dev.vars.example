@@ -1,0 +1,4 @@
+# Salin menjadi .dev.vars untuk menjalankan backend Cloudflare secara lokal (npm run dev).
+SETUP_KEY=dev-setup-key
+MEDIA_SIGNING_SECRET=dev-media-signing-secret-change-me
+# OPENROUTER_API_KEY=
